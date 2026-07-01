@@ -1,0 +1,29 @@
+[package]
+name = "wta"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Run parallel AI coding agents in isolated git worktrees + persistent tmux sessions, from one TUI dashboard"
+license = "MIT"
+repository = "https://github.com/zakrad/wta"
+keywords = ["tmux", "git-worktree", "ai", "agents", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+
+[[bin]]
+name = "wta"
+path = "src/main.rs"
+
+[dependencies]
+ratatui     = "0.29"
+crossterm   = "0.28"
+clap        = { version = "4", features = ["derive"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+anyhow      = "1"
+base64      = "0.22"
+dirs        = "5"
+
+[profile.release]
+strip = true
+lto = true

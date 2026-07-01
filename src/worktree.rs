@@ -1,0 +1,219 @@
+use anyhow::{bail, Context, Result};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::{status, tmux};
+
+pub struct Worktree {
+    pub task: String,
+    pub path: PathBuf,
+    pub branch: String,
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+fn worktree_subdir() -> String {
+    env_or("WTA_WORKTREE_DIR", ".agents")
+}
+fn agent_cmd() -> String {
+    env_or("WTA_AGENT_CMD", "claude")
+}
+fn context_files() -> Vec<String> {
+    env_or("WTA_CONTEXT_FILES", "CLAUDE.local.md .env .env.local .mcp.json")
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
+    let mut c = Command::new("git");
+    c.args(args);
+    if let Some(d) = cwd {
+        c.current_dir(d);
+    }
+    let out = c.output().context("failed to spawn git")?;
+    if !out.status.success() {
+        bail!("git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+pub fn repo_root() -> Result<PathBuf> {
+    let out = run_git(&["rev-parse", "--show-toplevel"], None).context("not inside a git repo")?;
+    Ok(PathBuf::from(out.trim()))
+}
+
+pub fn base_branch(root: &Path) -> String {
+    for b in ["main", "master"] {
+        if run_git(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{b}")], Some(root)).is_ok() {
+            return b.to_string();
+        }
+    }
+    "HEAD".to_string()
+}
+
+fn worktrees_dir(root: &Path) -> PathBuf {
+    root.join(worktree_subdir())
+}
+fn branch_name(task: &str) -> String {
+    format!("agent/{task}")
+}
+
+/// Create the worktree + copy context + optional setup, returning the worktree path.
+fn make_worktree(task: &str) -> Result<(PathBuf, PathBuf)> {
+    let root = repo_root()?;
+    let branch = branch_name(task);
+    let wt = worktrees_dir(&root).join(task);
+    if wt.exists() {
+        bail!("worktree already exists: {}", wt.display());
+    }
+    let wt_str = wt.to_string_lossy().into_owned();
+
+    let branch_exists =
+        run_git(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")], Some(&root)).is_ok();
+    if branch_exists {
+        run_git(&["worktree", "add", &wt_str, &branch], Some(&root))?;
+    } else {
+        run_git(&["worktree", "add", "-b", &branch, &wt_str], Some(&root))?;
+    }
+
+    for name in context_files() {
+        let src = root.join(&name);
+        if src.exists() {
+            let dst = wt.join(&name);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            if src.is_dir() {
+                Command::new("cp").args(["-R"]).arg(&src).arg(&dst).status().ok();
+            } else {
+                std::fs::copy(&src, &dst).ok();
+            }
+            println!("  + context: {name}");
+        }
+    }
+
+    let setup = root.join(".wta/setup.sh");
+    if setup.exists() {
+        println!("  running .wta/setup.sh ...");
+        let _ = Command::new("bash").arg(&setup).current_dir(&wt).env("WTA_TASK", task).env("WTA_ROOT", &root).status();
+    }
+    Ok((root, wt))
+}
+
+pub fn new(task: &str, agent_args: &[String]) -> Result<()> {
+    let (_root, wt) = make_worktree(task)?;
+    let wt_str = wt.to_string_lossy().into_owned();
+    let session = tmux::session_name(task);
+    tmux::new_session(&session, &wt, &agent_cmd(), agent_args)?;
+    let _ = status::record(task, "running", &wt_str);
+    println!("started agent '{task}' in tmux session {session}");
+    println!("  open it: wta dash   (or: wta attach {task})");
+    Ok(())
+}
+
+/// Re-spawn an agent's session in its EXISTING worktree (its session died).
+pub fn resume_at(task: &str, wt: &Path) -> Result<()> {
+    if !wt.exists() {
+        bail!("no worktree at {} to resume", wt.display());
+    }
+    let session = tmux::session_name(task);
+    tmux::new_session(&session, wt, &agent_cmd(), &[])?;
+    let _ = status::record(task, "running", &wt.to_string_lossy());
+    Ok(())
+}
+
+fn diffstat(path: &Path, base: &str) -> String {
+    let mb = match run_git(&["merge-base", "HEAD", base], Some(path)) {
+        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return "—".to_string(),
+    };
+    match run_git(&["diff", "--shortstat", &mb], Some(path)) {
+        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => "clean".to_string(),
+    }
+}
+
+pub fn list_managed() -> Result<Vec<Worktree>> {
+    let root = repo_root()?;
+    let base_dir = worktrees_dir(&root);
+    let out = run_git(&["worktree", "list", "--porcelain"], Some(&root))?;
+    let mut result = Vec::new();
+    let mut cur_path: Option<PathBuf> = None;
+    let mut cur_branch = String::new();
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            if let Some(p) = cur_path.take() {
+                push_if_managed(&mut result, &base_dir, p, std::mem::take(&mut cur_branch));
+            }
+            cur_path = Some(PathBuf::from(rest));
+            cur_branch.clear();
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            cur_branch = rest.trim_start_matches("refs/heads/").to_string();
+        }
+    }
+    if let Some(p) = cur_path.take() {
+        push_if_managed(&mut result, &base_dir, p, cur_branch);
+    }
+    result.sort_by(|a, b| a.task.cmp(&b.task));
+    Ok(result)
+}
+
+fn push_if_managed(out: &mut Vec<Worktree>, base_dir: &Path, path: PathBuf, branch: String) {
+    if path.starts_with(base_dir) {
+        let task = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        out.push(Worktree { task, path, branch });
+    }
+}
+
+pub fn ls() -> Result<()> {
+    let root = repo_root()?;
+    let base = base_branch(&root);
+    let managed = list_managed()?;
+    if managed.is_empty() {
+        println!("no agents (create one with: wta new <task>)");
+        return Ok(());
+    }
+    println!("{:<20} {:<9} {:<22} CHANGES vs {}", "TASK", "STATE", "BRANCH", base);
+    for w in managed {
+        let alive = if tmux::has_session(&tmux::session_name(&w.task)) { "running" } else { "exited" };
+        println!("{:<20} {:<9} {:<22} {}", w.task, alive, w.branch, diffstat(&w.path, &base));
+    }
+    Ok(())
+}
+
+pub fn rm(task: &str, force: bool) -> Result<()> {
+    let root = repo_root()?;
+    let branch = branch_name(task);
+    let wt = worktrees_dir(&root).join(task);
+    let wt_str = wt.to_string_lossy().into_owned();
+
+    let _ = tmux::kill(&tmux::session_name(task));
+
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(&wt_str);
+    run_git(&args, Some(&root)).context("worktree dirty? re-run with --force to discard")?;
+
+    let flag = if force { "-D" } else { "-d" };
+    if run_git(&["branch", flag, &branch], Some(&root)).is_err() {
+        println!("note: branch {branch} not deleted (unmerged — use `git branch -D {branch}` to force)");
+    }
+    if let Ok(p) = status::state_path(task) {
+        let _ = std::fs::remove_file(p);
+    }
+    println!("removed agent '{task}'");
+    Ok(())
+}
+
+/// Attach to an agent's session in the foreground (blocks until detach).
+pub fn attach(task: &str) -> Result<()> {
+    let session = tmux::session_name(task);
+    if !tmux::has_session(&session) {
+        bail!("no running session for '{task}' — start it with `wta new {task}` or resume from `wta dash`");
+    }
+    tmux::attach_blocking(&session)
+}
