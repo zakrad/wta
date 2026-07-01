@@ -18,7 +18,7 @@ pub enum Command {
     },
     /// List wta-managed agents (worktrees) with diffstat vs the base branch
     Ls,
-    /// Attach to an agent's tmux session in the foreground (Ctrl-b d to detach)
+    /// Attach to an agent's tmux session in the foreground (Ctrl-q to detach)
     Attach { task: String },
     /// Kill the agent's pane(s), remove its worktree and branch
     Rm {

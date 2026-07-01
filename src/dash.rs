@@ -18,17 +18,18 @@ use ratatui::{Frame, Terminal};
 
 use crate::{status, tmux, worktree};
 
-// ---- green/black palette ----
-const GREEN: Color = Color::Rgb(0x4e, 0xc9, 0x6a);
-const GREEN_BRIGHT: Color = Color::Rgb(0x8b, 0xf7, 0xa8);
-const GREEN_SOFT: Color = Color::Rgb(0x9c, 0xc7, 0xa4);
-const SEL_BG: Color = GREEN;
-const SEL_FG: Color = Color::Rgb(0x06, 0x12, 0x0a);
-const HL: Color = GREEN;
-const ADD: Color = GREEN_BRIGHT;
-const DEL: Color = Color::Rgb(0xe0, 0x5a, 0x4a);
-const RED: Color = Color::Rgb(0xe0, 0x5a, 0x4a);
-const HUNK: Color = Color::Rgb(0x3f, 0x9e, 0x74);
+// ---- palette: ANSI-indexed so it maps through the terminal theme exactly like
+// tmux does (green = ANSI 2, bright green = ANSI 10). No hardcoded hex. ----
+const GREEN: Color = Color::Green;
+const GREEN_BRIGHT: Color = Color::LightGreen;
+const GREEN_SOFT: Color = Color::Green;
+const SEL_BG: Color = Color::Green;
+const SEL_FG: Color = Color::Black;
+const HL: Color = Color::Green;
+const ADD: Color = Color::LightGreen;
+const DEL: Color = Color::Red;
+const RED: Color = Color::Red;
+const HUNK: Color = Color::Green;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -51,6 +52,7 @@ enum Modal {
     NewTask(String),
     Confirm(String),
     Resume(String),
+    Help,
 }
 
 struct Row {
@@ -75,6 +77,7 @@ struct App {
     spin: usize,
     err: Option<(String, Instant)>,
     attach: Option<String>, // session to attach to after this frame
+    scroll: u16,            // preview/diff scroll offset
 }
 
 impl App {
@@ -90,6 +93,7 @@ impl App {
             spin: 0,
             err: None,
             attach: None,
+            scroll: 0,
         }
     }
     fn selected(&self) -> Option<&Row> {
@@ -223,26 +227,49 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
+        Modal::Help => {
+            app.modal = Modal::None;
+            return Ok(false);
+        }
         Modal::None => {}
+    }
+
+    // Shift+Up/Down scroll the preview/diff pane.
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        match key.code {
+            KeyCode::Up => {
+                app.scroll = app.scroll.saturating_sub(1);
+                return Ok(false);
+            }
+            KeyCode::Down => {
+                app.scroll = app.scroll.saturating_add(1);
+                return Ok(false);
+            }
+            _ => {}
+        }
     }
 
     match key.code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+        KeyCode::Char('?') => app.modal = Modal::Help,
         KeyCode::Char('j') | KeyCode::Down => {
             if !app.rows.is_empty() {
                 app.sel = (app.sel + 1) % app.rows.len();
+                app.scroll = 0;
                 load_detail(app);
             }
         }
         KeyCode::Char('k') | KeyCode::Up => {
             if !app.rows.is_empty() {
                 app.sel = (app.sel + app.rows.len() - 1) % app.rows.len();
+                app.scroll = 0;
                 load_detail(app);
             }
         }
         KeyCode::Tab => {
             app.tab = if app.tab == Tab::Preview { Tab::Diff } else { Tab::Preview };
+            app.scroll = 0;
             load_detail(app);
         }
         KeyCode::Enter | KeyCode::Char('o') => match app.selected() {
@@ -502,11 +529,16 @@ fn render_right(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(tabs, parts[0]);
 
     let body_h = parts[1].height as usize;
-    let content: Vec<Line> = match app.tab {
-        Tab::Preview => tail_lines(&app.preview, body_h)
-            .into_iter()
-            .map(|l| Line::styled(l.to_string(), Style::default().fg(GREEN_SOFT)))
-            .collect(),
+    let (content, scroll): (Vec<Line>, u16) = match app.tab {
+        // Preview is a live tail (latest output pinned to the bottom); no scroll.
+        Tab::Preview => (
+            tail_lines(&app.preview, body_h)
+                .into_iter()
+                .map(|l| Line::styled(l.to_string(), Style::default().fg(GREEN_SOFT)))
+                .collect(),
+            0,
+        ),
+        // Diff renders in full and is scrollable with Shift+↑/↓.
         Tab::Diff => {
             let (a, d) = app.selected().map(|r| (r.added, r.removed)).unwrap_or((0, 0));
             let mut lines = vec![Line::from(vec![
@@ -514,13 +546,13 @@ fn render_right(f: &mut Frame, app: &App, area: Rect) {
                 Span::raw("  "),
                 Span::styled(format!("{d} deletions(-)"), Style::default().fg(DEL)),
             ])];
-            for l in app.diff_text.lines().take(body_h.saturating_sub(1)) {
+            for l in app.diff_text.lines() {
                 lines.push(colorize_diff_line(l));
             }
-            lines
+            (lines, app.scroll)
         }
     };
-    f.render_widget(Paragraph::new(content), parts[1]);
+    f.render_widget(Paragraph::new(content).scroll((scroll, 0)), parts[1]);
 }
 
 fn colorize_diff_line(l: &str) -> Line<'static> {
@@ -551,8 +583,8 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("n", action), Span::styled(" new  ", muted),
             Span::styled("D", action), Span::styled(" kill  │  ", muted),
             Span::styled(fkey, action), Span::styled(flabel, muted),
-            Span::styled("tab", action), Span::styled(" switch  │  ", muted),
-            Span::styled("j/k", action), Span::styled(" move  ", muted),
+            Span::styled("tab", action), Span::styled(" switch  ", muted),
+            Span::styled("?", action), Span::styled(" help  ", muted),
             Span::styled("q", action), Span::styled(" quit", muted),
         ]
     };
@@ -610,6 +642,34 @@ fn render_modal(f: &mut Frame, app: &App) {
             ];
             f.render_widget(
                 Paragraph::new(body).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(HL)).title(" resume ")),
+                area,
+            );
+        }
+        Modal::Help => {
+            let area = centered(52, 16, f.area());
+            f.render_widget(Clear, area);
+            let k = |key: &str, desc: &str| {
+                Line::from(vec![
+                    Span::styled(format!("  {key:<10}"), Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+                    Span::styled(desc.to_string(), Style::default().fg(Color::Gray)),
+                ])
+            };
+            let body = vec![
+                k("j / k", "move up / down"),
+                k("↵ / o", "attach into the agent (type here)"),
+                k("Ctrl-q", "detach back to wta (while attached)"),
+                k("tab", "switch Preview / Diff"),
+                k("Shift+↑↓", "scroll the Diff"),
+                k("n", "new agent"),
+                k("D", "kill agent"),
+                k("r", "refresh"),
+                k("q", "quit"),
+                Line::from(""),
+                Line::styled("  agents run in tmux and survive closing", Style::default().fg(Color::DarkGray)),
+                Line::styled("  the terminal. press any key to close.", Style::default().fg(Color::DarkGray)),
+            ];
+            f.render_widget(
+                Paragraph::new(body).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(HL)).title(" wta — keys ")),
                 area,
             );
         }

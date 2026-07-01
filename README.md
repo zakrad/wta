@@ -39,7 +39,7 @@ cargo build --release && cp target/release/wta ~/.local/bin/
 ```
 wta new <task> [-- <agent args>]   worktree + branch agent/<task>, copy context, start agent in tmux
 wta ls                             list agents with live state + diffstat
-wta attach <task>                  attach to an agent's tmux session (Ctrl-b d to detach)
+wta attach <task>                  attach to an agent's tmux session (Ctrl-q to detach)
 wta rm <task> [--force]            kill the session, remove worktree + branch
 wta dash                           the live dashboard (below)
 wta status <state>                 emit status (for Claude Code hooks; optional)
@@ -56,10 +56,15 @@ with add/del counts) tabs.
 |---|---|
 | `j`/`k` or ↑/↓ | move selection |
 | `Tab` | switch Preview / Diff |
-| `Enter` / `o` | **attach** to the agent inline (Ctrl-b d detaches back to the board); on an exited agent, offers **resume** |
+| `Shift+↑`/`↓` | scroll the Diff |
+| `Enter` / `o` | **attach** to the agent inline (Ctrl-q detaches back to the board); on an exited agent, offers **resume** |
 | `n` | new agent (worktree + session) |
 | `D` | kill agent (confirm) |
-| `r` | refresh · `q` | quit |
+| `?` | help · `r` refresh · `q` quit |
+
+Agents run on a **dedicated tmux socket** (`tmux -L wta`) configured for a
+seamless attach — status bar off, mouse on, and `Ctrl-q` bound to detach — so it
+never interferes with your own tmux sessions and doesn't feel like raw tmux.
 
 **Status is live without any setup:** each tick captures the agent's tmux pane
 and hashes it — changed → `⠋ running`, unchanged → `● ready`, session gone but
@@ -80,7 +85,7 @@ Nothing here touches your shell or terminal config. To try it without risk:
 ```sh
 cd some-git-repo
 WTA_AGENT_CMD=bash wta new scratch     # a plain shell instead of a real agent
-wta dash                               # browse, Tab, Enter to attach, Ctrl-b d to detach
+wta dash                               # browse, Tab, Enter to attach, Ctrl-q to detach
 wta rm scratch --force                 # clean up (worktrees live in .agents/)
 ```
 
