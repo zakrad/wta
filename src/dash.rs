@@ -71,6 +71,10 @@ enum Modal {
         sel: usize,
     },
     Matrix(Vec<Line<'static>>),
+    QuickSend {
+        task: String,
+        text: String,
+    },
     Help,
 }
 
@@ -115,6 +119,10 @@ struct App {
     preview: String,
     diff_text: String,
     hashes: HashMap<String, u64>,
+    diffcache: HashMap<String, (u32, u32)>, // task -> (added, removed), cadence-refreshed
+    tick: u64,                              // refresh counter driving the diffstat cadence
+    trust_seen: HashMap<String, Instant>,   // session -> first time we saw it (trust grace)
+    trust_done: HashSet<String>,            // sessions whose trust prompt is handled/disarmed
     spin: usize,
     msg: Option<(String, bool, Instant)>, // (text, is_error, when)
     attach: Option<String>,               // session to attach to after this frame
@@ -131,6 +139,10 @@ impl App {
             preview: String::new(),
             diff_text: String::new(),
             hashes: HashMap::new(),
+            diffcache: HashMap::new(),
+            tick: 0,
+            trust_seen: HashMap::new(),
+            trust_done: HashSet::new(),
             spin: 0,
             msg: None,
             attach: None,
@@ -385,6 +397,37 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
+        Modal::QuickSend { task, text } => {
+            match key.code {
+                KeyCode::Enter => {
+                    let task = std::mem::take(task);
+                    let text = std::mem::take(text);
+                    app.modal = Modal::None;
+                    if !text.trim().is_empty() {
+                        let session = tmux::session_name(&task);
+                        if !tmux::has_session(&session) {
+                            app.set_err(format!("'{task}' is no longer running"));
+                        } else if !tmux::pane_is_idle(&session) {
+                            app.set_err(format!("'{task}' became busy — try again"));
+                        } else {
+                            match tmux::send_text(&session, &text) {
+                                Ok(_) => app.set_info(format!("sent → {task}")),
+                                Err(e) => app.set_err(e),
+                            }
+                        }
+                        refresh(app);
+                        load_detail(app);
+                    }
+                }
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => text.push(c),
+                _ => {}
+            }
+            return Ok(false);
+        }
         Modal::Matrix(_) | Modal::Help => {
             app.modal = Modal::None;
             return Ok(false);
@@ -498,6 +541,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('m') => match matrix_lines() {
             Ok(lines) => app.modal = Modal::Matrix(lines),
             Err(e) => app.set_err(e),
+        },
+        // quick-send one line to the selected agent, gated so we never inject
+        // into a busy/streaming pane (only when it's idle at its prompt = Ready).
+        KeyCode::Char('i') => match app.selected() {
+            Some(r) if !r.alive => app.set_err("no live session — resume with ↵"),
+            Some(r) if r.status == Status::Running => app.set_err("agent is working — wait for ● ready"),
+            Some(r) if r.status == Status::NeedsInput => app.set_err("agent needs input — attach (↵) to answer"),
+            Some(r) if r.status == Status::Ready => {
+                app.modal = Modal::QuickSend { task: r.task.clone(), text: String::new() }
+            }
+            _ => {}
         },
         KeyCode::Char('r') => {
             refresh(app);
@@ -691,6 +745,10 @@ fn refresh(app: &mut App) {
     });
 
     let prev_task = app.selected().map(|r| r.task.clone());
+    app.tick = app.tick.wrapping_add(1);
+    let full_sweep = app.tick % 5 == 0; // recompute all diffstats every ~5th tick (~3s)
+    let sel_task = prev_task.clone();
+    let auto_trust = std::env::var("WTA_AUTO_TRUST").map(|v| v != "0").unwrap_or(true);
 
     let mut rows = Vec::new();
     for task in order {
@@ -703,12 +761,39 @@ fn refresh(app: &mut App) {
                     .and_then(|p| git_in(p, &["rev-parse", "--abbrev-ref", "HEAD"]))
             })
             .unwrap_or_default();
-        let (added, removed) = path.as_deref().map(numstat).unwrap_or((0, 0));
+
+        // Heavy git diffstat runs only for the selected row each tick + all rows on
+        // a slower cadence (or when new). Keyed by task, so J/K reorder is safe.
+        let (added, removed) = match path.as_deref() {
+            Some(p) => {
+                let is_sel = sel_task.as_deref() == Some(task.as_str());
+                if full_sweep || is_sel || !app.diffcache.contains_key(&task) {
+                    let v = numstat(p);
+                    app.diffcache.insert(task.clone(), v);
+                    v
+                } else {
+                    app.diffcache.get(&task).copied().unwrap_or((0, 0))
+                }
+            }
+            None => (0, 0),
+        };
+
         let session = tmux::session_name(&task);
         let alive = tmux::has_session(&session);
 
         let status = if alive {
             let text = tmux::capture(&session).unwrap_or_default();
+            // Auto-dismiss Claude's per-folder trust prompt within a startup grace
+            // window (strict 3-string match, one-shot, opt out via WTA_AUTO_TRUST=0).
+            if auto_trust && !app.trust_done.contains(&session) {
+                let seen_at = *app.trust_seen.entry(session.clone()).or_insert_with(Instant::now);
+                if seen_at.elapsed() > Duration::from_secs(10) {
+                    app.trust_done.insert(session.clone()); // grace expired: disarm
+                } else if is_trust_prompt(&text) {
+                    let _ = tmux::send_enter(&session); // accept the default "Yes, proceed"
+                    app.trust_done.insert(session.clone()); // one-shot
+                }
+            }
             let h = hash_str(&text);
             let changed = app
                 .hashes
@@ -744,9 +829,21 @@ fn refresh(app: &mut App) {
         .unwrap_or(0)
         .min(app.rows.len().saturating_sub(1));
 
-    // drop status-hash entries for tasks that no longer exist (bounded memory)
+    // bounded memory: drop entries for tasks/sessions that no longer exist
     let current: HashSet<&String> = app.rows.iter().map(|r| &r.task).collect();
     app.hashes.retain(|k, _| current.contains(k));
+    app.diffcache.retain(|k, _| current.contains(k));
+    let live: HashSet<String> = app.rows.iter().map(|r| r.session.clone()).collect();
+    app.trust_seen.retain(|k, _| live.contains(k));
+    app.trust_done.retain(|k| live.contains(k));
+}
+
+/// Claude Code's per-folder trust dialog. Strict 3-string co-occurrence so normal
+/// agent output can't trip it (strings confirmed current: claude-code #6797/#9256).
+fn is_trust_prompt(text: &str) -> bool {
+    text.contains("Do you trust the files in this folder?")
+        && text.contains("Yes, proceed")
+        && text.contains("No, exit")
 }
 
 fn load_detail(app: &mut App) {
@@ -975,6 +1072,8 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" kill  │  ", muted),
             Span::styled(fkey, action),
             Span::styled(flabel, muted),
+            Span::styled("i", action),
+            Span::styled(" send  ", muted),
             Span::styled("p", action),
             Span::styled(" push  │  ", muted),
             Span::styled("tab", action),
@@ -1139,6 +1238,21 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::QuickSend { task, text } => {
+            let area = centered(64, 6, f.area());
+            f.render_widget(Clear, area);
+            f.render_widget(
+                Paragraph::new(format!("{text}▏"))
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(GREEN))
+                            .title(format!(" send to '{task}' (Enter sends, Esc cancels) ")),
+                    ),
+                area,
+            );
+        }
         Modal::Matrix(lines) => {
             let h = (lines.len() as u16 + 2).min(f.area().height);
             let w = 78u16.min(f.area().width);
@@ -1171,6 +1285,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("J / K", "reorder down / up"),
                 k("m", "mergeability matrix (conflict preview)"),
                 k("↵ / o", "attach into the agent (type here)"),
+                k("i", "send one line to the agent (when ● ready)"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("tab", "switch Preview / Diff"),
                 k("Shift+↑↓", "scroll Preview / Diff"),
@@ -1268,6 +1383,19 @@ mod tests {
         assert!(screen.contains("Preview") && screen.contains("Diff"));
         assert!(screen.contains("test result: ok"));
         assert!(screen.contains("attach"));
+    }
+
+    #[test]
+    fn trust_prompt_match_is_strict() {
+        // real dialog: all three strings present -> match
+        let dialog = "╭─ Do you trust the files in this folder?\n\
+             Claude Code may read, write, or execute files in this folder\n\
+             1. Yes, proceed\n 2. No, exit";
+        assert!(is_trust_prompt(dialog));
+        // normal agent output mentioning one phrase must NOT trip it
+        assert!(!is_trust_prompt("I'll proceed. Do you trust the files in this folder?"));
+        assert!(!is_trust_prompt("Yes, proceed with the refactor"));
+        assert!(!is_trust_prompt("running tests..."));
     }
 
     #[test]

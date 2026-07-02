@@ -5,6 +5,8 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread::sleep;
+use std::time::Duration;
 
 /// Which tmux server to use. Default is a dedicated socket ("wta") so wta is
 /// fully isolated from the user's own tmux. `WTA_TMUX_SOCKET=default` (or the
@@ -113,18 +115,87 @@ pub fn capture(name: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Type `text` into a session and submit it (literal text, then Enter).
-/// Used by the Telegram bridge to relay remote messages into an agent.
+/// Type literal `text` (the `-- ` ends flag parsing so a leading `-` is safe).
+fn send_literal(name: &str, text: &str) -> Result<()> {
+    let ok = tmux()
+        .args(["send-keys", "-t", name, "-l", "--", text])
+        .status()
+        .context("tmux send-keys -l failed")?
+        .success();
+    if !ok {
+        bail!("tmux send-keys -l failed for {name}");
+    }
+    Ok(())
+}
+
+/// Press Enter (a real CR — the literal word `Enter`, NOT `-l`).
+pub fn send_enter(name: &str) -> Result<()> {
+    let ok = tmux()
+        .args(["send-keys", "-t", name, "Enter"])
+        .status()
+        .context("tmux send-keys Enter failed")?
+        .success();
+    if !ok {
+        bail!("tmux send-keys Enter failed for {name}");
+    }
+    Ok(())
+}
+
+// collapse whitespace so pane wrapping/padding doesn't defeat a substring match
+fn norm(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Two captures a short interval apart are byte-identical => the pane isn't
+/// actively rendering (agent idle at its prompt). Used to gate quick-send.
+pub fn pane_is_idle(name: &str) -> bool {
+    let a = match capture(name) {
+        Some(s) => s,
+        None => return false,
+    };
+    sleep(Duration::from_millis(120));
+    match capture(name) {
+        Some(b) => a == b,
+        None => false,
+    }
+}
+
+/// Type `text` into a session and submit it, hardened against races with a live
+/// agent TUI: literal → settle → echo-confirm → Enter → submit-confirm. Only
+/// presses Enter once the typed text is confirmed on screen, so a dropped burst
+/// becomes a clean error instead of a half-submitted line. Used by the dashboard
+/// quick-send and the Telegram bridge.
 #[cfg_attr(not(feature = "telegram"), allow(dead_code))]
 pub fn send_text(name: &str, text: &str) -> Result<()> {
-    let out = tmux()
-        .args(["send-keys", "-t", name, "-l", text])
-        .status()
-        .context("tmux send-keys failed")?;
-    if !out.success() {
-        bail!("tmux send-keys failed for session {name}");
+    let before = capture(name).map(|p| norm(&p)).unwrap_or_default();
+
+    send_literal(name, text)?;
+    // let the editor drain the burst before Enter arrives as a distinct event
+    sleep(Duration::from_millis(60));
+
+    // echo-confirm: only submit once the typed chars are visible in the pane
+    let needle: String = {
+        let c: Vec<char> = text.trim().chars().collect();
+        norm(&c[c.len().saturating_sub(24)..].iter().collect::<String>())
+    };
+    if !needle.is_empty() {
+        let seen = |s: Option<String>| s.map(|p| norm(&p).contains(&needle)).unwrap_or(false);
+        if !seen(capture(name)) {
+            sleep(Duration::from_millis(90));
+            if !seen(capture(name)) {
+                bail!("send aborted: '{name}' did not echo typed text (agent busy?)");
+            }
+        }
     }
-    let _ = tmux().args(["send-keys", "-t", name, "Enter"]).status();
+
+    send_enter(name)?;
+
+    // if nothing moved at all, the Enter was likely lost — retry once (a 2nd Enter
+    // on an already-empty input is a harmless no-op, so no double-submit risk)
+    sleep(Duration::from_millis(50));
+    if capture(name).map(|p| norm(&p)) == Some(before) {
+        let _ = send_enter(name);
+    }
     Ok(())
 }
 

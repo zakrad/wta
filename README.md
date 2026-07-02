@@ -18,7 +18,10 @@ in **any terminal** (it does not modify your terminal or shell config).
 - **Live dashboard** — a sidebar of agents with status, branch and `+adds/-dels`,
   plus a **Preview** (live output) / **Diff** (colorized) pane.
 - **Attach & chat** — press `Enter` to jump fullscreen into an agent and type;
-  `Ctrl-q` drops you back to the board.
+  `Ctrl-q` drops you back to the board. Or `i` to send one line without attaching.
+- **No trust-prompt babysitting** — auto-accepts Claude's per-folder “Do you trust
+  the files in this folder?” on a fresh worktree (strict match, opt out with
+  `WTA_AUTO_TRUST=0`), so agents start working without a manual Enter.
 - **Live status with no setup** — running vs. waiting is detected automatically.
   Wire the optional Claude Code hooks to also surface “needs input”.
 - **Persistent** — sessions survive closing the terminal and laptop sleep.
@@ -117,6 +120,7 @@ wta install-hooks [--global]       wire Claude Code hooks -> `wta status`
 | `Shift+↑`/`↓` | scroll the Diff |
 | `Tab` | switch Preview / Diff |
 | `Enter` / `o` | attach into the agent and type (Ctrl-q returns; on `✗`, resume) |
+| `i` | send one line to the selected agent without attaching (only when `● ready`) |
 | `n` | new agent |
 | `N` | new agent with an initial prompt (sent to the agent on start) |
 | `s` | stop (keep worktree — resumable) |
@@ -239,6 +243,7 @@ server. So you can, from your phone: get pinged that an agent needs input →
 | Var | Default | Meaning |
 |---|---|---|
 | `WTA_AGENT_CMD` | `claude` | program started in each session |
+| `WTA_AUTO_TRUST` | `1` | auto-accept Claude's per-folder trust prompt on a fresh worktree (set `0` to disable). Strict 3-string match, startup-only, one-shot. |
 | `WTA_AGENT_RESUME_ARGS` | `--continue` | args added when **resuming** so the agent continues its previous conversation (Claude Code's `--continue`). Empty = relaunch fresh. |
 | `WTA_WORKTREE_DIR` | `.agents` | worktree dir under the repo root |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
