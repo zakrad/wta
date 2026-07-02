@@ -29,6 +29,8 @@ pub enum Command {
     },
     /// List wta-managed agents (worktrees) with diffstat vs the base branch
     Ls,
+    /// Preview which agent branches merge cleanly vs each other + base (no files touched)
+    Matrix,
     /// Attach to an agent's tmux session in the foreground (Ctrl-q to detach)
     Attach { task: String },
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later

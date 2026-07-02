@@ -97,6 +97,7 @@ and resume brings them back.
 wta new <task> [--base <branch>] [-- <agent args>]   worktree + branch + start the agent session
 wta [--server default] <cmd>       run agents on your own tmux server instead of the isolated one
 wta ls                             list agents with live state + diffstat
+wta matrix                         preview which agent branches conflict (pairwise, read-only)
 wta attach <task>                  attach to a session (Ctrl-q to detach)
 wta stop <task>                    end the session, keep the worktree (resumable)
 wta resume <task>                  re-spawn a stopped agent in its worktree
@@ -122,10 +123,31 @@ wta install-hooks [--global]       wire Claude Code hooks -> `wta status`
 | `D` | kill (destroy worktree + branch, with confirm) |
 | `p` | commit + push the branch and open a PR (confirm) |
 | `b` | new agent based on an existing branch (filterable picker) |
+| `m` | **mergeability matrix** — do the agent branches conflict? |
 | `?` | help · `r` refresh · `q` quit |
 
 Status glyphs: `⠋ running` · `● ready` · `▲ needs input` (hooks) · `✗ exited` ·
 `· idle`. The colors are ANSI-indexed, so they match your terminal theme.
+
+## Mergeability preview
+
+Before you start merging a fleet of agent branches back to main, `m` in the
+dashboard (or `wta matrix`) shows a grid of which branches merge **cleanly**
+against each other and against base — computed with `git merge-tree` in memory,
+so **no working tree is touched and nothing is committed**. It lists the exact
+conflicting files per pair, so you can pick a safe merge order (or send an agent
+back to rebase) *before* anything goes wrong. Most tools only surface conflicts
+after you try to merge; this previews the whole N×N picture up front.
+
+```
+        main    auth    api     ui
+main    ·       ✓       ✓       ✓
+auth    ✓       ·       ✗       ✓
+api     ✓       ✗       ·       ✓
+ui      ✓       ✓       ✓       ·
+
+conflicts:  auth ✗ api  — src/server.rs
+```
 
 ## Persistence & isolation
 

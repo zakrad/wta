@@ -156,12 +156,33 @@ pub fn install_hooks(global: bool) -> Result<()> {
         .unwrap()
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        *hooks = serde_json::json!({});
+    }
+    let hooks = hooks.as_object_mut().unwrap();
     for (event, state) in [
         ("UserPromptSubmit", "running"),
         ("Notification", "needs_input"),
         ("Stop", "waiting"),
     ] {
-        hooks[event] = serde_json::json!([{ "hooks": [{ "type": "command", "command": format!("{self_str} status {state}") }] }]);
+        let cmd = format!("{self_str} status {state}");
+        // Append to (not overwrite) the event's hook array, preserving any hooks
+        // the user already configured. Idempotent: skip if our command is present.
+        let arr = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
+        if !arr.is_array() {
+            *arr = serde_json::json!([]);
+        }
+        let list = arr.as_array_mut().unwrap();
+        let already = list.iter().any(|group| {
+            group
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd.as_str())))
+                .unwrap_or(false)
+        });
+        if !already {
+            list.push(serde_json::json!({ "hooks": [{ "type": "command", "command": cmd }] }));
+        }
     }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).ok();

@@ -28,6 +28,7 @@ fn main() -> anyhow::Result<()> {
             println!("started agent '{task}' — attach with `wta attach {task}` (or `wta dash`)");
         }
         Command::Ls => worktree::ls()?,
+        Command::Matrix => worktree::matrix()?,
         Command::Attach { task } => worktree::attach(&task)?,
         Command::Stop { task } => {
             worktree::stop(&task)?;

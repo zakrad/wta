@@ -374,3 +374,122 @@ pub fn attach(task: &str) -> Result<()> {
     }
     tmux::attach_blocking(&session)
 }
+
+// ---- mergeability matrix (read-only conflict preview across agent branches) ----
+
+pub struct MergePair {
+    pub i: usize,
+    pub j: usize,
+    pub clean: bool,
+    pub files: Vec<String>,
+}
+
+pub struct MergeMatrix {
+    pub labels: Vec<String>,
+    pub pairs: Vec<MergePair>,
+}
+
+impl MergeMatrix {
+    /// grid[i][j] = Some(clean) for i != j.
+    pub fn grid(&self) -> Vec<Vec<Option<bool>>> {
+        let n = self.labels.len();
+        let mut g = vec![vec![None; n]; n];
+        for p in &self.pairs {
+            g[p.i][p.j] = Some(p.clean);
+            g[p.j][p.i] = Some(p.clean);
+        }
+        g
+    }
+}
+
+/// 3-way merge A and B in memory (no working-tree changes, no commit) via
+/// `git merge-tree --write-tree`: exit 0 = clean, exit 1 = conflict (stdout is
+/// the tree oid then the conflicted file names until a blank line).
+fn merge_check(root: &Path, a: &str, b: &str) -> (bool, Vec<String>) {
+    let out = Command::new("git")
+        .args(["merge-tree", "--write-tree", "--name-only", a, b])
+        .current_dir(root)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => (true, Vec::new()),
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let files: Vec<String> = text
+                .lines()
+                .skip(1) // first line is the merged tree oid
+                .take_while(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string())
+                .collect();
+            (false, files)
+        }
+        Err(_) => (false, vec!["<git merge-tree unavailable — needs git ≥ 2.38>".into()]),
+    }
+}
+
+/// Pairwise mergeability of the base branch + every managed agent branch.
+pub fn mergeability() -> Result<MergeMatrix> {
+    let root = repo_root()?;
+    let base = base_branch(&root);
+    let mut labels = vec![base.clone()];
+    let mut refs = vec![base];
+    for w in list_managed()? {
+        labels.push(w.task);
+        refs.push(w.branch);
+    }
+    let n = refs.len();
+    let mut pairs = Vec::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (clean, files) = merge_check(&root, &refs[i], &refs[j]);
+            pairs.push(MergePair { i, j, clean, files });
+        }
+    }
+    Ok(MergeMatrix { labels, pairs })
+}
+
+/// `wta matrix` — print the pairwise conflict grid.
+pub fn matrix() -> Result<()> {
+    let m = mergeability()?;
+    let n = m.labels.len();
+    if n <= 1 {
+        println!("no agent branches to compare (create some with `wta new`)");
+        return Ok(());
+    }
+    let grid = m.grid();
+    let w = 9usize;
+    let short = |s: &str| -> String { s.chars().take(w - 1).collect() };
+
+    print!("{:<pad$}", "", pad = w + 2);
+    for l in &m.labels {
+        print!("{:<w$}", short(l), w = w);
+    }
+    println!();
+    for i in 0..n {
+        print!("{:<pad$}", short(&m.labels[i]), pad = w + 2);
+        for j in 0..n {
+            let cell = if i == j {
+                "·"
+            } else {
+                match grid[i][j] {
+                    Some(true) => "✓",
+                    Some(false) => "✗",
+                    None => "?",
+                }
+            };
+            print!("{:<w$}", cell, w = w);
+        }
+        println!();
+    }
+
+    let conflicts: Vec<&MergePair> = m.pairs.iter().filter(|p| !p.clean).collect();
+    if conflicts.is_empty() {
+        println!("\nall branches merge cleanly (pairwise `git merge-tree` — no files touched)");
+    } else {
+        println!("\nconflicts (pairwise `git merge-tree`; no files touched):");
+        for p in conflicts {
+            let files = if p.files.is_empty() { "conflict".to_string() } else { p.files.join(", ") };
+            println!("  {} ✗ {}  — {}", m.labels[p.i], m.labels[p.j], files);
+        }
+    }
+    Ok(())
+}

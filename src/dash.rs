@@ -70,6 +70,7 @@ enum Modal {
         filter: String,
         sel: usize,
     },
+    Matrix(Vec<Line<'static>>),
     Help,
 }
 
@@ -384,7 +385,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
-        Modal::Help => {
+        Modal::Matrix(_) | Modal::Help => {
             app.modal = Modal::None;
             return Ok(false);
         }
@@ -494,6 +495,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         },
         KeyCode::Char('J') => reorder(app, 1),
         KeyCode::Char('K') => reorder(app, -1),
+        KeyCode::Char('m') => match matrix_lines() {
+            Ok(lines) => app.modal = Modal::Matrix(lines),
+            Err(e) => app.set_err(e),
+        },
         KeyCode::Char('r') => {
             refresh(app);
             load_detail(app);
@@ -501,6 +506,72 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         _ => {}
     }
     Ok(false)
+}
+
+/// Build the colored mergeability grid for the `m` overlay (calls git merge-tree
+/// pairwise; read-only, touches no working tree).
+fn matrix_lines() -> anyhow::Result<Vec<Line<'static>>> {
+    let m = worktree::mergeability()?;
+    let n = m.labels.len();
+    let mut out: Vec<Line<'static>> = Vec::new();
+    if n <= 1 {
+        out.push(Line::styled(
+            "no agent branches to compare — create some with 'n'".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        return Ok(out);
+    }
+    let grid = m.grid();
+    let w = 9usize;
+    let short = |s: &str| -> String { s.chars().take(w - 1).collect() };
+
+    let mut header = vec![Span::raw(format!("{:<pad$}", "", pad = w + 2))];
+    for l in &m.labels {
+        header.push(Span::styled(format!("{:<w$}", short(l), w = w), Style::default().fg(Color::Gray)));
+    }
+    out.push(Line::from(header));
+    for i in 0..n {
+        let mut spans = vec![Span::styled(
+            format!("{:<pad$}", short(&m.labels[i]), pad = w + 2),
+            Style::default().fg(Color::Gray),
+        )];
+        for j in 0..n {
+            let (txt, color) = if i == j {
+                ("·", Color::DarkGray)
+            } else {
+                match grid[i][j] {
+                    Some(true) => ("✓", GREEN),
+                    Some(false) => ("✗", RED),
+                    None => ("?", Color::DarkGray),
+                }
+            };
+            spans.push(Span::styled(format!("{:<w$}", txt, w = w), Style::default().fg(color)));
+        }
+        out.push(Line::from(spans));
+    }
+    out.push(Line::from(""));
+    let conflicts: Vec<_> = m.pairs.iter().filter(|p| !p.clean).collect();
+    if conflicts.is_empty() {
+        out.push(Line::styled(
+            "all branches merge cleanly — git merge-tree, no files touched".to_string(),
+            Style::default().fg(GREEN),
+        ));
+    } else {
+        out.push(Line::styled(
+            "conflicts (git merge-tree — no files touched):".to_string(),
+            Style::default().fg(Color::Gray),
+        ));
+        for p in conflicts {
+            let files = if p.files.is_empty() { "conflict".to_string() } else { p.files.join(", ") };
+            out.push(Line::from(vec![
+                Span::styled(format!("  {} ", m.labels[p.i]), Style::default().fg(GREEN_SOFT)),
+                Span::styled("✗ ".to_string(), Style::default().fg(RED)),
+                Span::styled(format!("{}  ", m.labels[p.j]), Style::default().fg(GREEN_SOFT)),
+                Span::styled(files, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+    Ok(out)
 }
 
 /// Move the selected agent up (delta -1) or down (delta +1) in the list and
@@ -672,6 +743,10 @@ fn refresh(app: &mut App) {
         .and_then(|t| app.rows.iter().position(|r| r.task == t))
         .unwrap_or(0)
         .min(app.rows.len().saturating_sub(1));
+
+    // drop status-hash entries for tasks that no longer exist (bounded memory)
+    let current: HashSet<&String> = app.rows.iter().map(|r| &r.task).collect();
+    app.hashes.retain(|k, _| current.contains(k));
 }
 
 fn load_detail(app: &mut App) {
@@ -790,7 +865,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut st);
 }
 
-fn render_right(f: &mut Frame, app: &App, area: Rect) {
+fn render_right(f: &mut Frame, app: &mut App, area: Rect) {
     let title = match app.selected() {
         Some(r) => format!(" {} ", r.task),
         None => " agent ".to_string(),
@@ -828,6 +903,8 @@ fn render_right(f: &mut Frame, app: &App, area: Rect) {
                 .map(|l| Line::styled(l.to_string(), Style::default().fg(GREEN_SOFT)))
                 .collect();
             let max_off = all.len().saturating_sub(body_h) as u16;
+            // clamp so over-scrolling past the top doesn't waste key presses coming back
+            app.scroll = app.scroll.min(max_off);
             let top = max_off.saturating_sub(app.scroll);
             (all, top)
         }
@@ -845,6 +922,8 @@ fn render_right(f: &mut Frame, app: &App, area: Rect) {
             for l in app.diff_text.lines() {
                 lines.push(colorize_diff_line(l));
             }
+            let max_off = lines.len().saturating_sub(body_h) as u16;
+            app.scroll = app.scroll.min(max_off);
             (lines, app.scroll)
         }
     };
@@ -1060,8 +1139,23 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::Matrix(lines) => {
+            let h = (lines.len() as u16 + 2).min(f.area().height);
+            let w = 78u16.min(f.area().width);
+            let area = centered(w, h, f.area());
+            f.render_widget(Clear, area);
+            f.render_widget(
+                Paragraph::new(lines.clone()).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(HL))
+                        .title(" mergeability — do branches conflict? (any key closes) "),
+                ),
+                area,
+            );
+        }
         Modal::Help => {
-            let area = centered(52, 18, f.area());
+            let area = centered(52, 19, f.area());
             f.render_widget(Clear, area);
             let k = |key: &str, desc: &str| {
                 Line::from(vec![
@@ -1075,6 +1169,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             let body = vec![
                 k("j / k", "move up / down"),
                 k("J / K", "reorder down / up"),
+                k("m", "mergeability matrix (conflict preview)"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("tab", "switch Preview / Diff"),
@@ -1173,6 +1268,26 @@ mod tests {
         assert!(screen.contains("Preview") && screen.contains("Diff"));
         assert!(screen.contains("test result: ok"));
         assert!(screen.contains("attach"));
+    }
+
+    #[test]
+    fn matrix_overlay_renders() {
+        let mut app = App::new();
+        app.rows = vec![row("auth", Status::Running, true, 1, 0)];
+        app.sel = 0;
+        app.modal = Modal::Matrix(vec![
+            Line::from(vec![Span::raw("        main    auth")]),
+            Line::from(vec![
+                Span::raw("auth    "),
+                Span::styled("✓", Style::default().fg(GREEN)),
+                Span::raw("       "),
+                Span::styled("✗", Style::default().fg(RED)),
+            ]),
+        ]);
+        let screen = render_to_string(&mut app, 100, 16);
+        println!("\n{screen}\n");
+        assert!(screen.contains("mergeability"));
+        assert!(screen.contains('✓') && screen.contains('✗'));
     }
 
     #[test]
