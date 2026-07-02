@@ -31,7 +31,10 @@ pub fn state_path(task: &str) -> Result<PathBuf> {
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn save(st: &AgentState) -> Result<()> {
@@ -44,7 +47,12 @@ fn save(st: &AgentState) -> Result<()> {
 
 /// Record state directly (used by `wta new`/`resume`).
 pub fn record(task: &str, status: &str, cwd: &str) -> Result<()> {
-    save(&AgentState { task: task.to_string(), status: status.to_string(), cwd: cwd.to_string(), updated_unix: now_unix() })
+    save(&AgentState {
+        task: task.to_string(),
+        status: status.to_string(),
+        cwd: cwd.to_string(),
+        updated_unix: now_unix(),
+    })
 }
 
 fn emit_uservar(name: &str, value: &str) -> std::io::Result<()> {
@@ -62,11 +70,13 @@ fn emit_uservar(name: &str, value: &str) -> std::io::Result<()> {
 /// `wta status <state>` — called by Claude Code hooks inside an agent session.
 pub fn emit(state: &str) -> Result<()> {
     let task = std::env::var("WTA_TASK").unwrap_or_default();
-    // OSC user-var (optional WezTerm tab integration; harmless elsewhere)
+    // OSC 1337 user-var (optional terminal-tab integration; harmless elsewhere)
     emit_uservar("agent_status", state).ok();
     if !task.is_empty() {
         emit_uservar("agent_task", &task).ok();
-        let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         record(&task, state, &cwd)?;
     }
     Ok(())
@@ -96,7 +106,9 @@ pub fn install_hooks(global: bool) -> Result<()> {
     let self_path = std::env::current_exe().context("cannot resolve own path")?;
     let self_str = self_path.to_string_lossy();
     let target = if global {
-        dirs::home_dir().context("no home dir")?.join(".claude/settings.json")
+        dirs::home_dir()
+            .context("no home dir")?
+            .join(".claude/settings.json")
     } else {
         crate::worktree::repo_root()?.join(".claude/settings.json")
     };
@@ -109,8 +121,16 @@ pub fn install_hooks(global: bool) -> Result<()> {
     if !root.is_object() {
         root = serde_json::json!({});
     }
-    let hooks = root.as_object_mut().unwrap().entry("hooks").or_insert_with(|| serde_json::json!({}));
-    for (event, state) in [("UserPromptSubmit", "running"), ("Notification", "needs_input"), ("Stop", "waiting")] {
+    let hooks = root
+        .as_object_mut()
+        .unwrap()
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    for (event, state) in [
+        ("UserPromptSubmit", "running"),
+        ("Notification", "needs_input"),
+        ("Stop", "waiting"),
+    ] {
         hooks[event] = serde_json::json!([{ "hooks": [{ "type": "command", "command": format!("{self_str} status {state}") }] }]);
     }
     if let Some(parent) = target.parent() {

@@ -18,7 +18,13 @@ fn tmux() -> Command {
 pub fn session_name(task: &str) -> String {
     let safe: String = task
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("wta-{safe}")
 }
@@ -37,11 +43,18 @@ pub fn has_session(name: &str) -> bool {
 /// hide the status bar, enable mouse, zero escape latency, bigger scrollback,
 /// and bind Ctrl-q to detach (root table, so no prefix needed).
 fn configure(name: &str) {
-    for (opt, val) in [("status", "off"), ("mouse", "on"), ("escape-time", "0"), ("history-limit", "10000")] {
+    for (opt, val) in [
+        ("status", "off"),
+        ("mouse", "on"),
+        ("escape-time", "0"),
+        ("history-limit", "10000"),
+    ] {
         let _ = tmux().args(["set-option", "-t", name, opt, val]).status();
     }
     // Ctrl-q detaches (only affects this dedicated server).
-    let _ = tmux().args(["bind-key", "-n", "C-q", "detach-client"]).status();
+    let _ = tmux()
+        .args(["bind-key", "-n", "C-q", "detach-client"])
+        .status();
 }
 
 pub fn new_session(name: &str, cwd: &Path, program: &str, extra: &[String]) -> Result<()> {
@@ -49,12 +62,20 @@ pub fn new_session(name: &str, cwd: &Path, program: &str, extra: &[String]) -> R
         return Ok(());
     }
     let cwd_s = cwd.to_string_lossy().into_owned();
-    let mut args: Vec<String> =
-        vec!["new-session", "-d", "-s", name, "-c", &cwd_s, program].iter().map(|s| s.to_string()).collect();
+    let mut args: Vec<String> = ["new-session", "-d", "-s", name, "-c", &cwd_s, program]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     args.extend(extra.iter().cloned());
-    let out = tmux().args(&args).output().context("failed to run tmux (is it installed?)")?;
+    let out = tmux()
+        .args(&args)
+        .output()
+        .context("failed to run tmux (is it installed?)")?;
     if !out.status.success() {
-        bail!("tmux new-session failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "tmux new-session failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     configure(name);
     Ok(())
@@ -62,7 +83,10 @@ pub fn new_session(name: &str, cwd: &Path, program: &str, extra: &[String]) -> R
 
 /// Visible pane text of a session (plain, no escapes).
 pub fn capture(name: &str) -> Option<String> {
-    let out = tmux().args(["capture-pane", "-p", "-t", name]).output().ok()?;
+    let out = tmux()
+        .args(["capture-pane", "-p", "-t", name])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -70,7 +94,10 @@ pub fn capture(name: &str) -> Option<String> {
 }
 
 pub fn kill(name: &str) -> Result<()> {
-    let _ = tmux().args(["kill-session", "-t", name]).stderr(Stdio::null()).status();
+    let _ = tmux()
+        .args(["kill-session", "-t", name])
+        .stderr(Stdio::null())
+        .status();
     Ok(())
 }
 
@@ -78,7 +105,16 @@ pub fn kill(name: &str) -> Result<()> {
 /// (bound to detach-client). Caller must suspend any raw-mode TUI first.
 pub fn attach_blocking(name: &str) -> Result<()> {
     // best-effort hint shown briefly in the agent's message line
-    let _ = tmux().args(["display-message", "-d", "1200", "-t", name, "press Ctrl-q to return to wta"]).status();
+    let _ = tmux()
+        .args([
+            "display-message",
+            "-d",
+            "1200",
+            "-t",
+            name,
+            "press Ctrl-q to return to wta",
+        ])
+        .status();
     tmux()
         .args(["attach-session", "-t", name])
         .stdin(Stdio::inherit())

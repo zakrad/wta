@@ -1,7 +1,11 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "wta", version, about = "wezterm task agents — one git worktree + one WezTerm tab per agent")]
+#[command(
+    name = "wta",
+    version,
+    about = "worktree task agents — parallel AI agents in git worktrees + tmux sessions"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Command,
@@ -9,7 +13,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Create a worktree + branch, copy local context, launch the agent in a new WezTerm tab
+    /// Create a worktree + branch, copy local context, start the agent in a tmux session
     New {
         task: String,
         /// Everything after `--` is passed to the agent command (default: claude)
@@ -20,7 +24,11 @@ pub enum Command {
     Ls,
     /// Attach to an agent's tmux session in the foreground (Ctrl-q to detach)
     Attach { task: String },
-    /// Kill the agent's pane(s), remove its worktree and branch
+    /// Stop an agent's session but KEEP its worktree, so it can be resumed later
+    Stop { task: String },
+    /// Resume a stopped agent — re-spawn its session in the existing worktree
+    Resume { task: String },
+    /// Destroy an agent: kill the session AND remove its worktree and branch
     Rm {
         task: String,
         #[arg(long)]

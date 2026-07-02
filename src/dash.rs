@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -113,7 +115,12 @@ pub fn run() -> Result<()> {
     let mut term = Term::new(CrosstermBackend::new(stdout))?;
     let res = event_loop(&mut term);
     disable_raw_mode().ok();
-    execute!(term.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show).ok();
+    execute!(
+        term.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )
+    .ok();
     term.show_cursor().ok();
     res
 }
@@ -121,10 +128,20 @@ pub fn run() -> Result<()> {
 /// Suspend the TUI, attach to the tmux session inline, resume on detach.
 fn attach_inline(term: &mut Term, session: &str) {
     disable_raw_mode().ok();
-    execute!(term.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show).ok();
+    execute!(
+        term.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )
+    .ok();
     let _ = tmux::attach_blocking(session);
     enable_raw_mode().ok();
-    execute!(term.backend_mut(), EnterAlternateScreen, crossterm::cursor::Hide).ok();
+    execute!(
+        term.backend_mut(),
+        EnterAlternateScreen,
+        crossterm::cursor::Hide
+    )
+    .ok();
     let _ = term.clear();
 }
 
@@ -211,7 +228,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 KeyCode::Char('y') => {
                     let task = task.clone();
                     app.modal = Modal::None;
-                    match app.rows.iter().find(|r| r.task == task).and_then(|r| r.path.clone()) {
+                    match app
+                        .rows
+                        .iter()
+                        .find(|r| r.task == task)
+                        .and_then(|r| r.path.clone())
+                    {
                         Some(p) => {
                             if let Err(e) = worktree::resume_at(&task, &p) {
                                 app.set_err(e);
@@ -268,7 +290,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
         }
         KeyCode::Tab => {
-            app.tab = if app.tab == Tab::Preview { Tab::Diff } else { Tab::Preview };
+            app.tab = if app.tab == Tab::Preview {
+                Tab::Diff
+            } else {
+                Tab::Preview
+            };
             app.scroll = 0;
             load_detail(app);
         }
@@ -279,6 +305,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             None => {}
         },
         KeyCode::Char('n') => app.modal = Modal::NewTask(String::new()),
+        KeyCode::Char('s') => {
+            if let Some(task) = app.selected().map(|r| r.task.clone()) {
+                if let Err(e) = worktree::stop(&task) {
+                    app.set_err(e);
+                }
+                refresh(app);
+                load_detail(app);
+            }
+        }
         KeyCode::Char('D') => {
             if let Some(task) = app.selected().map(|r| r.task.clone()) {
                 app.modal = Modal::Confirm(task);
@@ -305,7 +340,17 @@ fn git_in(path: &Path, args: &[&str]) -> Option<String> {
 }
 fn base_of(path: &Path) -> String {
     for b in ["main", "master"] {
-        if git_in(path, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{b}")]).is_some() {
+        if git_in(
+            path,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{b}"),
+            ],
+        )
+        .is_some()
+        {
             return b.to_string();
         }
     }
@@ -378,7 +423,10 @@ fn refresh(app: &mut App) {
         let branch = branches
             .get(&task)
             .cloned()
-            .or_else(|| path.as_deref().and_then(|p| git_in(p, &["rev-parse", "--abbrev-ref", "HEAD"])))
+            .or_else(|| {
+                path.as_deref()
+                    .and_then(|p| git_in(p, &["rev-parse", "--abbrev-ref", "HEAD"]))
+            })
             .unwrap_or_default();
         let (added, removed) = path.as_deref().map(numstat).unwrap_or((0, 0));
         let session = tmux::session_name(&task);
@@ -387,7 +435,11 @@ fn refresh(app: &mut App) {
         let status = if alive {
             let text = tmux::capture(&session).unwrap_or_default();
             let h = hash_str(&text);
-            let changed = app.hashes.insert(task.clone(), h).map(|old| old != h).unwrap_or(true);
+            let changed = app
+                .hashes
+                .insert(task.clone(), h)
+                .map(|old| old != h)
+                .unwrap_or(true);
             match states.get(&task).map(|s| s.status.as_str()) {
                 Some("needs_input") => Status::NeedsInput,
                 _ if changed => Status::Running,
@@ -399,7 +451,16 @@ fn refresh(app: &mut App) {
             Status::Idle
         };
 
-        rows.push(Row { task, branch, status, added, removed, session, alive, path });
+        rows.push(Row {
+            task,
+            branch,
+            status,
+            added,
+            removed,
+            session,
+            alive,
+            path,
+        });
     }
 
     app.rows = rows;
@@ -444,7 +505,10 @@ fn load_detail(app: &mut App) {
 
 fn status_glyph(app: &App, s: Status) -> Span<'static> {
     match s {
-        Status::Running => Span::styled(SPINNER[app.spin].to_string(), Style::default().fg(GREEN_BRIGHT)),
+        Status::Running => Span::styled(
+            SPINNER[app.spin].to_string(),
+            Style::default().fg(GREEN_BRIGHT),
+        ),
         Status::Ready => Span::styled("● ".to_string(), Style::default().fg(GREEN)),
         Status::NeedsInput => Span::styled("▲ ".to_string(), Style::default().fg(Color::Yellow)),
         Status::Exited => Span::styled("✗ ".to_string(), Style::default().fg(RED)),
@@ -455,7 +519,11 @@ fn status_glyph(app: &App, s: Status) -> Span<'static> {
 fn ui(f: &mut Frame, app: &mut App) {
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(f.area());
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -473,7 +541,12 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(HL))
         .title(" Instances ")
-        .title_style(Style::default().bg(GREEN).fg(SEL_FG).add_modifier(Modifier::BOLD));
+        .title_style(
+            Style::default()
+                .bg(GREEN)
+                .fg(SEL_FG)
+                .add_modifier(Modifier::BOLD),
+        );
     let inner_w = area.width.saturating_sub(2) as usize;
     let mut items: Vec<ListItem> = Vec::new();
     for (i, r) in app.rows.iter().enumerate() {
@@ -495,11 +568,17 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         items.push(ListItem::new(vec![line1, line2, Line::from("")]));
     }
     if items.is_empty() {
-        items.push(ListItem::new(Line::styled("  no agents — press 'n'", Style::default().fg(Color::DarkGray))));
+        items.push(ListItem::new(Line::styled(
+            "  no agents — press 'n'",
+            Style::default().fg(Color::DarkGray),
+        )));
     }
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD));
+    let list = List::new(items).block(block).highlight_style(
+        Style::default()
+            .bg(SEL_BG)
+            .fg(SEL_FG)
+            .add_modifier(Modifier::BOLD),
+    );
     let mut st = ListState::default();
     if !app.rows.is_empty() {
         st.select(Some(app.sel));
@@ -512,7 +591,10 @@ fn render_right(f: &mut Frame, app: &App, area: Rect) {
         Some(r) => format!(" {} ", r.task),
         None => " agent ".to_string(),
     };
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(HL)).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(HL))
+        .title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -524,7 +606,11 @@ fn render_right(f: &mut Frame, app: &App, area: Rect) {
     let tabs = Tabs::new(vec!["Preview", "Diff"])
         .select(if app.tab == Tab::Preview { 0 } else { 1 })
         .style(Style::default().fg(Color::DarkGray))
-        .highlight_style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED))
+        .highlight_style(
+            Style::default()
+                .fg(GREEN)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )
         .divider(" ");
     f.render_widget(tabs, parts[0]);
 
@@ -540,7 +626,10 @@ fn render_right(f: &mut Frame, app: &App, area: Rect) {
         ),
         // Diff renders in full and is scrollable with Shift+↑/↓.
         Tab::Diff => {
-            let (a, d) = app.selected().map(|r| (r.added, r.removed)).unwrap_or((0, 0));
+            let (a, d) = app
+                .selected()
+                .map(|r| (r.added, r.removed))
+                .unwrap_or((0, 0));
             let mut lines = vec![Line::from(vec![
                 Span::styled(format!("{a} additions(+)"), Style::default().fg(ADD)),
                 Span::raw("  "),
@@ -575,26 +664,53 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
     let action = Style::default().fg(GREEN);
     let muted = Style::default().fg(Color::DarkGray);
     let spans = if app.rows.is_empty() {
-        vec![Span::styled("n", action), Span::styled(" new  │  ", muted), Span::styled("q", action), Span::styled(" quit", muted)]
-    } else {
-        let exited = app.selected().map(|r| r.status == Status::Exited).unwrap_or(false);
-        let (fkey, flabel) = if exited { ("↵", " resume  ") } else { ("↵/o", " attach  ") };
         vec![
-            Span::styled("n", action), Span::styled(" new  ", muted),
-            Span::styled("D", action), Span::styled(" kill  │  ", muted),
-            Span::styled(fkey, action), Span::styled(flabel, muted),
-            Span::styled("tab", action), Span::styled(" switch  ", muted),
-            Span::styled("?", action), Span::styled(" help  ", muted),
-            Span::styled("q", action), Span::styled(" quit", muted),
+            Span::styled("n", action),
+            Span::styled(" new  │  ", muted),
+            Span::styled("q", action),
+            Span::styled(" quit", muted),
+        ]
+    } else {
+        let exited = app
+            .selected()
+            .map(|r| r.status == Status::Exited)
+            .unwrap_or(false);
+        let (fkey, flabel) = if exited {
+            ("↵", " resume  ")
+        } else {
+            ("↵/o", " attach  ")
+        };
+        vec![
+            Span::styled("n", action),
+            Span::styled(" new  ", muted),
+            Span::styled("s", action),
+            Span::styled(" stop  ", muted),
+            Span::styled("D", action),
+            Span::styled(" kill  │  ", muted),
+            Span::styled(fkey, action),
+            Span::styled(flabel, muted),
+            Span::styled("tab", action),
+            Span::styled(" switch  ", muted),
+            Span::styled("?", action),
+            Span::styled(" help  ", muted),
+            Span::styled("q", action),
+            Span::styled(" quit", muted),
         ]
     };
-    f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), area);
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+        area,
+    );
 }
 
 fn render_err(f: &mut Frame, app: &App, area: Rect) {
     if let Some((e, _)) = &app.err {
         f.render_widget(
-            Paragraph::new(Line::styled(format!(" {e} "), Style::default().fg(Color::Red))).alignment(Alignment::Center),
+            Paragraph::new(Line::styled(
+                format!(" {e} "),
+                Style::default().fg(Color::Red),
+            ))
+            .alignment(Alignment::Center),
             area,
         );
     }
@@ -606,7 +722,10 @@ fn render_modal(f: &mut Frame, app: &App) {
             let area = centered(50, 3, f.area());
             f.render_widget(Clear, area);
             let p = Paragraph::new(format!("{buf}▏")).block(
-                Block::default().borders(Borders::ALL).border_style(Style::default().fg(GREEN)).title(" new task name (Esc cancels) "),
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(GREEN))
+                    .title(" new task name (Esc cancels) "),
             );
             f.render_widget(p, area);
         }
@@ -624,7 +743,12 @@ fn render_modal(f: &mut Frame, app: &App) {
                 ]),
             ];
             f.render_widget(
-                Paragraph::new(body).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(RED)).title(" confirm ")),
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(RED))
+                        .title(" confirm "),
+                ),
                 area,
             );
         }
@@ -641,7 +765,12 @@ fn render_modal(f: &mut Frame, app: &App) {
                 ]),
             ];
             f.render_widget(
-                Paragraph::new(body).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(HL)).title(" resume ")),
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(HL))
+                        .title(" resume "),
+                ),
                 area,
             );
         }
@@ -650,7 +779,10 @@ fn render_modal(f: &mut Frame, app: &App) {
             f.render_widget(Clear, area);
             let k = |key: &str, desc: &str| {
                 Line::from(vec![
-                    Span::styled(format!("  {key:<10}"), Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("  {key:<10}"),
+                        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(desc.to_string(), Style::default().fg(Color::Gray)),
                 ])
             };
@@ -661,15 +793,27 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("tab", "switch Preview / Diff"),
                 k("Shift+↑↓", "scroll the Diff"),
                 k("n", "new agent"),
-                k("D", "kill agent"),
+                k("s", "stop (keep worktree — resume later)"),
+                k("D", "kill (destroy worktree + branch)"),
                 k("r", "refresh"),
                 k("q", "quit"),
                 Line::from(""),
-                Line::styled("  agents run in tmux and survive closing", Style::default().fg(Color::DarkGray)),
-                Line::styled("  the terminal. press any key to close.", Style::default().fg(Color::DarkGray)),
+                Line::styled(
+                    "  agents run in tmux and survive closing",
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Line::styled(
+                    "  the terminal. press any key to close.",
+                    Style::default().fg(Color::DarkGray),
+                ),
             ];
             f.render_widget(
-                Paragraph::new(body).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(HL)).title(" wta — keys ")),
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(HL))
+                        .title(" wta — keys "),
+                ),
                 area,
             );
         }
@@ -689,7 +833,12 @@ fn tail_lines(s: &str, n: usize) -> Vec<&str> {
 fn centered(w: u16, h: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
-    Rect { x, y, width: w.min(area.width), height: h.min(area.height) }
+    Rect {
+        x,
+        y,
+        width: w.min(area.width),
+        height: h.min(area.height),
+    }
 }
 
 #[cfg(test)]
@@ -728,7 +877,10 @@ mod tests {
     #[test]
     fn sidebar_layout() {
         let mut app = App::new();
-        app.rows = vec![row("auth", Status::Running, true, 40, 4), row("flaky", Status::NeedsInput, true, 0, 0)];
+        app.rows = vec![
+            row("auth", Status::Running, true, 40, 4),
+            row("flaky", Status::NeedsInput, true, 0, 0),
+        ];
         app.sel = 0;
         app.preview = "$ cargo test\nrunning 8 tests\ntest result: ok. 8 passed".into();
         let screen = render_to_string(&mut app, 100, 16);
