@@ -115,6 +115,7 @@ pub fn capture(name: &str) -> Option<String> {
 
 /// Type `text` into a session and submit it (literal text, then Enter).
 /// Used by the Telegram bridge to relay remote messages into an agent.
+#[cfg_attr(not(feature = "telegram"), allow(dead_code))]
 pub fn send_text(name: &str, text: &str) -> Result<()> {
     let out = tmux()
         .args(["send-keys", "-t", name, "-l", text])
