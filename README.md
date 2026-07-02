@@ -37,10 +37,14 @@ in **any terminal** (it does not modify your terminal or shell config).
 ## Install
 
 ```sh
-cargo install --git https://github.com/zakrad/wta      # once published
+cargo install --git https://github.com/zakrad/wta                     # core (1.1 MB)
+cargo install --git https://github.com/zakrad/wta --features telegram # + remote notifications
 # or from a checkout:
 cargo build --release && cp target/release/wta ~/.local/bin/
 ```
+
+The core binary is dependency-light; the optional **`telegram`** feature adds the
+`wta bridge` remote-notification command (and pulls in TLS).
 
 ## Quickstart
 
@@ -140,6 +144,8 @@ review in the Diff tab or your own editor.
 
 Get pinged on your phone when an agent needs input or finishes — so you can walk
 away from a fleet of agents and only come back when one wants you.
+
+> Requires the `telegram` feature: `cargo install --git … --features telegram`.
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
 2. Get your chat id (message [@userinfobot](https://t.me/userinfobot)).

@@ -45,6 +45,7 @@ pub enum Command {
     Dash,
     /// Notify a Telegram chat when an agent needs input / finishes
     /// (set WTA_TELEGRAM_TOKEN + WTA_TELEGRAM_CHAT)
+    #[cfg(feature = "telegram")]
     Bridge {
         /// Send one test message to verify config, then exit
         #[arg(long)]

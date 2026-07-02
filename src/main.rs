@@ -1,3 +1,4 @@
+#[cfg(feature = "telegram")]
 mod bridge;
 mod cli;
 mod dash;
@@ -32,6 +33,7 @@ fn main() -> anyhow::Result<()> {
         Command::Status { state } => status::emit(&state)?,
         Command::InstallHooks { global } => status::install_hooks(global)?,
         Command::Dash => dash::run()?,
+        #[cfg(feature = "telegram")]
         Command::Bridge { test } => bridge::run(test)?,
     }
     Ok(())
