@@ -176,15 +176,15 @@ detach with your usual tmux keys. The isolated socket remains the default.
 ## How it compares
 
 wta is in the same family as terminal parallel-agent runners like **Claude
-Squad** — a git worktree + a tmux session per agent, browsed from a TUI. It's
-honest to say Squad is more feature-complete today; wta trades some of that for
-tighter isolation and hook-aware status.
+Squad** — a git worktree + a tmux session per agent, browsed from a TUI. wta
+leans into tight isolation, hook-aware status, an upfront conflict view, and
+remote control.
 
 | | wta | Claude Squad |
 |---|---|---|
 | Agent runtime | tmux session | tmux session |
 | Runs in any terminal | ✅ (single Rust binary) | ✅ (single Go binary) |
-| Isolated from *your* tmux | ✅ dedicated socket (`-L wta`) | ❌ uses your default tmux server |
+| Isolated from *your* tmux | ✅ dedicated socket (`-L wta`) | uses your default tmux server |
 | Live status detection | output-hash **+ Claude Code hooks** (`needs input`) | output-hash + prompt-string match |
 | Attach / detach | `Enter` / `Ctrl-q` | `Enter` / `Ctrl-q` |
 | Stop (keep worktree) + resume | ✅ `s` / `resume` | ✅ pause / resume |
@@ -192,14 +192,19 @@ tighter isolation and hook-aware status.
 | Commit & push / PR from the UI | ✅ `p` | ✅ |
 | New-with-prompt | ✅ `N` | ✅ |
 | Branch picker on create | ✅ `b` / `--base` | ✅ |
+| Reorder sessions | ✅ `J`/`K` | ✅ |
+| Auto-dismiss folder-trust prompt | ✅ (`WTA_AUTO_TRUST`) | ✅ |
 | Use your own tmux server | ✅ `--server default` (opt-in) | always (no isolation) |
-| Reorder sessions | ⏳ roadmap | ✅ |
-| Remote / mobile control | ✅ Telegram: notifications **+ reply to control agents** | ❌ |
+| **Mergeability preview** (N-way, upfront) | ✅ `m` / `wta matrix` | ❌ |
+| **Quick-send without attaching** | ✅ `i` (gated on ready) | ❌ |
+| **Remote / mobile control** | ✅ Telegram: notify **+ reply to drive agents** | ❌ |
 
-Where wta leans in: a **dedicated tmux socket** so your own tmux stays clean, a
-small **terminal-agnostic binary**, and **Claude Code hook** integration for
-accurate “needs input”. It deliberately does **not** embed a diff-review IDE —
-review in the Diff tab or your own editor.
+Where wta leans in: a **dedicated tmux socket** so your own tmux stays clean; a
+small **terminal-agnostic binary**; **Claude Code hook** integration for accurate
+“needs input”; the **mergeability matrix** that previews cross-branch conflicts
+before you merge (nothing else does this); and **Telegram** remote control. It
+deliberately does **not** embed a diff-review IDE — review in the Diff tab or
+your own editor.
 
 ## Remote notifications (Telegram)
 
