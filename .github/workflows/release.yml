@@ -30,8 +30,25 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Package
         run: tar -czf wta-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release wta
-      - name: Release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wta-${{ matrix.target }}
+          path: wta-${{ matrix.target }}.tar.gz
+
+  # A single publish job avoids the matrix racing to *create* the same release
+  # (which previously left some binaries un-uploaded).
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: wta-${{ matrix.target }}.tar.gz
+          files: dist/*.tar.gz
           generate_release_notes: true
