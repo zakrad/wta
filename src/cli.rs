@@ -43,4 +43,11 @@ pub enum Command {
     },
     /// Live full-screen dashboard of all agents
     Dash,
+    /// Notify a Telegram chat when an agent needs input / finishes
+    /// (set WTA_TELEGRAM_TOKEN + WTA_TELEGRAM_CHAT)
+    Bridge {
+        /// Send one test message to verify config, then exit
+        #[arg(long)]
+        test: bool,
+    },
 }

@@ -1,3 +1,4 @@
+mod bridge;
 mod cli;
 mod dash;
 mod status;
@@ -31,6 +32,7 @@ fn main() -> anyhow::Result<()> {
         Command::Status { state } => status::emit(&state)?,
         Command::InstallHooks { global } => status::install_hooks(global)?,
         Command::Dash => dash::run()?,
+        Command::Bridge { test } => bridge::run(test)?,
     }
     Ok(())
 }

@@ -23,6 +23,7 @@ serde_json  = "1"
 anyhow      = "1"
 base64      = "0.22"
 dirs        = "5"
+ureq        = "2"
 
 [profile.release]
 strip = true

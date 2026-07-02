@@ -9,16 +9,7 @@ Agents keep running when you close the terminal or your laptop sleeps. Stop one
 and resume it later with its work intact. A single ~1 MB Rust binary that runs
 in **any terminal** (it does not modify your terminal or shell config).
 
-```
-┌ Instances ─────────────────┐┌ auth ───────────────────────────────────┐
-│ 1. auth                  ⠋ ││ Preview   Diff                          │
-│   Ꮧ-agent/auth      +40,-4 ││$ cargo test                             │
-│                            ││running 8 tests                          │
-│ 2. flaky                 ▲ ││test result: ok. 8 passed                │
-│ 3. docs                  ✗ ││awaiting your review…                    │
-└────────────────────────────┘└─────────────────────────────────────────┘
-   n new  s stop  D kill  │  ↵/o attach  tab switch  ?  help  q quit
-```
+![wta dashboard](assets/wta.png)
 
 ## Features
 
@@ -91,6 +82,7 @@ wta stop <task>                    end the session, keep the worktree (resumable
 wta resume <task>                  re-spawn a stopped agent in its worktree
 wta rm <task> [--force]            destroy: session + worktree + branch
 wta dash                           the live dashboard
+wta bridge [--test]                notify Telegram when an agent needs you / finishes
 wta status <state>                 emit status (for Claude Code hooks; optional)
 wta install-hooks [--global]       wire Claude Code hooks -> `wta status`
 ```
@@ -137,12 +129,33 @@ tighter isolation and hook-aware status.
 | Commit & push / PR from the UI | ⏳ roadmap | ✅ |
 | New-with-prompt + branch picker | ⏳ roadmap | ✅ |
 | Reorder sessions | ⏳ roadmap | ✅ |
-| Remote / mobile control | ⏳ roadmap (hooks + chat bridge) | ❌ |
+| Remote / mobile notifications | ✅ Telegram bridge (outbound; inbound roadmap) | ❌ |
 
 Where wta leans in: a **dedicated tmux socket** so your own tmux stays clean, a
 small **terminal-agnostic binary**, and **Claude Code hook** integration for
 accurate “needs input”. It deliberately does **not** embed a diff-review IDE —
 review in the Diff tab or your own editor.
+
+## Remote notifications (Telegram)
+
+Get pinged on your phone when an agent needs input or finishes — so you can walk
+away from a fleet of agents and only come back when one wants you.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
+2. Get your chat id (message [@userinfobot](https://t.me/userinfobot)).
+3. Export and run the bridge (a small daemon; keep it in its own pane/session):
+
+```sh
+export WTA_TELEGRAM_TOKEN=123456:AA...      # from @BotFather
+export WTA_TELEGRAM_CHAT=987654321          # your chat id
+wta bridge --test                           # verify: sends "wta bridge connected"
+wta bridge                                  # runs; pings on needs-input / finished
+```
+
+It reads the same `~/.wta/state` files the dashboard uses, so it relies on the
+optional Claude Code hooks (`wta install-hooks`) to know when an agent needs
+input. Outbound only for now; **inbound control** (reply in chat → type into the
+agent via `tmux send-keys`) is on the roadmap.
 
 ## Config (env)
 

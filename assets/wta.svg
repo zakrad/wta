@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="430" viewBox="0 0 760 430">
+<rect width="760" height="430" rx="10" fill="#0a0f0a"/>
+<rect width="760" height="34" rx="10" fill="#0c140c"/>
+<rect y="24" width="760" height="10" fill="#0c140c"/>
+<circle cx="20" cy="17.0" r="6" fill="#e0614a"/>
+<circle cx="40" cy="17.0" r="6" fill="#d7c04a"/>
+<circle cx="60" cy="17.0" r="6" fill="#57d977"/>
+<text x="356.0" y="22.0" fill="#6b7d6b" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">wta</text>
+<line x1="298" y1="44" x2="298" y2="388" stroke="#274b2f"/>
+<line x1="0" y1="390" x2="760" y2="390" stroke="#274b2f"/>
+<text x="18.0" y="60.0" fill="#57d977" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">INSTANCES</text>
+<rect x="12" y="72" width="276" height="42" rx="5" fill="#57d977"/>
+<text x="18.0" y="86.0" fill="#06120a" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">1. auth</text>
+<text x="272.0" y="86.0" fill="#06120a" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">⠋</text>
+<text x="18.0" y="106.0" fill="#06120a" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">  agent/auth  </text>
+<text x="135.6" y="106.0" fill="#06120a" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">+40</text>
+<text x="160.8" y="106.0" fill="#06120a" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">,</text>
+<text x="169.2" y="106.0" fill="#06120a" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">-4</text>
+<text x="18.0" y="134.0" fill="#9cc7a4" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">2. flaky</text>
+<text x="272.0" y="134.0" fill="#d7c04a" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">▲</text>
+<text x="18.0" y="154.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">  agent/flaky  </text>
+<text x="144.0" y="154.0" fill="#57d977" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">+3</text>
+<text x="160.8" y="154.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">,</text>
+<text x="169.2" y="154.0" fill="#e0614a" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">-0</text>
+<text x="18.0" y="182.0" fill="#9cc7a4" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">3. docs</text>
+<text x="272.0" y="182.0" fill="#e0614a" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">✗</text>
+<text x="18.0" y="202.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">  agent/docs  </text>
+<text x="135.6" y="202.0" fill="#57d977" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">+120</text>
+<text x="169.2" y="202.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">,</text>
+<text x="177.6" y="202.0" fill="#e0614a" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">-8</text>
+<text x="312.0" y="60.0" fill="#57d977" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">Preview</text>
+<text x="370.8" y="60.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">   </text>
+<text x="396.0" y="60.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">Diff</text>
+<line x1="312" y1="66" x2="370.8" y2="66" stroke="#57d977"/>
+<text x="312.0" y="88.0" fill="#9cc7a4" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">$ cargo test</text>
+<text x="312.0" y="108.0" fill="#9cc7a4" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">   Compiling app v0.1.0</text>
+<text x="312.0" y="128.0" fill="#9cc7a4" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">running 8 tests</text>
+<text x="312.0" y="148.0" fill="#9cc7a4" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">........</text>
+<text x="312.0" y="168.0" fill="#8bf7a8" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">test result: ok. 8 passed; 0 failed</text>
+<text x="312.0" y="188.0" fill="#9cc7a4" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve"></text>
+<text x="312.0" y="208.0" fill="#9cc7a4" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">&gt; awaiting your review…</text>
+<text x="18.0" y="414.0" fill="#57d977" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">n</text>
+<text x="26.4" y="414.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve"> new  </text>
+<text x="76.8" y="414.0" fill="#57d977" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">s</text>
+<text x="85.2" y="414.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve"> stop  </text>
+<text x="144.0" y="414.0" fill="#57d977" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">D</text>
+<text x="152.4" y="414.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve"> kill   </text>
+<text x="219.6" y="414.0" fill="#57d977" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">↵</text>
+<text x="228.0" y="414.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve"> attach  </text>
+<text x="303.6" y="414.0" fill="#57d977" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">tab</text>
+<text x="328.8" y="414.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve"> diff  </text>
+<text x="387.6" y="414.0" fill="#57d977" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">?</text>
+<text x="396.0" y="414.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve"> help  </text>
+<text x="454.8" y="414.0" fill="#57d977" font-weight="bold" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve">q</text>
+<text x="463.2" y="414.0" fill="#6b7d6b" font-weight="normal" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="14" xml:space="preserve"> quit</text>
+</svg>
