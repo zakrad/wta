@@ -26,6 +26,10 @@ fn main() -> anyhow::Result<()> {
             worktree::resume(&task)?;
             println!("resumed '{task}' — attach with `wta attach {task}`");
         }
+        Command::Push { task, pr } => {
+            let summary = worktree::push(&task, pr)?;
+            println!("{summary}");
+        }
         Command::Rm { task, force } => {
             worktree::rm(&task, force)?;
             println!("removed '{task}' (session, worktree and branch)");

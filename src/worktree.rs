@@ -289,6 +289,56 @@ pub fn rm(task: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Commit any uncommitted work in the agent's worktree, push its branch, and
+/// (if `make_pr`) open a PR via `gh`. Returns a short human summary.
+pub fn push(task: &str, make_pr: bool) -> Result<String> {
+    let root = repo_root()?;
+    let wt = worktrees_dir(&root).join(task);
+    if !wt.exists() {
+        bail!("no worktree for '{task}'");
+    }
+    let branch = branch_name(task);
+
+    // commit uncommitted changes, if any
+    let dirty = !run_git(&["status", "--porcelain"], Some(&wt))?
+        .trim()
+        .is_empty();
+    if dirty {
+        run_git(&["add", "-A"], Some(&wt))?;
+        run_git(&["commit", "-m", &format!("wta: {task}")], Some(&wt))?;
+    }
+
+    run_git(&["push", "-u", "origin", &branch], Some(&wt))
+        .context("git push failed (is `origin` set?)")?;
+
+    if make_pr {
+        // best-effort: create a PR, or report the existing one.
+        let created = Command::new("gh")
+            .args(["pr", "create", "--fill", "--head", &branch])
+            .current_dir(&wt)
+            .output();
+        if let Ok(o) = created {
+            let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if o.status.success() && url.starts_with("http") {
+                return Ok(format!("PR opened: {url}"));
+            }
+            // maybe it already exists — look it up
+            if let Ok(v) = Command::new("gh")
+                .args(["pr", "view", &branch, "--json", "url", "-q", ".url"])
+                .current_dir(&wt)
+                .output()
+            {
+                let u = String::from_utf8_lossy(&v.stdout).trim().to_string();
+                if v.status.success() && u.starts_with("http") {
+                    return Ok(format!("PR: {u}"));
+                }
+            }
+        }
+        return Ok(format!("pushed {branch} (PR step needs `gh`)"));
+    }
+    Ok(format!("pushed {branch}"))
+}
+
 /// Attach to an agent's session in the foreground (blocks until detach).
 pub fn attach(task: &str) -> Result<()> {
     let session = tmux::session_name(task);

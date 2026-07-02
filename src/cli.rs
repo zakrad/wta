@@ -28,6 +28,12 @@ pub enum Command {
     Stop { task: String },
     /// Resume a stopped agent — re-spawn its session in the existing worktree
     Resume { task: String },
+    /// Commit + push the agent's branch; with --pr, also open a PR via gh
+    Push {
+        task: String,
+        #[arg(long)]
+        pr: bool,
+    },
     /// Destroy an agent: kill the session AND remove its worktree and branch
     Rm {
         task: String,

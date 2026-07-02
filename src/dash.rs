@@ -58,6 +58,7 @@ enum Modal {
     NewPrompt { task: String, prompt: String },
     Confirm(String),
     Resume(String),
+    Push(String),
     Help,
 }
 
@@ -81,9 +82,9 @@ struct App {
     diff_text: String,
     hashes: HashMap<String, u64>,
     spin: usize,
-    err: Option<(String, Instant)>,
-    attach: Option<String>, // session to attach to after this frame
-    scroll: u16,            // preview/diff scroll offset
+    msg: Option<(String, bool, Instant)>, // (text, is_error, when)
+    attach: Option<String>,               // session to attach to after this frame
+    scroll: u16,                          // preview/diff scroll offset
 }
 
 impl App {
@@ -97,7 +98,7 @@ impl App {
             diff_text: String::new(),
             hashes: HashMap::new(),
             spin: 0,
-            err: None,
+            msg: None,
             attach: None,
             scroll: 0,
         }
@@ -106,7 +107,10 @@ impl App {
         self.rows.get(self.sel)
     }
     fn set_err(&mut self, e: impl ToString) {
-        self.err = Some((e.to_string(), Instant::now()));
+        self.msg = Some((e.to_string(), true, Instant::now()));
+    }
+    fn set_info(&mut self, s: impl ToString) {
+        self.msg = Some((s.to_string(), false, Instant::now()));
     }
 }
 
@@ -156,9 +160,9 @@ fn event_loop(term: &mut Term) -> Result<()> {
     let mut last_tick = Instant::now();
 
     loop {
-        if let Some((_, t)) = &app.err {
-            if t.elapsed() > Duration::from_secs(3) {
-                app.err = None;
+        if let Some((_, _, t)) = &app.msg {
+            if t.elapsed() > Duration::from_secs(6) {
+                app.msg = None;
             }
         }
         term.draw(|f| ui(f, &mut app))?;
@@ -290,6 +294,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
+        Modal::Push(task) => {
+            match key.code {
+                KeyCode::Char('y') => {
+                    let task = task.clone();
+                    app.modal = Modal::None;
+                    app.set_info(format!("pushing {task}…"));
+                    match worktree::push(&task, true) {
+                        Ok(summary) => app.set_info(summary),
+                        Err(e) => app.set_err(e),
+                    }
+                    refresh(app);
+                    load_detail(app);
+                }
+                KeyCode::Char('n') | KeyCode::Esc => app.modal = Modal::None,
+                _ => {}
+            }
+            return Ok(false);
+        }
         Modal::Help => {
             app.modal = Modal::None;
             return Ok(false);
@@ -369,6 +391,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('D') => {
             if let Some(task) = app.selected().map(|r| r.task.clone()) {
                 app.modal = Modal::Confirm(task);
+            }
+        }
+        KeyCode::Char('p') => {
+            if let Some(task) = app.selected().map(|r| r.task.clone()) {
+                app.modal = Modal::Push(task);
             }
         }
         KeyCode::Char('r') => {
@@ -741,6 +768,8 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" kill  │  ", muted),
             Span::styled(fkey, action),
             Span::styled(flabel, muted),
+            Span::styled("p", action),
+            Span::styled(" push  │  ", muted),
             Span::styled("tab", action),
             Span::styled(" switch  ", muted),
             Span::styled("?", action),
@@ -756,11 +785,12 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_err(f: &mut Frame, app: &App, area: Rect) {
-    if let Some((e, _)) = &app.err {
+    if let Some((text, is_err, _)) = &app.msg {
+        let color = if *is_err { Color::Red } else { GREEN };
         f.render_widget(
             Paragraph::new(Line::styled(
-                format!(" {e} "),
-                Style::default().fg(Color::Red),
+                format!(" {text} "),
+                Style::default().fg(color),
             ))
             .alignment(Alignment::Center),
             area,
@@ -844,8 +874,32 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::Push(task) => {
+            let area = centered(58, 5, f.area());
+            f.render_widget(Clear, area);
+            let body = vec![
+                Line::raw(format!("Commit, push & open a PR for agent/{task}?")),
+                Line::raw("(commits any uncommitted work first)"),
+                Line::from(vec![
+                    Span::raw("Press "),
+                    Span::styled("y", Style::default().fg(GREEN)),
+                    Span::raw(" to push, "),
+                    Span::styled("n", Style::default().fg(RED)),
+                    Span::raw("/esc to cancel"),
+                ]),
+            ];
+            f.render_widget(
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(HL))
+                        .title(" push "),
+                ),
+                area,
+            );
+        }
         Modal::Help => {
-            let area = centered(52, 16, f.area());
+            let area = centered(52, 17, f.area());
             f.render_widget(Clear, area);
             let k = |key: &str, desc: &str| {
                 Line::from(vec![
@@ -866,6 +920,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("N", "new agent with an initial prompt"),
                 k("s", "stop (keep worktree — resume later)"),
                 k("D", "kill (destroy worktree + branch)"),
+                k("p", "commit + push + open a PR"),
                 k("r", "refresh"),
                 k("q", "quit"),
                 Line::from(""),

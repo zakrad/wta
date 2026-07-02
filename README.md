@@ -86,6 +86,7 @@ wta ls                             list agents with live state + diffstat
 wta attach <task>                  attach to a session (Ctrl-q to detach)
 wta stop <task>                    end the session, keep the worktree (resumable)
 wta resume <task>                  re-spawn a stopped agent in its worktree
+wta push <task> [--pr]             commit + push the agent's branch; --pr opens a PR (gh)
 wta rm <task> [--force]            destroy: session + worktree + branch
 wta dash                           the live dashboard
 wta bridge [--test]                notify Telegram when an agent needs you / finishes
@@ -105,6 +106,7 @@ wta install-hooks [--global]       wire Claude Code hooks -> `wta status`
 | `N` | new agent with an initial prompt (sent to the agent on start) |
 | `s` | stop (keep worktree — resumable) |
 | `D` | kill (destroy worktree + branch, with confirm) |
+| `p` | commit + push the branch and open a PR (confirm) |
 | `?` | help · `r` refresh · `q` quit |
 
 Status glyphs: `⠋ running` · `● ready` · `▲ needs input` (hooks) · `✗ exited` ·
@@ -140,7 +142,7 @@ tighter isolation and hook-aware status.
 | Attach / detach | `Enter` / `Ctrl-q` | `Enter` / `Ctrl-q` |
 | Stop (keep worktree) + resume | ✅ `s` / `resume` | ✅ pause / resume |
 | Diff review in-app | ✅ Diff tab | ✅ Diff tab |
-| Commit & push / PR from the UI | ⏳ roadmap | ✅ |
+| Commit & push / PR from the UI | ✅ `p` | ✅ |
 | New-with-prompt | ✅ `N` | ✅ |
 | Branch picker on create | ⏳ roadmap | ✅ |
 | Reorder sessions | ⏳ roadmap | ✅ |
