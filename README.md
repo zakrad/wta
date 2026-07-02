@@ -36,15 +36,28 @@ in **any terminal** (it does not modify your terminal or shell config).
 
 ## Install
 
+**Homebrew** (macOS / Linux):
+
+```sh
+brew install zakrad/wta/wta
+```
+
+**Curl** (prebuilt binary, no toolchain):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zakrad/wta/main/install.sh | bash
+```
+
+**Cargo** (from source):
+
 ```sh
 cargo install --git https://github.com/zakrad/wta                     # core (1.1 MB)
 cargo install --git https://github.com/zakrad/wta --features telegram # + remote notifications
-# or from a checkout:
-cargo build --release && cp target/release/wta ~/.local/bin/
 ```
 
 The core binary is dependency-light; the optional **`telegram`** feature adds the
-`wta bridge` remote-notification command (and pulls in TLS).
+`wta bridge` remote-notification command (and pulls in TLS). You still need
+**tmux** installed (`brew install tmux`).
 
 ## Quickstart
 

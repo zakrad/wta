@@ -391,19 +391,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         Modal::None => {}
     }
 
-    // Shift+Up/Down scroll the preview/diff pane.
+    // Shift+Up/Down scroll the active pane. `scroll` means "lines away from the
+    // resting edge": Diff rests at the top (scroll down into it), Preview rests at
+    // the bottom / latest output (scroll up into history).
     if key.modifiers.contains(KeyModifiers::SHIFT) {
-        match key.code {
-            KeyCode::Up => {
-                app.scroll = app.scroll.saturating_sub(1);
-                return Ok(false);
-            }
-            KeyCode::Down => {
-                app.scroll = app.scroll.saturating_add(1);
-                return Ok(false);
-            }
-            _ => {}
+        let max_preview = app.preview.lines().count().saturating_sub(1) as u16;
+        match (app.tab, key.code) {
+            (Tab::Preview, KeyCode::Up) => app.scroll = (app.scroll + 1).min(max_preview),
+            (Tab::Preview, KeyCode::Down) => app.scroll = app.scroll.saturating_sub(1),
+            (Tab::Diff, KeyCode::Up) => app.scroll = app.scroll.saturating_sub(1),
+            (Tab::Diff, KeyCode::Down) => app.scroll = app.scroll.saturating_add(1),
+            _ => return Ok(false),
         }
+        return Ok(false);
     }
 
     match key.code {
@@ -778,14 +778,17 @@ fn render_right(f: &mut Frame, app: &App, area: Rect) {
 
     let body_h = parts[1].height as usize;
     let (content, scroll): (Vec<Line>, u16) = match app.tab {
-        // Preview is a live tail (latest output pinned to the bottom); no scroll.
-        Tab::Preview => (
-            tail_lines(&app.preview, body_h)
-                .into_iter()
+        // Preview pins to the latest output (bottom); Shift+↑ scrolls up into history.
+        Tab::Preview => {
+            let all: Vec<Line> = app
+                .preview
+                .lines()
                 .map(|l| Line::styled(l.to_string(), Style::default().fg(GREEN_SOFT)))
-                .collect(),
-            0,
-        ),
+                .collect();
+            let max_off = all.len().saturating_sub(body_h) as u16;
+            let top = max_off.saturating_sub(app.scroll);
+            (all, top)
+        }
         // Diff renders in full and is scrollable with Shift+↑/↓.
         Tab::Diff => {
             let (a, d) = app
@@ -1032,7 +1035,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("↵ / o", "attach into the agent (type here)"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("tab", "switch Preview / Diff"),
-                k("Shift+↑↓", "scroll the Diff"),
+                k("Shift+↑↓", "scroll Preview / Diff"),
                 k("n", "new agent"),
                 k("N", "new agent with an initial prompt"),
                 k("s", "stop (keep worktree — resume later)"),
@@ -1063,15 +1066,6 @@ fn render_modal(f: &mut Frame, app: &App) {
         }
         Modal::None => {}
     }
-}
-
-fn tail_lines(s: &str, n: usize) -> Vec<&str> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let lines: Vec<&str> = s.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    lines[start..].to_vec()
 }
 
 fn centered(w: u16, h: u16, area: Rect) -> Rect {
