@@ -19,6 +19,16 @@ fn worktree_subdir() -> String {
 fn agent_cmd() -> String {
     env_or("WTA_AGENT_CMD", "claude")
 }
+/// Args appended to the agent command when *resuming* a stopped agent, so it
+/// continues the previous conversation instead of starting fresh. Default is
+/// Claude Code's `--continue` (continues the latest session in that directory).
+/// Set empty to just relaunch the agent with no resume flag.
+fn resume_args() -> Vec<String> {
+    env_or("WTA_AGENT_RESUME_ARGS", "--continue")
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect()
+}
 fn context_files() -> Vec<String> {
     env_or(
         "WTA_CONTEXT_FILES",
@@ -135,11 +145,21 @@ fn make_worktree(task: &str) -> Result<(PathBuf, PathBuf)> {
     Ok((root, wt))
 }
 
+/// Build the tmux pane command: `env WTA_TASK=<task> <agent_cmd> <tail...>`.
+/// The `env` wrapper is what lets the agent's Claude Code hooks (`wta status`)
+/// know which task they belong to.
+fn agent_argv(task: &str, tail: &[String]) -> (String, Vec<String>) {
+    let mut extra = vec![format!("WTA_TASK={task}"), agent_cmd()];
+    extra.extend_from_slice(tail);
+    ("env".to_string(), extra)
+}
+
 pub fn new(task: &str, agent_args: &[String]) -> Result<()> {
     let (_root, wt) = make_worktree(task)?;
     let wt_str = wt.to_string_lossy().into_owned();
     let session = tmux::session_name(task);
-    tmux::new_session(&session, &wt, &agent_cmd(), agent_args)?;
+    let (prog, extra) = agent_argv(task, agent_args);
+    tmux::new_session(&session, &wt, &prog, &extra)?;
     let _ = status::record(task, "running", &wt_str);
     Ok(())
 }
@@ -151,7 +171,8 @@ pub fn resume_at(task: &str, wt: &Path) -> Result<()> {
         bail!("no worktree at {} to resume", wt.display());
     }
     let session = tmux::session_name(task);
-    tmux::new_session(&session, wt, &agent_cmd(), &[])?;
+    let (prog, extra) = agent_argv(task, &resume_args());
+    tmux::new_session(&session, wt, &prog, &extra)?;
     let _ = status::record(task, "running", &wt.to_string_lossy());
     Ok(())
 }

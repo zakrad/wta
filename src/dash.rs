@@ -24,7 +24,10 @@ use crate::{status, tmux, worktree};
 // tmux does (green = ANSI 2, bright green = ANSI 10). No hardcoded hex. ----
 const GREEN: Color = Color::Green;
 const GREEN_BRIGHT: Color = Color::LightGreen;
-const GREEN_SOFT: Color = Color::Green;
+// Body text (preview + diff context) uses the terminal's DEFAULT foreground so
+// the UI blends into whatever theme you run. All colors are ANSI-indexed (no
+// RGB), so the whole theme inherits your terminal palette at zero binary cost.
+const GREEN_SOFT: Color = Color::Reset;
 const SEL_BG: Color = Color::Green;
 const SEL_FG: Color = Color::Black;
 const HL: Color = Color::Green;

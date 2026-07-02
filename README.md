@@ -72,9 +72,11 @@ wta new <task>      create worktree + branch + start the agent session
 ```
 
 **Stop vs. kill:** `stop` (`s`) is non-destructive — it ends the tmux session but
-keeps the worktree and all uncommitted work, so `resume` re-spawns exactly where
-you left off. `kill` (`D`) tears everything down. After a reboot the tmux server
-is gone but worktrees remain, so agents show `✗` and resume brings them back.
+keeps the worktree and all uncommitted work. **Resume continues the agent's
+previous conversation** (it relaunches with `--continue`), so you pick up the
+same Claude Code session, not a blank one. `kill` (`D`) tears everything down.
+After a reboot the tmux server is gone but worktrees remain, so agents show `✗`
+and resume brings them back.
 
 ## Commands
 
@@ -168,6 +170,7 @@ agent via `tmux send-keys`) is on the roadmap.
 | Var | Default | Meaning |
 |---|---|---|
 | `WTA_AGENT_CMD` | `claude` | program started in each session |
+| `WTA_AGENT_RESUME_ARGS` | `--continue` | args added when **resuming** so the agent continues its previous conversation (Claude Code's `--continue`). Empty = relaunch fresh. |
 | `WTA_WORKTREE_DIR` | `.agents` | worktree dir under the repo root |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
 
