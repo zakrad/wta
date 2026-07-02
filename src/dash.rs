@@ -54,12 +54,45 @@ enum Tab {
 
 enum Modal {
     None,
-    NewTask { name: String, prompt: bool },
-    NewPrompt { task: String, prompt: String },
+    NewTask {
+        name: String,
+        prompt: bool,
+    },
+    NewPrompt {
+        task: String,
+        prompt: String,
+    },
     Confirm(String),
     Resume(String),
     Push(String),
+    BranchPick {
+        branches: Vec<String>,
+        filter: String,
+        sel: usize,
+    },
     Help,
+}
+
+/// Sanitize a branch name into a task/dir name (e.g. `feature/login` -> `feature_login`).
+fn sanitize_task(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Branches matching the filter (case-insensitive substring).
+fn branch_matches<'a>(branches: &'a [String], filter: &str) -> Vec<&'a String> {
+    let f = filter.to_lowercase();
+    branches
+        .iter()
+        .filter(|b| f.is_empty() || b.to_lowercase().contains(&f))
+        .collect()
 }
 
 struct Row {
@@ -294,6 +327,45 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
+        Modal::BranchPick {
+            branches,
+            filter,
+            sel,
+        } => {
+            let n = branch_matches(branches, filter).len();
+            match key.code {
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Up => *sel = sel.saturating_sub(1),
+                KeyCode::Down => {
+                    if *sel + 1 < n {
+                        *sel += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let picked = branch_matches(branches, filter)
+                        .get(*sel)
+                        .map(|s| (*s).clone());
+                    app.modal = Modal::None;
+                    if let Some(base) = picked {
+                        let task = sanitize_task(&base);
+                        if let Err(e) = worktree::new_with_base(&task, &[], &base) {
+                            app.set_err(e);
+                        }
+                        refresh(app);
+                    }
+                }
+                KeyCode::Backspace => {
+                    filter.pop();
+                    *sel = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    filter.push(c);
+                    *sel = 0;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
         Modal::Push(task) => {
             match key.code {
                 KeyCode::Char('y') => {
@@ -398,6 +470,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 app.modal = Modal::Push(task);
             }
         }
+        KeyCode::Char('b') => match worktree::list_branches() {
+            Ok(bs) if !bs.is_empty() => {
+                app.modal = Modal::BranchPick {
+                    branches: bs,
+                    filter: String::new(),
+                    sel: 0,
+                }
+            }
+            Ok(_) => app.set_err("no branches to base an agent on"),
+            Err(e) => app.set_err(e),
+        },
         KeyCode::Char('r') => {
             refresh(app);
             load_detail(app);
@@ -898,8 +981,42 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::BranchPick {
+            branches,
+            filter,
+            sel,
+        } => {
+            let area = centered(58, 16, f.area());
+            f.render_widget(Clear, area);
+            let matches = branch_matches(branches, filter);
+            let mut lines = vec![Line::from(vec![
+                Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{filter}▏")),
+            ])];
+            let h = area.height.saturating_sub(3) as usize;
+            for (i, b) in matches.iter().take(h).enumerate() {
+                let style = if i == *sel {
+                    Style::default()
+                        .bg(SEL_BG)
+                        .fg(SEL_FG)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(GREEN_SOFT)
+                };
+                lines.push(Line::styled(format!(" {b}"), style));
+            }
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(HL))
+                        .title(" base a new agent on a branch (↑↓ Enter, Esc) "),
+                ),
+                area,
+            );
+        }
         Modal::Help => {
-            let area = centered(52, 17, f.area());
+            let area = centered(52, 18, f.area());
             f.render_widget(Clear, area);
             let k = |key: &str, desc: &str| {
                 Line::from(vec![
@@ -921,6 +1038,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("s", "stop (keep worktree — resume later)"),
                 k("D", "kill (destroy worktree + branch)"),
                 k("p", "commit + push + open a PR"),
+                k("b", "new agent based on an existing branch"),
                 k("r", "refresh"),
                 k("q", "quit"),
                 Line::from(""),

@@ -87,8 +87,10 @@ fn branch_name(task: &str) -> String {
     format!("agent/{task}")
 }
 
-/// Create the worktree + copy context + optional setup, returning the worktree path.
-fn make_worktree(task: &str) -> Result<(PathBuf, PathBuf)> {
+/// Create the worktree + copy context + optional setup, returning the worktree
+/// path. If `base` is given, the new `agent/<task>` branch starts from it;
+/// otherwise from HEAD.
+fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
     let root = repo_root()?;
     let branch = branch_name(task);
     let wt = worktrees_dir(&root).join(task);
@@ -109,6 +111,11 @@ fn make_worktree(task: &str) -> Result<(PathBuf, PathBuf)> {
     .is_ok();
     if branch_exists {
         run_git(&["worktree", "add", &wt_str, &branch], Some(&root))?;
+    } else if let Some(base) = base {
+        run_git(
+            &["worktree", "add", "-b", &branch, &wt_str, base],
+            Some(&root),
+        )?;
     } else {
         run_git(&["worktree", "add", "-b", &branch, &wt_str], Some(&root))?;
     }
@@ -155,13 +162,33 @@ fn agent_argv(task: &str, tail: &[String]) -> (String, Vec<String>) {
 }
 
 pub fn new(task: &str, agent_args: &[String]) -> Result<()> {
-    let (_root, wt) = make_worktree(task)?;
+    new_impl(task, agent_args, None)
+}
+
+/// Like `new`, but base the agent's branch on an existing branch.
+pub fn new_with_base(task: &str, agent_args: &[String], base: &str) -> Result<()> {
+    new_impl(task, agent_args, Some(base))
+}
+
+fn new_impl(task: &str, agent_args: &[String], base: Option<&str>) -> Result<()> {
+    let (_root, wt) = make_worktree(task, base)?;
     let wt_str = wt.to_string_lossy().into_owned();
     let session = tmux::session_name(task);
     let (prog, extra) = agent_argv(task, agent_args);
     tmux::new_session(&session, &wt, &prog, &extra)?;
     let _ = status::record(task, "running", &wt_str);
     Ok(())
+}
+
+/// Local branches a new agent could be based on (excludes wta's own `agent/*`).
+pub fn list_branches() -> Result<Vec<String>> {
+    let root = repo_root()?;
+    let out = run_git(&["branch", "--format=%(refname:short)"], Some(&root))?;
+    Ok(out
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.starts_with("agent/"))
+        .collect())
 }
 
 /// Re-spawn an agent's session in its EXISTING worktree (its session was stopped

@@ -81,7 +81,8 @@ and resume brings them back.
 ## Commands
 
 ```
-wta new <task> [-- <agent args>]   worktree + branch + start the agent session
+wta new <task> [--base <branch>] [-- <agent args>]   worktree + branch + start the agent session
+wta [--server default] <cmd>       run agents on your own tmux server instead of the isolated one
 wta ls                             list agents with live state + diffstat
 wta attach <task>                  attach to a session (Ctrl-q to detach)
 wta stop <task>                    end the session, keep the worktree (resumable)
@@ -107,6 +108,7 @@ wta install-hooks [--global]       wire Claude Code hooks -> `wta status`
 | `s` | stop (keep worktree — resumable) |
 | `D` | kill (destroy worktree + branch, with confirm) |
 | `p` | commit + push the branch and open a PR (confirm) |
+| `b` | new agent based on an existing branch (filterable picker) |
 | `?` | help · `r` refresh · `q` quit |
 
 Status glyphs: `⠋ running` · `● ready` · `▲ needs input` (hooks) · `✗ exited` ·
@@ -126,6 +128,12 @@ keeps its own server. The tradeoff: if you launch `wta` from *inside* your own
 tmux, attaching would nest tmux-in-tmux, so wta instead opens the agent in a
 **`display-popup`** (tmux ≥ 3.2); outside tmux it attaches fullscreen.
 
+**Prefer your own tmux?** Pass `--server default` (or set `WTA_TMUX_SOCKET=default`)
+to run agents on your normal tmux server — they show in your `tmux ls`, and from
+inside tmux `Enter` uses `switch-client` (no nesting). In this mode wta does
+**not** set global options or bind `Ctrl-q` (so it never touches your config); you
+detach with your usual tmux keys. The isolated socket remains the default.
+
 ## How it compares
 
 wta is in the same family as terminal parallel-agent runners like **Claude
@@ -144,7 +152,8 @@ tighter isolation and hook-aware status.
 | Diff review in-app | ✅ Diff tab | ✅ Diff tab |
 | Commit & push / PR from the UI | ✅ `p` | ✅ |
 | New-with-prompt | ✅ `N` | ✅ |
-| Branch picker on create | ⏳ roadmap | ✅ |
+| Branch picker on create | ✅ `b` / `--base` | ✅ |
+| Use your own tmux server | ✅ `--server default` (opt-in) | always (no isolation) |
 | Reorder sessions | ⏳ roadmap | ✅ |
 | Remote / mobile notifications | ✅ Telegram bridge (outbound; inbound roadmap) | ❌ |
 

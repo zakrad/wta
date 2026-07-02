@@ -6,12 +6,25 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Dedicated socket so wta's tmux is fully isolated from the user's tmux server.
-const SOCKET: &str = "wta";
+/// Which tmux server to use. Default is a dedicated socket ("wta") so wta is
+/// fully isolated from the user's own tmux. `WTA_TMUX_SOCKET=default` (or the
+/// `--server default` flag) makes agents live on the user's own tmux server —
+/// in which case wta must NOT touch global options/keybindings.
+fn socket_name() -> String {
+    std::env::var("WTA_TMUX_SOCKET").unwrap_or_else(|_| "wta".into())
+}
+
+/// True when using our own dedicated socket (safe to set global tmux options).
+fn dedicated() -> bool {
+    let s = socket_name();
+    !s.is_empty() && s != "default"
+}
 
 fn tmux() -> Command {
     let mut c = Command::new("tmux");
-    c.args(["-L", SOCKET]);
+    if dedicated() {
+        c.arg("-L").arg(socket_name());
+    }
     c
 }
 
@@ -43,18 +56,25 @@ pub fn has_session(name: &str) -> bool {
 /// hide the status bar, enable mouse, zero escape latency, bigger scrollback,
 /// and bind Ctrl-q to detach (root table, so no prefix needed).
 fn configure(name: &str) {
+    // Session-scoped (`-t <session>`): safe on any server — only affects our sessions.
     for (opt, val) in [
         ("status", "off"),
         ("mouse", "on"),
-        ("escape-time", "0"),
         ("history-limit", "10000"),
     ] {
         let _ = tmux().args(["set-option", "-t", name, opt, val]).status();
     }
-    // Ctrl-q detaches (only affects this dedicated server).
-    let _ = tmux()
-        .args(["bind-key", "-n", "C-q", "detach-client"])
-        .status();
+    // Server-global tweaks: ONLY on our dedicated socket, so we never clobber the
+    // user's own tmux (escape-time is server-wide; `bind -n C-q` rebinds Ctrl-q
+    // for every pane on the server).
+    if dedicated() {
+        let _ = tmux()
+            .args(["set-option", "-g", "escape-time", "0"])
+            .status();
+        let _ = tmux()
+            .args(["bind-key", "-n", "C-q", "detach-client"])
+            .status();
+    }
 }
 
 pub fn new_session(name: &str, cwd: &Path, program: &str, extra: &[String]) -> Result<()> {
@@ -104,12 +124,23 @@ pub fn kill(name: &str) -> Result<()> {
 /// Attach fullscreen, inheriting the terminal. Blocks until the user hits Ctrl-q
 /// (bound to detach-client). Caller must suspend any raw-mode TUI first.
 pub fn attach_blocking(name: &str) -> Result<()> {
-    // If launched from inside the user's OWN tmux, a plain attach to our
-    // dedicated socket would nest tmux-in-tmux (stacked status lines, prefix
-    // clashes). Prefer a popup on the outer server (tmux >= 3.2), which isolates
-    // the agent visually; fall back to a nested attach if popups aren't available.
-    if std::env::var("TMUX").is_ok() {
-        let inner = format!("tmux -L {SOCKET} attach-session -t {name}");
+    let inside_tmux = std::env::var("TMUX").is_ok();
+
+    // On the user's OWN server, agents share their tmux — so switch to the
+    // session instead of a (guarded) nested attach. Ctrl-q isn't bound here, so
+    // the user detaches/returns with their normal tmux keys.
+    if !dedicated() && inside_tmux {
+        tmux()
+            .args(["switch-client", "-t", name])
+            .status()
+            .context("tmux switch-client failed")?;
+        return Ok(());
+    }
+
+    // On our dedicated socket, launched from inside the user's tmux, a plain
+    // attach would nest tmux-in-tmux; use a popup (tmux >= 3.2) to isolate it.
+    if dedicated() && inside_tmux {
+        let inner = format!("tmux -L {} attach-session -t {}", socket_name(), name);
         if let Ok(s) = Command::new("tmux")
             .args(["display-popup", "-w", "92%", "-h", "92%", "-E", &inner])
             .status()
@@ -120,17 +151,19 @@ pub fn attach_blocking(name: &str) -> Result<()> {
         }
     }
 
-    // best-effort hint shown briefly in the agent's message line
-    let _ = tmux()
-        .args([
-            "display-message",
-            "-d",
-            "1200",
-            "-t",
-            name,
-            "press Ctrl-q to return to wta",
-        ])
-        .status();
+    // best-effort hint shown briefly in the agent's message line (dedicated socket)
+    if dedicated() {
+        let _ = tmux()
+            .args([
+                "display-message",
+                "-d",
+                "1200",
+                "-t",
+                name,
+                "press Ctrl-q to return to wta",
+            ])
+            .status();
+    }
     tmux()
         .args(["attach-session", "-t", name])
         .stdin(Stdio::inherit())

@@ -11,9 +11,20 @@ use cli::{Cli, Command};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // `--server default` (or WTA_TMUX_SOCKET) picks the tmux server for this run.
+    if let Some(server) = &cli.server {
+        std::env::set_var("WTA_TMUX_SOCKET", server);
+    }
     match cli.cmd {
-        Command::New { task, agent_args } => {
-            worktree::new(&task, &agent_args)?;
+        Command::New {
+            task,
+            base,
+            agent_args,
+        } => {
+            match base {
+                Some(b) => worktree::new_with_base(&task, &agent_args, &b)?,
+                None => worktree::new(&task, &agent_args)?,
+            }
             println!("started agent '{task}' — attach with `wta attach {task}` (or `wta dash`)");
         }
         Command::Ls => worktree::ls()?,

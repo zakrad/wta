@@ -7,6 +7,10 @@ use clap::{Parser, Subcommand};
     about = "worktree task agents — parallel AI agents in git worktrees + tmux sessions"
 )]
 pub struct Cli {
+    /// tmux server: "wta" (default, isolated socket) or "default" (your own tmux)
+    #[arg(long, global = true)]
+    pub server: Option<String>,
+
     #[command(subcommand)]
     pub cmd: Command,
 }
@@ -16,6 +20,9 @@ pub enum Command {
     /// Create a worktree + branch, copy local context, start the agent in a tmux session
     New {
         task: String,
+        /// Base the agent's branch on an existing branch (default: HEAD)
+        #[arg(long)]
+        base: Option<String>,
         /// Everything after `--` is passed to the agent command (default: claude)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,
