@@ -54,7 +54,8 @@ enum Tab {
 
 enum Modal {
     None,
-    NewTask(String),
+    NewTask { name: String, prompt: bool },
+    NewPrompt { task: String, prompt: String },
     Confirm(String),
     Resume(String),
     Help,
@@ -189,13 +190,21 @@ fn event_loop(term: &mut Term) -> Result<()> {
 /// Returns Ok(true) to quit.
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     match &mut app.modal {
-        Modal::NewTask(buf) => {
+        Modal::NewTask { name, prompt } => {
             match key.code {
                 KeyCode::Enter => {
-                    let name = std::mem::take(buf).trim().to_string();
-                    app.modal = Modal::None;
-                    if !name.is_empty() {
-                        if let Err(e) = worktree::new(&name, &[]) {
+                    let task = name.trim().to_string();
+                    let want_prompt = *prompt;
+                    if task.is_empty() {
+                        app.modal = Modal::None;
+                    } else if want_prompt {
+                        app.modal = Modal::NewPrompt {
+                            task,
+                            prompt: String::new(),
+                        };
+                    } else {
+                        app.modal = Modal::None;
+                        if let Err(e) = worktree::new(&task, &[]) {
                             app.set_err(e);
                         }
                         refresh(app);
@@ -203,9 +212,38 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 }
                 KeyCode::Esc => app.modal = Modal::None,
                 KeyCode::Backspace => {
-                    buf.pop();
+                    name.pop();
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => buf.push(c),
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => name.push(c),
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::NewPrompt { task, prompt } => {
+            match key.code {
+                KeyCode::Enter => {
+                    let task = std::mem::take(task);
+                    let prompt = std::mem::take(prompt);
+                    app.modal = Modal::None;
+                    // Claude Code accepts an initial prompt as a positional arg:
+                    // `claude "<prompt>"`. Empty prompt → plain new agent.
+                    let args: Vec<String> = if prompt.trim().is_empty() {
+                        vec![]
+                    } else {
+                        vec![prompt]
+                    };
+                    if let Err(e) = worktree::new(&task, &args) {
+                        app.set_err(e);
+                    }
+                    refresh(app);
+                }
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Backspace => {
+                    prompt.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    prompt.push(c)
+                }
                 _ => {}
             }
             return Ok(false);
@@ -307,7 +345,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             Some(_) => app.set_err("no session and no worktree to resume"),
             None => {}
         },
-        KeyCode::Char('n') => app.modal = Modal::NewTask(String::new()),
+        KeyCode::Char('n') => {
+            app.modal = Modal::NewTask {
+                name: String::new(),
+                prompt: false,
+            }
+        }
+        KeyCode::Char('N') => {
+            app.modal = Modal::NewTask {
+                name: String::new(),
+                prompt: true,
+            }
+        }
         KeyCode::Char('s') => {
             if let Some(task) = app.selected().map(|r| r.task.clone()) {
                 if let Err(e) = worktree::stop(&task) {
@@ -684,7 +733,7 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             ("↵/o", " attach  ")
         };
         vec![
-            Span::styled("n", action),
+            Span::styled("n/N", action),
             Span::styled(" new  ", muted),
             Span::styled("s", action),
             Span::styled(" stop  ", muted),
@@ -721,15 +770,33 @@ fn render_err(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_modal(f: &mut Frame, app: &App) {
     match &app.modal {
-        Modal::NewTask(buf) => {
+        Modal::NewTask { name, prompt } => {
             let area = centered(50, 3, f.area());
             f.render_widget(Clear, area);
-            let p = Paragraph::new(format!("{buf}▏")).block(
+            let title = if *prompt {
+                " new task name → then a prompt (Esc cancels) "
+            } else {
+                " new task name (Esc cancels) "
+            };
+            let p = Paragraph::new(format!("{name}▏")).block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(GREEN))
-                    .title(" new task name (Esc cancels) "),
+                    .title(title),
             );
+            f.render_widget(p, area);
+        }
+        Modal::NewPrompt { task, prompt } => {
+            let area = centered(64, 6, f.area());
+            f.render_widget(Clear, area);
+            let p = Paragraph::new(format!("{prompt}▏"))
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(GREEN))
+                        .title(format!(" prompt for '{task}' (Enter starts, Esc cancels) ")),
+                );
             f.render_widget(p, area);
         }
         Modal::Confirm(task) => {
@@ -796,6 +863,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("tab", "switch Preview / Diff"),
                 k("Shift+↑↓", "scroll the Diff"),
                 k("n", "new agent"),
+                k("N", "new agent with an initial prompt"),
                 k("s", "stop (keep worktree — resume later)"),
                 k("D", "kill (destroy worktree + branch)"),
                 k("r", "refresh"),

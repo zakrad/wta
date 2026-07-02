@@ -104,6 +104,22 @@ pub fn kill(name: &str) -> Result<()> {
 /// Attach fullscreen, inheriting the terminal. Blocks until the user hits Ctrl-q
 /// (bound to detach-client). Caller must suspend any raw-mode TUI first.
 pub fn attach_blocking(name: &str) -> Result<()> {
+    // If launched from inside the user's OWN tmux, a plain attach to our
+    // dedicated socket would nest tmux-in-tmux (stacked status lines, prefix
+    // clashes). Prefer a popup on the outer server (tmux >= 3.2), which isolates
+    // the agent visually; fall back to a nested attach if popups aren't available.
+    if std::env::var("TMUX").is_ok() {
+        let inner = format!("tmux -L {SOCKET} attach-session -t {name}");
+        if let Ok(s) = Command::new("tmux")
+            .args(["display-popup", "-w", "92%", "-h", "92%", "-E", &inner])
+            .status()
+        {
+            if s.success() {
+                return Ok(());
+            }
+        }
+    }
+
     // best-effort hint shown briefly in the agent's message line
     let _ = tmux()
         .args([

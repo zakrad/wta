@@ -102,6 +102,7 @@ wta install-hooks [--global]       wire Claude Code hooks -> `wta status`
 | `Tab` | switch Preview / Diff |
 | `Enter` / `o` | attach into the agent and type (Ctrl-q returns; on `✗`, resume) |
 | `n` | new agent |
+| `N` | new agent with an initial prompt (sent to the agent on start) |
 | `s` | stop (keep worktree — resumable) |
 | `D` | kill (destroy worktree + branch, with confirm) |
 | `?` | help · `r` refresh · `q` quit |
@@ -115,6 +116,13 @@ Agents run as `wta-<task>` sessions on a **dedicated tmux server** (`tmux -L wta
 configured for a seamless attach — status bar off, mouse on, `Ctrl-q` bound to
 detach. Because it’s a separate server, wta never appears in your normal
 `tmux ls` and never interferes with your own tmux.
+
+**Why a dedicated socket** (and not your default tmux): wta sets *global* options
+(hide the status bar, bind `Ctrl-q`) to make attach feel like a native app. On
+your own tmux server that would clobber your config and keybindings — so wta
+keeps its own server. The tradeoff: if you launch `wta` from *inside* your own
+tmux, attaching would nest tmux-in-tmux, so wta instead opens the agent in a
+**`display-popup`** (tmux ≥ 3.2); outside tmux it attaches fullscreen.
 
 ## How it compares
 
@@ -133,7 +141,8 @@ tighter isolation and hook-aware status.
 | Stop (keep worktree) + resume | ✅ `s` / `resume` | ✅ pause / resume |
 | Diff review in-app | ✅ Diff tab | ✅ Diff tab |
 | Commit & push / PR from the UI | ⏳ roadmap | ✅ |
-| New-with-prompt + branch picker | ⏳ roadmap | ✅ |
+| New-with-prompt | ✅ `N` | ✅ |
+| Branch picker on create | ⏳ roadmap | ✅ |
 | Reorder sessions | ⏳ roadmap | ✅ |
 | Remote / mobile notifications | ✅ Telegram bridge (outbound; inbound roadmap) | ❌ |
 
