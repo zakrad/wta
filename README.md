@@ -9,7 +9,7 @@ Agents keep running when you close the terminal or your laptop sleeps. Stop one
 and resume it later with its work intact. A single ~1 MB Rust binary that runs
 in **any terminal** (it does not modify your terminal or shell config).
 
-![wta dashboard](assets/wta.png)
+![wta dashboard — an Instances sidebar of parallel AI agents (running/waiting/exited) beside a live colorized diff](assets/wta.png)
 
 ## Features
 

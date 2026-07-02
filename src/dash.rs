@@ -1398,6 +1398,133 @@ mod tests {
         assert!(!is_trust_prompt("running tests..."));
     }
 
+    /// Turn a rendered ratatui buffer into a terminal-style SVG screenshot,
+    /// preserving the real per-cell colors from the actual `ui()` render.
+    fn buffer_to_svg(buf: &ratatui::buffer::Buffer) -> String {
+        let cols = buf.area.width as usize;
+        let rows = buf.area.height as usize;
+        let cw = 8.6_f64;
+        let ch = 17.5_f64;
+        let fs = 14.0_f64;
+        let pad = 18.0_f64;
+        let tbar = 36.0_f64;
+        let cx = pad;
+        let cy = tbar + pad;
+        let w = cx * 2.0 + cols as f64 * cw;
+        let h = cy + rows as f64 * ch + pad;
+
+        let hex = |c: Color| -> String {
+            match c {
+                Color::Green => "#3fb950".into(),
+                Color::LightGreen => "#57e389".into(),
+                Color::Red => "#ff7b72".into(),
+                Color::Yellow => "#e3b341".into(),
+                Color::Cyan => "#56d4dd".into(),
+                Color::Blue => "#79c0ff".into(),
+                Color::Magenta => "#d2a8ff".into(),
+                Color::DarkGray => "#6e7681".into(),
+                Color::Gray => "#b8c0b8".into(),
+                Color::White => "#e6ede6".into(),
+                Color::Black => "#0b0f0b".into(),
+                Color::Reset => "#cdd6cd".into(),
+                Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+                _ => "#cdd6cd".into(),
+            }
+        };
+        let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+
+        let mut o = String::new();
+        o.push_str(&format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0}" height="{h:.0}" viewBox="0 0 {w:.0} {h:.0}" font-family="ui-monospace,'SFMono-Regular',Menlo,'DejaVu Sans Mono',Consolas,monospace" font-size="{fs}">"#
+        ));
+        o.push_str(&format!(r##"<rect width="{w:.0}" height="{h:.0}" rx="12" fill="#0b0f0b"/>"##));
+        o.push_str(&format!(r##"<path d="M0 12 A12 12 0 0 1 12 0 H{:.0} A12 12 0 0 1 {w:.0} 12 V{tbar:.0} H0 Z" fill="#141a14"/>"##, w - 12.0));
+        o.push_str(r##"<circle cx="20" cy="18" r="6" fill="#ff5f57"/><circle cx="40" cy="18" r="6" fill="#febc2e"/><circle cx="60" cy="18" r="6" fill="#28c840"/>"##);
+        o.push_str(&format!(
+            r##"<text x="{:.0}" y="23" fill="#8b978b" text-anchor="middle">wta — parallel AI agents · git worktree + tmux</text>"##,
+            w / 2.0
+        ));
+
+        // background cells (selection bar, title label)
+        for r in 0..rows {
+            for c in 0..cols {
+                let bg = buf.content[r * cols + c].bg;
+                if !matches!(bg, Color::Reset | Color::Black) {
+                    o.push_str(&format!(
+                        r#"<rect x="{:.2}" y="{:.2}" width="{cw:.2}" height="{ch:.2}" fill="{}"/>"#,
+                        cx + c as f64 * cw,
+                        cy + r as f64 * ch,
+                        hex(bg)
+                    ));
+                }
+            }
+        }
+        // text runs grouped by fg
+        for r in 0..rows {
+            let mut c = 0usize;
+            while c < cols {
+                let fg = buf.content[r * cols + c].fg;
+                let start = c;
+                let mut run = String::new();
+                while c < cols && buf.content[r * cols + c].fg == fg {
+                    run.push_str(buf.content[r * cols + c].symbol());
+                    c += 1;
+                }
+                if run.trim().is_empty() {
+                    continue;
+                }
+                let n = (c - start) as f64;
+                o.push_str(&format!(
+                    r#"<text x="{:.2}" y="{:.2}" fill="{}" textLength="{:.2}" lengthAdjust="spacingAndGlyphs" xml:space="preserve">{}</text>"#,
+                    cx + start as f64 * cw,
+                    cy + r as f64 * ch + fs * 0.82,
+                    hex(fg),
+                    n * cw,
+                    esc(&run)
+                ));
+            }
+        }
+        o.push_str("</svg>");
+        o
+    }
+
+    #[test]
+    #[ignore = "regenerates assets/wta.svg on demand"]
+    fn gen_readme_svg() {
+        let mut app = App::new();
+        app.rows = vec![
+            row("auth-refactor", Status::Running, true, 212, 48),
+            row("flaky-test", Status::NeedsInput, true, 12, 3),
+            row("payments-api", Status::Ready, true, 64, 8),
+            row("docs-site", Status::Exited, false, 5, 0),
+        ];
+        app.sel = 0;
+        app.tab = Tab::Diff;
+        app.diff_text = [
+            "@@ -14,7 +14,9 @@ impl Session {",
+            "     pub fn refresh(&mut self) -> Result<()> {",
+            "-        self.token = fetch_token()?;",
+            "+        // refresh in the background with retry + backoff",
+            "+        self.token = retry(3, || fetch_token())?;",
+            "+        self.refreshed_at = Instant::now();",
+            "         Ok(())",
+            "     }",
+            "@@ -63,0 +65,6 @@ mod tests {",
+            "+    #[test]",
+            "+    fn refresh_retries_on_timeout() {",
+            "+        let mut s = Session::expired();",
+            "+        assert!(s.refresh().is_ok());",
+            "+    }",
+        ]
+        .join("\n");
+        let mut term = Terminal::new(TestBackend::new(120, 26)).unwrap();
+        term.draw(|f| ui(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/wta.svg");
+        std::fs::write(path, buffer_to_svg(&buf)).unwrap();
+        eprintln!("wrote {path}");
+    }
+
     #[test]
     fn matrix_overlay_renders() {
         let mut app = App::new();
