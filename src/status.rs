@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -79,6 +80,35 @@ pub fn emit(state: &str) -> Result<()> {
             .unwrap_or_default();
         record(&task, state, &cwd)?;
     }
+    Ok(())
+}
+
+// ---- manual list ordering (persisted separately from state so hooks don't clobber it) ----
+
+fn order_path() -> Result<PathBuf> {
+    Ok(wta_dir()?.join("order.json"))
+}
+
+/// task -> position; smaller = higher in the list. Tasks absent here sort last.
+pub fn read_order() -> HashMap<String, u32> {
+    let path = match order_path() {
+        Ok(p) => p,
+        Err(_) => return HashMap::new(),
+    };
+    match std::fs::read(&path) {
+        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+pub fn write_order(map: &HashMap<String, u32>) -> Result<()> {
+    let path = order_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(map)?)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 

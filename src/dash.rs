@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
@@ -397,13 +397,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     if key.modifiers.contains(KeyModifiers::SHIFT) {
         let max_preview = app.preview.lines().count().saturating_sub(1) as u16;
         match (app.tab, key.code) {
-            (Tab::Preview, KeyCode::Up) => app.scroll = (app.scroll + 1).min(max_preview),
-            (Tab::Preview, KeyCode::Down) => app.scroll = app.scroll.saturating_sub(1),
-            (Tab::Diff, KeyCode::Up) => app.scroll = app.scroll.saturating_sub(1),
-            (Tab::Diff, KeyCode::Down) => app.scroll = app.scroll.saturating_add(1),
-            _ => return Ok(false),
+            (Tab::Preview, KeyCode::Up) => {
+                app.scroll = (app.scroll + 1).min(max_preview);
+                return Ok(false);
+            }
+            (Tab::Preview, KeyCode::Down) => {
+                app.scroll = app.scroll.saturating_sub(1);
+                return Ok(false);
+            }
+            (Tab::Diff, KeyCode::Up) => {
+                app.scroll = app.scroll.saturating_sub(1);
+                return Ok(false);
+            }
+            (Tab::Diff, KeyCode::Down) => {
+                app.scroll = app.scroll.saturating_add(1);
+                return Ok(false);
+            }
+            _ => {} // fall through (e.g. Shift+J/K reorder)
         }
-        return Ok(false);
     }
 
     match key.code {
@@ -481,6 +492,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             Ok(_) => app.set_err("no branches to base an agent on"),
             Err(e) => app.set_err(e),
         },
+        KeyCode::Char('J') => reorder(app, 1),
+        KeyCode::Char('K') => reorder(app, -1),
         KeyCode::Char('r') => {
             refresh(app);
             load_detail(app);
@@ -488,6 +501,27 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         _ => {}
     }
     Ok(false)
+}
+
+/// Move the selected agent up (delta -1) or down (delta +1) in the list and
+/// persist the new order to ~/.wta/order.json so it survives refreshes.
+fn reorder(app: &mut App, delta: isize) {
+    let i = app.sel;
+    let j = i as isize + delta;
+    if app.rows.is_empty() || j < 0 || j as usize >= app.rows.len() {
+        return;
+    }
+    let mut tasks: Vec<String> = app.rows.iter().map(|r| r.task.clone()).collect();
+    tasks.swap(i, j as usize);
+    let map: std::collections::HashMap<String, u32> =
+        tasks.iter().enumerate().map(|(idx, t)| (t.clone(), idx as u32)).collect();
+    if let Err(e) = status::write_order(&map) {
+        app.set_err(e);
+        return;
+    }
+    // refresh() re-sorts by the new order and keeps the selection on the moved task.
+    refresh(app);
+    load_detail(app);
 }
 
 // ---------- git helpers ----------
@@ -574,8 +608,16 @@ fn refresh(app: &mut App) {
             paths.insert(task.clone(), PathBuf::from(&st.cwd));
         }
     }
-    order.sort();
-    order.dedup();
+    // Sort by the persisted manual order (from J/K); unranked tasks fall to the
+    // end alphabetically. Dedupe first since the sort key isn't the task name.
+    let mut seen = HashSet::new();
+    order.retain(|t| seen.insert(t.clone()));
+    let rank = status::read_order();
+    order.sort_by(|a, b| {
+        let pa = rank.get(a).copied().unwrap_or(u32::MAX);
+        let pb = rank.get(b).copied().unwrap_or(u32::MAX);
+        pa.cmp(&pb).then_with(|| a.cmp(b))
+    });
 
     let prev_task = app.selected().map(|r| r.task.clone());
 
@@ -1032,6 +1074,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             };
             let body = vec![
                 k("j / k", "move up / down"),
+                k("J / K", "reorder down / up"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("tab", "switch Preview / Diff"),
