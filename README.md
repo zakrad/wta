@@ -90,7 +90,7 @@ wta resume <task>                  re-spawn a stopped agent in its worktree
 wta push <task> [--pr]             commit + push the agent's branch; --pr opens a PR (gh)
 wta rm <task> [--force]            destroy: session + worktree + branch
 wta dash                           the live dashboard
-wta bridge [--test]                notify Telegram when an agent needs you / finishes
+wta bridge [--test]                Telegram remote control: notify you + relay your replies to agents
 wta status <state>                 emit status (for Claude Code hooks; optional)
 wta install-hooks [--global]       wire Claude Code hooks -> `wta status`
 ```
@@ -155,7 +155,7 @@ tighter isolation and hook-aware status.
 | Branch picker on create | ✅ `b` / `--base` | ✅ |
 | Use your own tmux server | ✅ `--server default` (opt-in) | always (no isolation) |
 | Reorder sessions | ⏳ roadmap | ✅ |
-| Remote / mobile notifications | ✅ Telegram bridge (outbound; inbound roadmap) | ❌ |
+| Remote / mobile control | ✅ Telegram: notifications **+ reply to control agents** | ❌ |
 
 Where wta leans in: a **dedicated tmux socket** so your own tmux stays clean, a
 small **terminal-agnostic binary**, and **Claude Code hook** integration for
@@ -180,10 +180,24 @@ wta bridge --test                           # verify: sends "wta bridge connecte
 wta bridge                                  # runs; pings on needs-input / finished
 ```
 
-It reads the same `~/.wta/state` files the dashboard uses, so it relies on the
-optional Claude Code hooks (`wta install-hooks`) to know when an agent needs
-input. Outbound only for now; **inbound control** (reply in chat → type into the
-agent via `tmux send-keys`) is on the roadmap.
+Notifications read the same `~/.wta/state` files the dashboard uses, so they rely
+on the optional Claude Code hooks (`wta install-hooks`) to know when an agent
+needs input.
+
+**Inbound control** — reply in the chat to talk to an agent (relayed into its
+tmux session via `send-keys`):
+
+```
+/agents             list agents + status
+/use <task>         pick an agent to chat with
+<text>              send to the picked agent (just type)
+/send <task> <txt>  send to a specific agent
+```
+
+Only messages from your configured `WTA_TELEGRAM_CHAT` are honored. Run the
+bridge with the same `--server` as your agents so it targets the right tmux
+server. So you can, from your phone: get pinged that an agent needs input →
+`/use auth` → type your answer → it lands in the agent.
 
 ## Config (env)
 

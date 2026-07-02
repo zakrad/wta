@@ -113,6 +113,20 @@ pub fn capture(name: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Type `text` into a session and submit it (literal text, then Enter).
+/// Used by the Telegram bridge to relay remote messages into an agent.
+pub fn send_text(name: &str, text: &str) -> Result<()> {
+    let out = tmux()
+        .args(["send-keys", "-t", name, "-l", text])
+        .status()
+        .context("tmux send-keys failed")?;
+    if !out.success() {
+        bail!("tmux send-keys failed for session {name}");
+    }
+    let _ = tmux().args(["send-keys", "-t", name, "Enter"]).status();
+    Ok(())
+}
+
 pub fn kill(name: &str) -> Result<()> {
     let _ = tmux()
         .args(["kill-session", "-t", name])
