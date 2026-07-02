@@ -120,17 +120,29 @@ detach. Because it’s a separate server, wta never appears in your normal
 
 ## How it compares
 
-wta is in the same family as parallel-agent runners like Crystal or Claude
-Squad — a worktree + a multiplexer session per agent, with a dashboard. What
-wta leans into:
+wta is in the same family as terminal parallel-agent runners like **Claude
+Squad** — a git worktree + a tmux session per agent, browsed from a TUI. It's
+honest to say Squad is more feature-complete today; wta trades some of that for
+tighter isolation and hook-aware status.
 
-- **Isolation:** a dedicated tmux socket, so your own tmux stays clean.
-- **Terminal-agnostic:** a single static binary, no editor or GUI required.
-- **Hook-aware status:** reads Claude Code hooks for accurate “needs input”.
-- **Explicit stop/resume** distinct from destroy.
+| | wta | Claude Squad |
+|---|---|---|
+| Agent runtime | tmux session | tmux session |
+| Runs in any terminal | ✅ (single Rust binary) | ✅ (single Go binary) |
+| Isolated from *your* tmux | ✅ dedicated socket (`-L wta`) | ❌ uses your default tmux server |
+| Live status detection | output-hash **+ Claude Code hooks** (`needs input`) | output-hash + prompt-string match |
+| Attach / detach | `Enter` / `Ctrl-q` | `Enter` / `Ctrl-q` |
+| Stop (keep worktree) + resume | ✅ `s` / `resume` | ✅ pause / resume |
+| Diff review in-app | ✅ Diff tab | ✅ Diff tab |
+| Commit & push / PR from the UI | ⏳ roadmap | ✅ |
+| New-with-prompt + branch picker | ⏳ roadmap | ✅ |
+| Reorder sessions | ⏳ roadmap | ✅ |
+| Remote / mobile control | ⏳ roadmap (hooks + chat bridge) | ❌ |
 
-It deliberately does **not** embed a diff-review IDE — review in the Diff tab or
-your own editor.
+Where wta leans in: a **dedicated tmux socket** so your own tmux stays clean, a
+small **terminal-agnostic binary**, and **Claude Code hook** integration for
+accurate “needs input”. It deliberately does **not** embed a diff-review IDE —
+review in the Diff tab or your own editor.
 
 ## Config (env)
 
