@@ -5,9 +5,10 @@ worktree** and a **persistent tmux session**, driven from one keyboard-first
 dashboard. Browse them side-by-side, watch their live output, review their
 diffs, and drop into any of them to chat — then detach back to the board.
 
-Agents keep running when you close the terminal or your laptop sleeps. Stop one
-and resume it later with its work intact. A single ~1 MB Rust binary that runs
-in **any terminal** (it does not modify your terminal or shell config).
+Agents keep running when you close the terminal, and survive laptop sleep —
+they pick up where they left off on wake. Stop one and resume it later with its
+work intact. A single ~1 MB Rust binary that runs in **any terminal** (it does
+not modify your terminal or shell config).
 
 ![wta dashboard — an Instances sidebar of parallel AI agents (running/waiting/exited) beside a live colorized diff](assets/wta.png)
 
@@ -24,7 +25,9 @@ in **any terminal** (it does not modify your terminal or shell config).
   `WTA_AUTO_TRUST=0`), so agents start working without a manual Enter.
 - **Live status with no setup** — running vs. waiting is detected automatically.
   Wire the optional Claude Code hooks to also surface “needs input”.
-- **Persistent** — sessions survive closing the terminal and laptop sleep.
+- **Persistent** — agents keep running after you close the terminal, and survive
+  laptop sleep (they resume on wake). A reboot ends the sessions, but the
+  worktrees are kept and `Enter` re-spawns them.
 - **Stop & resume** — stop an agent (keep its worktree) and resume it later; or
   kill it to remove everything.
 - **Stays out of your way** — runs on a dedicated tmux server, so it never
@@ -154,6 +157,22 @@ conflicts:  auth ✗ api  — src/server.rs
 ```
 
 ## Persistence & isolation
+
+**What survives:**
+
+- **Close the terminal / detach** — agents keep running. They live on a tmux
+  daemon, not your terminal window, so quitting the terminal (or an SSH drop)
+  leaves them running with zero clients attached.
+- **Laptop sleep** — agents survive and resume on wake. Sleep suspends the whole
+  machine, so nothing executes *while* it's asleep (a long sleep can interrupt an
+  in-flight API request, which the agent retries on wake) — but nothing is
+  killed, and you return to exactly where you left off. To keep an agent
+  *working* with the lid closed, prevent sleep (`caffeinate`, or stay plugged in).
+- **Reboot / shutdown** — the tmux server is gone, so sessions **do not** survive.
+  But each agent's **git worktree and branch — including uncommitted work —
+  remain**. Those agents show `✗ exited` in the dashboard, and `Enter` (or
+  `wta resume <task>`) re-spawns them in place, continuing the previous session
+  (`--continue`).
 
 Agents run as `wta-<task>` sessions on a **dedicated tmux server** (`tmux -L wta`)
 configured for a seamless attach — status bar off, mouse on, `Ctrl-q` bound to
