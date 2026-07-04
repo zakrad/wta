@@ -18,7 +18,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14   # cross-compile Intel on the Apple-Silicon runner; the
+                           # dedicated macos-13 runner was perpetually queued and
+                           # blocked every release since v0.1.4
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
     steps:
