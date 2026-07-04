@@ -88,7 +88,7 @@ enum Modal {
         prompt: String,
     },
     Confirm(String),
-    ForceKill(String),
+    ForceKill { task: String, unpushed: u32 },
     Resume(String),
     Push(String),
     BranchPick {
@@ -155,6 +155,9 @@ struct App {
     attach: Option<String>,               // session to attach to after this frame
     scroll: u16,                          // preview/diff scroll offset
     scrollback: Option<String>,           // Some => Preview scroll mode: full (colored) history snapshot
+    prev_status: HashMap<String, Status>, // last-seen status per task, for transition detection
+    attention: HashSet<String>,           // agents that finished / need input and haven't been viewed
+    bell: bool,                           // ring the terminal bell after this refresh
 }
 
 impl App {
@@ -177,6 +180,9 @@ impl App {
             attach: None,
             scroll: 0,
             scrollback: None,
+            prev_status: HashMap::new(),
+            attention: HashSet::new(),
+            bell: false,
         }
     }
     fn selected(&self) -> Option<&Row> {
@@ -207,6 +213,14 @@ pub fn run() -> Result<()> {
     .ok();
     term.show_cursor().ok();
     res
+}
+
+/// Ring the terminal bell (BEL is non-printing, safe to inject over the alt screen).
+fn ring_bell() {
+    use std::io::Write;
+    let mut o = std::io::stdout();
+    let _ = o.write_all(b"\x07");
+    let _ = o.flush();
 }
 
 /// Suspend the TUI, attach to the tmux session inline, resume on detach.
@@ -242,6 +256,10 @@ fn event_loop(term: &mut Term) -> Result<()> {
             }
         }
         term.draw(|f| ui(f, &mut app))?;
+        if app.bell {
+            ring_bell(); // an agent finished / needs input while off-screen
+            app.bell = false;
+        }
 
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
@@ -338,8 +356,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                             refresh(app);
                             load_detail(app);
                         }
-                        // worktree has uncommitted work → ask before discarding it
-                        Err(_) => app.modal = Modal::ForceKill(task),
+                        // worktree has uncommitted work → ask before discarding it,
+                        // and warn if committed-but-unpushed work would go too
+                        Err(_) => {
+                            let unpushed = app
+                                .rows
+                                .iter()
+                                .find(|r| r.task == task)
+                                .and_then(|r| r.path.as_deref())
+                                .map(unpushed_count)
+                                .unwrap_or(0);
+                            app.modal = Modal::ForceKill { task, unpushed };
+                        }
                     }
                 }
                 KeyCode::Char('n') | KeyCode::Esc => app.modal = Modal::None,
@@ -347,7 +375,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
-        Modal::ForceKill(task) => {
+        Modal::ForceKill { task, .. } => {
             match key.code {
                 KeyCode::Char('y') => {
                     let task = task.clone();
@@ -745,6 +773,36 @@ fn base_of(path: &Path) -> String {
 fn merge_base(path: &Path) -> Option<String> {
     git_in(path, &["merge-base", "HEAD", &base_of(path)]).filter(|s| !s.is_empty())
 }
+/// Like `git_in` but returns stdout even on a non-zero exit (needed for
+/// `git diff --no-index`, which exits 1 whenever the files differ).
+fn git_stdout(path: &Path, args: &[&str]) -> Option<String> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+}
+/// Untracked, non-ignored files in the worktree — agent-created files that a
+/// plain `git diff` wouldn't show.
+fn untracked_files(path: &Path) -> Vec<String> {
+    git_in(path, &["ls-files", "--others", "--exclude-standard"])
+        .map(|s| s.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+}
+/// Additions contributed by an untracked file (its line count; 0 if binary/missing).
+fn untracked_adds(path: &Path, rel: &str) -> u32 {
+    match std::fs::read(path.join(rel)) {
+        Ok(bytes) if !bytes.contains(&0) => bytes.iter().filter(|&&b| b == b'\n').count() as u32,
+        _ => 0,
+    }
+}
+/// Commits on HEAD not present on any remote — work that a force-kill would destroy.
+fn unpushed_count(path: &Path) -> u32 {
+    git_in(path, &["rev-list", "--count", "HEAD", "--not", "--remotes"])
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
 fn numstat(path: &Path) -> (u32, u32) {
     let mb = match merge_base(path) {
         Some(s) => s,
@@ -760,13 +818,29 @@ fn numstat(path: &Path) -> (u32, u32) {
         a += it.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0);
         d += it.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0);
     }
+    // include agent-created (untracked) files, which `git diff` omits
+    for f in untracked_files(path) {
+        a += untracked_adds(path, &f);
+    }
     (a, d)
 }
 fn full_diff(path: &Path) -> String {
-    match merge_base(path) {
+    let mut out = match merge_base(path) {
         Some(mb) => git_in(path, &["diff", &mb]).unwrap_or_default(),
         None => String::new(),
+    };
+    // append untracked files as new-file diffs (`--no-index` doesn't touch the index)
+    for f in untracked_files(path) {
+        if let Some(d) = git_stdout(path, &["diff", "--no-index", "--", "/dev/null", &f]) {
+            if !d.trim().is_empty() {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&d);
+            }
+        }
     }
+    out
 }
 fn hash_str(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
@@ -910,6 +984,27 @@ fn refresh(app: &mut App) {
     let live: HashSet<String> = app.rows.iter().map(|r| r.session.clone()).collect();
     app.trust_seen.retain(|k, _| live.contains(k));
     app.trust_done.retain(|k| live.contains(k));
+
+    // Attention: flag "needs review" + ring the bell on the edges that matter — an
+    // agent finishing a run, or newly asking for input — unless it's the pane you're
+    // already looking at. Only on genuine transitions (prev must be known), so a
+    // fresh dashboard doesn't nag about pre-existing state.
+    let mut ring = false;
+    let sel_now = app.rows.get(app.sel).map(|r| r.task.clone());
+    for r in &app.rows {
+        let now = r.status;
+        let prev = app.prev_status.get(&r.task).copied();
+        let became_needs = prev.is_some() && now == Status::NeedsInput && prev != Some(Status::NeedsInput);
+        let finished = prev == Some(Status::Running) && matches!(now, Status::Ready | Status::Exited);
+        if (became_needs || finished) && sel_now.as_deref() != Some(r.task.as_str()) && app.attention.insert(r.task.clone()) {
+            ring = true;
+        }
+    }
+    app.prev_status = app.rows.iter().map(|r| (r.task.clone(), r.status)).collect();
+    app.attention.retain(|t| current.contains(t));
+    if ring {
+        app.bell = true;
+    }
 }
 
 /// Claude Code's per-folder trust dialog. Strict 3-string co-occurrence so normal
@@ -921,6 +1016,10 @@ fn is_trust_prompt(text: &str) -> bool {
 }
 
 fn load_detail(app: &mut App) {
+    // viewing an agent clears its "needs review" flag
+    if let Some(t) = app.selected().map(|r| r.task.clone()) {
+        app.attention.remove(&t);
+    }
     let (alive, session, path) = match app.selected() {
         Some(r) => (r.alive, r.session.clone(), r.path.clone()),
         None => {
@@ -1000,7 +1099,12 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
     let inner_w = area.width.saturating_sub(2) as usize;
     let mut items: Vec<ListItem> = Vec::new();
     for (i, r) in app.rows.iter().enumerate() {
-        let glyph = status_glyph(app, r.status);
+        // finished-but-unviewed agents get a bright review glyph; needs-input keeps ▲
+        let glyph = if app.attention.contains(&r.task) && r.status != Status::NeedsInput {
+            Span::styled("◆ ".to_string(), Style::default().fg(Color::LightYellow))
+        } else {
+            status_glyph(app, r.status)
+        };
         // reserve 2 cols for the status glyph; truncate wide/long task names cleanly
         let head = truncate_cols(&format!(" {}. {}", i + 1, r.task), inner_w.saturating_sub(2));
         let pad1 = inner_w.saturating_sub(head.width() + 2);
@@ -1167,6 +1271,21 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" quit", muted),
         ]
     };
+    // prepend an attention count when agents finished / need input off-screen
+    let n = app.attention.len();
+    let spans = if n > 0 {
+        let mut lead = vec![
+            Span::styled(
+                format!("◆ {n} need you"),
+                Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  │  ", muted),
+        ];
+        lead.extend(spans);
+        lead
+    } else {
+        spans
+    };
     f.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
         area,
@@ -1241,19 +1360,24 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
-        Modal::ForceKill(task) => {
-            let area = centered(62, 5, f.area());
+        Modal::ForceKill { task, unpushed } => {
+            let area = centered(64, if *unpushed > 0 { 6 } else { 5 }, f.area());
             f.render_widget(Clear, area);
-            let body = vec![
-                Line::raw(format!("'{task}' has uncommitted changes.")),
-                Line::from(vec![
-                    Span::styled("Force-kill", Style::default().fg(RED)),
-                    Span::raw(" and discard that work?  "),
-                    Span::styled("y", Style::default().fg(RED)),
-                    Span::raw(" / "),
-                    Span::styled("n", Style::default().fg(GREEN)),
-                ]),
-            ];
+            let mut body = vec![Line::raw(format!("'{task}' has uncommitted changes."))];
+            if *unpushed > 0 {
+                let s = if *unpushed == 1 { "" } else { "s" };
+                body.push(Line::styled(
+                    format!("⚠ {unpushed} unpushed commit{s} will be lost too."),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            body.push(Line::from(vec![
+                Span::styled("Force-kill", Style::default().fg(RED)),
+                Span::raw(" and discard that work?  "),
+                Span::styled("y", Style::default().fg(RED)),
+                Span::raw(" / "),
+                Span::styled("n", Style::default().fg(GREEN)),
+            ]));
             f.render_widget(
                 Paragraph::new(body).block(
                     Block::default()
@@ -1719,6 +1843,53 @@ mod tests {
         app.scrollback = Some("line1\nline2\nline3".into());
         let screen = render_to_string(&mut app, 100, 16);
         assert!(screen.contains("scroll mode"));
+    }
+
+    #[test]
+    fn untracked_files_count_in_stats_and_diff() {
+        let dir = std::env::temp_dir().join(format!("wta-untracked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+        };
+        git(&["init", "-qb", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        // agent creates a new (untracked) file — a plain `git diff` would miss it
+        std::fs::write(dir.join("new.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        let (a, _d) = numstat(&dir);
+        assert!(a >= 2, "untracked lines counted in stats, got {a}");
+        assert!(full_diff(&dir).contains("new.rs"), "untracked file shown in diff");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn force_kill_warns_about_unpushed() {
+        let mut app = App::new();
+        app.rows = vec![row("x", Status::Ready, true, 0, 0)];
+        app.sel = 0;
+        app.modal = Modal::ForceKill { task: "x".into(), unpushed: 3 };
+        let screen = render_to_string(&mut app, 100, 16);
+        assert!(screen.contains("3 unpushed"));
+    }
+
+    #[test]
+    fn attention_shows_review_glyph_and_count() {
+        let mut app = App::new();
+        app.rows = vec![
+            row("a", Status::Ready, true, 0, 0),
+            row("b", Status::Ready, true, 0, 0),
+        ];
+        app.sel = 0;
+        app.attention.insert("b".to_string());
+        let screen = render_to_string(&mut app, 100, 16);
+        assert!(screen.contains("need you"));
+        assert!(screen.contains("◆"));
     }
 
     #[test]

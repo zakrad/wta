@@ -115,6 +115,11 @@ fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
     }
     let wt_str = wt.to_string_lossy().into_owned();
 
+    // Self-heal stale admin entries (a worktree dir deleted out from under git still
+    // "claims" its branch) so the add below doesn't fail with "already used by
+    // worktree at <missing-path>".
+    let _ = run_git(&["worktree", "prune"], Some(&root));
+
     let branch_exists = run_git(
         &[
             "show-ref",
@@ -355,6 +360,18 @@ pub fn rm(task: &str, force: bool) -> Result<()> {
     let wt_str = wt.to_string_lossy().into_owned();
 
     let _ = tmux::kill(&tmux::session_name(&repo, task));
+
+    // Optional teardown hook (mirror of setup.sh) — run WHILE the worktree still
+    // exists so agents can stop docker/dev-servers/ports before it's removed.
+    let teardown = root.join(".wta/teardown.sh");
+    if wt.exists() && teardown.exists() {
+        let _ = Command::new("bash")
+            .arg(&teardown)
+            .current_dir(&wt)
+            .env("WTA_TASK", task)
+            .env("WTA_ROOT", &root)
+            .status();
+    }
 
     // Remove the worktree only if it's actually there. A worktree with
     // uncommitted/untracked files needs --force — surface that precisely so the

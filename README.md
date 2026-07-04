@@ -43,6 +43,9 @@ In `dash`: `j`/`k` move · `Enter` attach (type in the agent; `Ctrl-q` returns) 
   (read-only, nothing committed). Most tools only show conflicts after you try.
 - **Live status, zero setup** — running / ready / needs-input / exited detected
   automatically; optional Claude Code hooks (`wta install-hooks`) add "needs input".
+- **Notifies you** — when an off-screen agent finishes or needs input, wta rings
+  the terminal bell and marks it for review (`◆`), with a "N need you" count in
+  the menu bar. Viewing the agent clears it.
 - **Remote** — an optional Telegram bridge pings you when an agent needs you and
   lets you reply to drive it from your phone.
 
@@ -61,7 +64,7 @@ Dashboard keys: `n`/`N` new (with prompt) · `b` new from an existing branch ·
 `s` stop · `D` kill · `p` push/PR · `J`/`K` reorder · `Shift+↑`/`↓` scroll the
 Preview/Diff (first `Shift+↑` pages back through full scrollback; `Esc` exits) ·
 `q` quit. The Preview keeps the agent's **real colors** (no need to attach).
-Status glyphs: `⠋ running · ● ready · ▲ needs input · ✗ exited`.
+Status glyphs: `⠋ running · ● ready · ▲ needs input · ◆ review (finished, unseen) · ✗ exited`.
 Pass `--server default` to run on your own tmux server instead of the isolated one.
 
 ## Chat history
@@ -90,8 +93,10 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_WORKTREE_DIR` | `.agents` | worktree dir under the repo root (gitignore it) |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
 
-Per-repo setup: make `<repo>/.wta/setup.sh` executable — `wta new` runs it in the
-fresh worktree (install deps, symlink `node_modules`, …).
+Per-repo setup/teardown: make `<repo>/.wta/setup.sh` executable — `wta new` runs
+it in the fresh worktree (install deps, symlink `node_modules`, …). A matching
+`<repo>/.wta/teardown.sh` runs on `wta rm`, before the worktree is removed (stop
+containers, free ports, …).
 
 ## How it compares
 
