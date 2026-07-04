@@ -1,6 +1,6 @@
 [package]
 name = "wta"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.75"
 description = "Run parallel AI coding agents in isolated git worktrees + persistent tmux sessions, from one TUI dashboard"
@@ -23,6 +23,8 @@ serde_json  = "1"
 anyhow      = "1"
 base64      = "0.22"
 dirs        = "5"
+ansi-to-tui = "7"       # parse tmux `capture-pane -e` SGR codes into colored ratatui spans
+unicode-width = "0.2"   # display-width-correct truncation of titles/branches
 ureq        = { version = "2", optional = true }
 
 [features]

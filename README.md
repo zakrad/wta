@@ -58,8 +58,10 @@ wta dash                             the live dashboard
 ```
 
 Dashboard keys: `n`/`N` new (with prompt) · `b` new from an existing branch ·
-`s` stop · `D` kill · `p` push/PR · `J`/`K` reorder · `Shift+↑`/`↓` scroll ·
-`r` refresh · `q` quit. Status glyphs: `⠋ running · ● ready · ▲ needs input · ✗ exited`.
+`s` stop · `D` kill · `p` push/PR · `J`/`K` reorder · `Shift+↑`/`↓` scroll the
+Preview/Diff (first `Shift+↑` pages back through full scrollback; `Esc` exits) ·
+`q` quit. The Preview keeps the agent's **real colors** (no need to attach).
+Status glyphs: `⠋ running · ● ready · ▲ needs input · ✗ exited`.
 Pass `--server default` to run on your own tmux server instead of the isolated one.
 
 ## Chat history

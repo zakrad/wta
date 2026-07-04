@@ -100,12 +100,29 @@ pub fn new_session(name: &str, cwd: &Path, program: &str, extra: &[String]) -> R
     Ok(())
 }
 
-/// Visible pane text of a session (plain, no escapes).
+/// Visible pane text of a session (plain, no escapes) — for hashing + status/trust
+/// matching, which must see clean text.
 pub fn capture(name: &str) -> Option<String> {
     let out = tmux()
         .args(["capture-pane", "-p", "-t", name])
         .output()
         .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Visible pane text WITH ANSI escapes (`-e`) so the Preview keeps the agent's
+/// real colors without needing to attach. `full` grabs the whole scrollback
+/// history (`-S -`) for scroll mode; otherwise just the visible pane.
+pub fn capture_colored(name: &str, full: bool) -> Option<String> {
+    let mut c = tmux();
+    c.args(["capture-pane", "-e", "-p", "-t", name]);
+    if full {
+        c.args(["-S", "-"]);
+    }
+    let out = c.output().ok()?;
     if !out.status.success() {
         return None;
     }

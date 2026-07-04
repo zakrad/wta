@@ -14,11 +14,36 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs};
 use ratatui::{Frame, Terminal};
 
+use ansi_to_tui::IntoText;
+use unicode_width::UnicodeWidthStr;
+
 use crate::{status, tmux, worktree};
+
+/// Truncate `s` to at most `max` display columns, adding `…` if it was clipped.
+fn truncate_cols(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = ch.to_string().width();
+        if w + cw > max.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
 
 // ---- palette: ANSI-indexed so it maps through the terminal theme exactly like
 // tmux does (green = ANSI 2, bright green = ANSI 10). No hardcoded hex. ----
@@ -129,6 +154,7 @@ struct App {
     msg: Option<(String, bool, Instant)>, // (text, is_error, when)
     attach: Option<String>,               // session to attach to after this frame
     scroll: u16,                          // preview/diff scroll offset
+    scrollback: Option<String>,           // Some => Preview scroll mode: full (colored) history snapshot
 }
 
 impl App {
@@ -150,6 +176,7 @@ impl App {
             msg: None,
             attach: None,
             scroll: 0,
+            scrollback: None,
         }
     }
     fn selected(&self) -> Option<&Row> {
@@ -461,9 +488,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     // resting edge": Diff rests at the top (scroll down into it), Preview rests at
     // the bottom / latest output (scroll up into history).
     if key.modifiers.contains(KeyModifiers::SHIFT) {
-        let max_preview = app.preview.lines().count().saturating_sub(1) as u16;
         match (app.tab, key.code) {
             (Tab::Preview, KeyCode::Up) => {
+                // First Shift+↑ enters scroll mode: snapshot the FULL colored
+                // scrollback so you can page back through history past the pane.
+                if app.scrollback.is_none() {
+                    if let Some(r) = app.selected() {
+                        if r.alive {
+                            app.scrollback = tmux::capture_colored(&r.session, true);
+                        }
+                    }
+                }
+                let buf = app.scrollback.as_deref().unwrap_or(&app.preview);
+                let max_preview = buf.lines().count().saturating_sub(1) as u16;
                 app.scroll = (app.scroll + 1).min(max_preview);
                 return Ok(false);
             }
@@ -486,11 +523,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     match key.code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+        KeyCode::Esc if app.scrollback.is_some() => {
+            app.scrollback = None; // leave Preview scroll mode, back to live output
+            app.scroll = 0;
+        }
         KeyCode::Char('?') => app.modal = Modal::Help,
         KeyCode::Char('j') | KeyCode::Down => {
             if !app.rows.is_empty() {
                 app.sel = (app.sel + 1) % app.rows.len();
                 app.scroll = 0;
+                app.scrollback = None;
                 load_detail(app);
             }
         }
@@ -498,6 +540,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             if !app.rows.is_empty() {
                 app.sel = (app.sel + app.rows.len() - 1) % app.rows.len();
                 app.scroll = 0;
+                app.scrollback = None;
                 load_detail(app);
             }
         }
@@ -889,7 +932,7 @@ fn load_detail(app: &mut App) {
     match app.tab {
         Tab::Preview => {
             app.preview = if alive {
-                tmux::capture(&session).unwrap_or_else(|| "(no output)".into())
+                tmux::capture_colored(&session, false).unwrap_or_else(|| "(no output)".into())
             } else {
                 "Session not running. Press Enter to resume.".into()
             };
@@ -957,14 +1000,16 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
     let inner_w = area.width.saturating_sub(2) as usize;
     let mut items: Vec<ListItem> = Vec::new();
     for (i, r) in app.rows.iter().enumerate() {
-        let head = format!(" {}. {}", i + 1, r.task);
         let glyph = status_glyph(app, r.status);
-        let pad1 = inner_w.saturating_sub(head.chars().count() + 2);
+        // reserve 2 cols for the status glyph; truncate wide/long task names cleanly
+        let head = truncate_cols(&format!(" {}. {}", i + 1, r.task), inner_w.saturating_sub(2));
+        let pad1 = inner_w.saturating_sub(head.width() + 2);
         let line1 = Line::from(vec![Span::raw(head), Span::raw(" ".repeat(pad1)), glyph]);
 
-        let bhead = format!("   Ꮧ-{}", r.branch);
-        let counts_len = format!("+{},-{} ", r.added, r.removed).chars().count();
-        let pad2 = inner_w.saturating_sub(bhead.chars().count() + counts_len);
+        let counts_len = format!("+{},-{} ", r.added, r.removed).width();
+        // reserve room for the +/- counts first, then truncate the branch to fit
+        let bhead = truncate_cols(&format!("   Ꮧ-{}", r.branch), inner_w.saturating_sub(counts_len));
+        let pad2 = inner_w.saturating_sub(bhead.width() + counts_len);
         let line2 = Line::from(vec![
             Span::styled(bhead, Style::default().fg(Color::DarkGray)),
             Span::raw(" ".repeat(pad2)),
@@ -1022,19 +1067,26 @@ fn render_right(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(tabs, parts[0]);
 
     let body_h = parts[1].height as usize;
-    let (content, scroll): (Vec<Line>, u16) = match app.tab {
-        // Preview pins to the latest output (bottom); Shift+↑ scrolls up into history.
+    let (content, scroll): (Text, u16) = match app.tab {
+        // Preview pins to the latest output (bottom); Shift+↑ scrolls up into
+        // history (and snapshots the full scrollback into a scroll mode).
         Tab::Preview => {
-            let all: Vec<Line> = app
-                .preview
-                .lines()
-                .map(|l| Line::styled(l.to_string(), Style::default().fg(GREEN_SOFT)))
-                .collect();
-            let max_off = all.len().saturating_sub(body_h) as u16;
-            // clamp so over-scrolling past the top doesn't waste key presses coming back
+            let scrolling = app.scrollback.is_some();
+            let src = app.scrollback.as_deref().unwrap_or(&app.preview);
+            // Parse tmux's ANSI (`-e`) so the agent's real colors show inline.
+            let mut text = src
+                .into_text()
+                .unwrap_or_else(|_| Text::from(src.to_string()));
+            if scrolling {
+                text.lines.push(Line::styled(
+                    "── scroll mode · ↑↓ history · Esc to exit ──",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            let max_off = text.lines.len().saturating_sub(body_h) as u16;
             app.scroll = app.scroll.min(max_off);
             let top = max_off.saturating_sub(app.scroll);
-            (all, top)
+            (text, top)
         }
         // Diff renders in full and is scrollable with Shift+↑/↓.
         Tab::Diff => {
@@ -1052,7 +1104,7 @@ fn render_right(f: &mut Frame, app: &mut App, area: Rect) {
             }
             let max_off = lines.len().saturating_sub(body_h) as u16;
             app.scroll = app.scroll.min(max_off);
-            (lines, app.scroll)
+            (Text::from(lines), app.scroll)
         }
     };
     f.render_widget(Paragraph::new(content).scroll((scroll, 0)), parts[1]);
@@ -1271,16 +1323,26 @@ fn render_modal(f: &mut Frame, app: &App) {
                 Span::raw(format!("{filter}▏")),
             ])];
             let h = area.height.saturating_sub(3) as usize;
-            for (i, b) in matches.iter().take(h).enumerate() {
-                let style = if i == *sel {
-                    Style::default()
-                        .bg(SEL_BG)
-                        .fg(SEL_FG)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(GREEN_SOFT)
-                };
-                lines.push(Line::styled(format!(" {b}"), style));
+            if matches.is_empty() {
+                lines.push(Line::styled(
+                    "  no matching branches",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            } else {
+                // window the visible slice so the highlighted row stays on screen
+                let start = if *sel >= h { *sel + 1 - h } else { 0 };
+                for (off, b) in matches.iter().skip(start).take(h).enumerate() {
+                    let idx = start + off;
+                    let style = if idx == *sel {
+                        Style::default()
+                            .bg(SEL_BG)
+                            .fg(SEL_FG)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(GREEN_SOFT)
+                    };
+                    lines.push(Line::styled(format!(" {b}"), style));
+                }
             }
             f.render_widget(
                 Paragraph::new(lines).block(
@@ -1622,5 +1684,46 @@ mod tests {
         assert!(screen.contains("2 additions(+)"));
         assert!(screen.contains("1 deletions(-)"));
         assert!(screen.contains("+new"));
+    }
+
+    #[test]
+    fn truncate_cols_clips_with_ellipsis() {
+        assert_eq!(truncate_cols("short", 10), "short");
+        assert_eq!(truncate_cols("hello-world", 6), "hello…");
+        assert_eq!(truncate_cols("x", 0), "");
+    }
+
+    #[test]
+    fn preview_parses_ansi_not_leaking_escapes() {
+        let mut app = App::new();
+        app.rows = vec![row("x", Status::Ready, true, 0, 0)];
+        app.sel = 0;
+        app.tab = Tab::Preview;
+        // a tmux `-e` capture: green GREEN + red RED with SGR escapes
+        app.preview = "\u{1b}[32mGREEN\u{1b}[0m \u{1b}[31mRED\u{1b}[0m".into();
+        let screen = render_to_string(&mut app, 100, 16);
+        assert!(screen.contains("GREEN") && screen.contains("RED"));
+        // the SGR codes must be consumed into styles, not rendered as literal text
+        assert!(!screen.contains("[32m") && !screen.contains("[0m"));
+    }
+
+    #[test]
+    fn scroll_mode_shows_footer() {
+        let mut app = App::new();
+        app.rows = vec![row("x", Status::Running, true, 0, 0)];
+        app.sel = 0;
+        app.tab = Tab::Preview;
+        app.scrollback = Some("line1\nline2\nline3".into());
+        let screen = render_to_string(&mut app, 100, 16);
+        assert!(screen.contains("scroll mode"));
+    }
+
+    #[test]
+    fn long_task_name_truncates_without_overflow() {
+        let mut app = App::new();
+        app.rows = vec![row(&"verylongtaskname".repeat(4), Status::Ready, true, 12, 3)];
+        app.sel = 0;
+        let screen = render_to_string(&mut app, 30, 16);
+        assert!(screen.contains("…")); // clipped rather than overflowing the pane
     }
 }
