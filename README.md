@@ -35,6 +35,8 @@ In `dash`: `j`/`k` move · `Enter` attach (type in the agent; `Ctrl-q` returns) 
 
 - **Isolated** — one worktree + one tmux session per agent; no two touch the same
   files. Runs on a dedicated tmux server, so it stays out of your own `tmux ls`.
+  Sessions and state are namespaced per repo, so the same agent name in two repos
+  never collides.
 - **Persistent** — agents survive closing the terminal and laptop sleep (they
   resume on wake). A reboot ends the sessions, but the worktrees remain and
   `Enter` re-spawns them, continuing the previous conversation (`--continue`).
