@@ -63,6 +63,7 @@ enum Modal {
         prompt: String,
     },
     Confirm(String),
+    ForceKill(String),
     Resume(String),
     Push(String),
     BranchPick {
@@ -303,7 +304,26 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 KeyCode::Char('y') => {
                     let task = task.clone();
                     app.modal = Modal::None;
-                    if let Err(e) = worktree::rm(&task, false) {
+                    match worktree::rm(&task, false) {
+                        Ok(_) => {
+                            refresh(app);
+                            load_detail(app);
+                        }
+                        // worktree has uncommitted work → ask before discarding it
+                        Err(_) => app.modal = Modal::ForceKill(task),
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Esc => app.modal = Modal::None,
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::ForceKill(task) => {
+            match key.code {
+                KeyCode::Char('y') => {
+                    let task = task.clone();
+                    app.modal = Modal::None;
+                    if let Err(e) = worktree::rm(&task, true) {
                         app.set_err(e);
                     }
                     refresh(app);
@@ -727,10 +747,19 @@ fn refresh(app: &mut App) {
             paths.insert(w.task, w.path);
         }
     }
+    // Fold in state-file agents (hooks/`wta new` write these), but ONLY ones that
+    // belong to this repo's `.agents` dir and whose worktree still exists — so
+    // stale/ghost entries and agents from other repos don't pollute the board.
+    let agents_dir = worktree::agents_dir().ok();
     for (task, st) in &states {
-        if !paths.contains_key(task) && !st.cwd.is_empty() {
+        if paths.contains_key(task) || st.cwd.is_empty() {
+            continue;
+        }
+        let p = PathBuf::from(&st.cwd);
+        let in_repo = agents_dir.as_ref().map(|d| p.starts_with(d)).unwrap_or(false);
+        if in_repo && p.exists() {
             order.push(task.clone());
-            paths.insert(task.clone(), PathBuf::from(&st.cwd));
+            paths.insert(task.clone(), p);
         }
     }
     // Sort by the persisted manual order (from J/K); unranked tasks fall to the
@@ -1154,6 +1183,29 @@ fn render_modal(f: &mut Frame, app: &App) {
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(RED))
                         .title(" confirm "),
+                ),
+                area,
+            );
+        }
+        Modal::ForceKill(task) => {
+            let area = centered(62, 5, f.area());
+            f.render_widget(Clear, area);
+            let body = vec![
+                Line::raw(format!("'{task}' has uncommitted changes.")),
+                Line::from(vec![
+                    Span::styled("Force-kill", Style::default().fg(RED)),
+                    Span::raw(" and discard that work?  "),
+                    Span::styled("y", Style::default().fg(RED)),
+                    Span::raw(" / "),
+                    Span::styled("n", Style::default().fg(GREEN)),
+                ]),
+            ];
+            f.render_widget(
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(RED))
+                        .title(" force kill "),
                 ),
                 area,
             );

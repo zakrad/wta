@@ -301,19 +301,36 @@ pub fn rm(task: &str, force: bool) -> Result<()> {
 
     let _ = tmux::kill(&tmux::session_name(task));
 
-    let mut args = vec!["worktree", "remove"];
-    if force {
-        args.push("--force");
+    // Remove the worktree only if it's actually there. A worktree with
+    // uncommitted/untracked files needs --force — surface that precisely so the
+    // caller can offer it. A missing worktree (already gone, or a stale/ghost
+    // state entry) is not an error.
+    if wt.exists() {
+        let mut args = vec!["worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push(&wt_str);
+        run_git(&args, Some(&root))
+            .with_context(|| format!("'{task}' has uncommitted changes — force to discard"))?;
     }
-    args.push(&wt_str);
-    run_git(&args, Some(&root)).context("worktree dirty? re-run with --force to discard")?;
+    let _ = run_git(&["worktree", "prune"], Some(&root)); // clear dangling admin entries
 
+    // best-effort branch delete (may not exist / may be unmerged)
     let flag = if force { "-D" } else { "-d" };
     let _ = run_git(&["branch", flag, &branch], Some(&root));
+
+    // ALWAYS drop the state file so the agent leaves the dashboard even if it was
+    // only a stale entry with no worktree.
     if let Ok(p) = status::state_path(task) {
         let _ = std::fs::remove_file(p);
     }
     Ok(())
+}
+
+/// The `.agents` directory of the current repo (where wta keeps its worktrees).
+pub fn agents_dir() -> Result<PathBuf> {
+    Ok(worktrees_dir(&repo_root()?))
 }
 
 /// Commit any uncommitted work in the agent's worktree, push its branch, and
