@@ -1615,22 +1615,25 @@ mod tests {
             row("docs-site", Status::Exited, false, 5, 0),
         ];
         app.sel = 0;
-        app.tab = Tab::Diff;
-        app.diff_text = [
-            "@@ -14,7 +14,9 @@ impl Session {",
-            "     pub fn refresh(&mut self) -> Result<()> {",
-            "-        self.token = fetch_token()?;",
-            "+        // refresh in the background with retry + backoff",
-            "+        self.token = retry(3, || fetch_token())?;",
-            "+        self.refreshed_at = Instant::now();",
-            "         Ok(())",
-            "     }",
-            "@@ -63,0 +65,6 @@ mod tests {",
-            "+    #[test]",
-            "+    fn refresh_retries_on_timeout() {",
-            "+        let mut s = Session::expired();",
-            "+        assert!(s.refresh().is_ok());",
-            "+    }",
+        // Preview tab, showing the agent's real colors (parsed from tmux `-e`).
+        app.tab = Tab::Preview;
+        app.preview = [
+            "\u{1b}[35m✻\u{1b}[0m \u{1b}[1mRefactor the auth token refresh\u{1b}[0m",
+            "",
+            "\u{1b}[32m●\u{1b}[0m I'll add retry + backoff to \u{1b}[36msrc/session.rs\u{1b}[0m, then a test.",
+            "",
+            "\u{1b}[32m●\u{1b}[0m \u{1b}[1mUpdate\u{1b}[0m(\u{1b}[36msrc/session.rs\u{1b}[0m)",
+            "  \u{1b}[2m⎿\u{1b}[0m  \u{1b}[32m3 additions\u{1b}[0m · \u{1b}[31m1 removal\u{1b}[0m",
+            "     \u{1b}[2m14\u{1b}[0m     pub fn refresh(&mut self) -> Result<()> {",
+            "     \u{1b}[31m15 -     self.token = fetch_token()?;\u{1b}[0m",
+            "     \u{1b}[32m15 +     self.token = retry(3, || fetch_token())?;\u{1b}[0m",
+            "     \u{1b}[32m16 +     self.refreshed_at = Instant::now();\u{1b}[0m",
+            "",
+            "\u{1b}[32m●\u{1b}[0m \u{1b}[1mBash\u{1b}[0m(\u{1b}[33mcargo test session::\u{1b}[0m)",
+            "  \u{1b}[2m⎿\u{1b}[0m  running 8 tests",
+            "     \u{1b}[92mtest result: ok. 8 passed\u{1b}[0m; 0 failed",
+            "",
+            "\u{1b}[32m●\u{1b}[0m Done — refresh retries 3× with backoff.  \u{1b}[2m(esc to interrupt)\u{1b}[0m",
         ]
         .join("\n");
         let mut term = Terminal::new(TestBackend::new(120, 26)).unwrap();

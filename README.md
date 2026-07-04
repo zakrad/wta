@@ -5,7 +5,7 @@ persistent tmux session** — from one keyboard-first dashboard. Attach to any
 agent, review its diff, and preview branch conflicts before you merge. A single
 ~1 MB Rust binary that runs in **any terminal** and never touches your own tmux.
 
-![wta dashboard — an Instances sidebar of parallel AI agents beside a live colorized diff](assets/wta.png)
+![wta dashboard — an Instances sidebar of parallel AI agents beside a live, full-color agent Preview](assets/wta.png)
 
 ## Install
 
