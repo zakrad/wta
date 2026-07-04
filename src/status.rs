@@ -129,6 +129,7 @@ pub fn read_states(repo: &str) -> Result<Vec<AgentState>> {
 
 /// Read every agent's state across all repos (used by the Telegram bridge). Each
 /// `AgentState.repo` is filled so callers can compute the tmux session name.
+#[cfg_attr(not(feature = "telegram"), allow(dead_code))]
 pub fn read_all_states() -> Result<Vec<AgentState>> {
     let root = state_root()?;
     let mut out = Vec::new();
