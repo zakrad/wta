@@ -30,18 +30,15 @@ fn tmux() -> Command {
     c
 }
 
-pub fn session_name(task: &str) -> String {
-    let safe: String = task
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("wta-{safe}")
+/// tmux session name, namespaced by repo id so the same task name in two repos
+/// never collides on the (global) tmux server: `wta-<repo>-<task>`.
+pub fn session_name(repo: &str, task: &str) -> String {
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect()
+    };
+    format!("wta-{}-{}", sanitize(repo), sanitize(task))
 }
 
 pub fn has_session(name: &str) -> bool {

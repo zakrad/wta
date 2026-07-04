@@ -31,6 +31,20 @@ pub enum Command {
     Ls,
     /// Preview which agent branches merge cleanly vs each other + base (no files touched)
     Matrix,
+    /// Spawn N agents on the SAME prompt (names <name>-1..N); compare with `matrix`, merge the winner
+    Fanout {
+        /// name prefix for the agents (creates <name>-1 .. <name>-N)
+        name: String,
+        /// how many agents to spawn
+        #[arg(short = 'n', long, default_value_t = 3)]
+        count: u32,
+        /// base the agents' branches on an existing branch (default: HEAD)
+        #[arg(long)]
+        base: Option<String>,
+        /// everything after `--` is passed to each agent (e.g. the prompt)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        agent_args: Vec<String>,
+    },
     /// Attach to an agent's tmux session in the foreground (Ctrl-q to detach)
     Attach { task: String },
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later

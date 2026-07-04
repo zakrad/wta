@@ -29,6 +29,12 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Ls => worktree::ls()?,
         Command::Matrix => worktree::matrix()?,
+        Command::Fanout {
+            name,
+            count,
+            base,
+            agent_args,
+        } => worktree::fanout(&name, count, base.as_deref(), &agent_args)?,
         Command::Attach { task } => worktree::attach(&task)?,
         Command::Stop { task } => {
             worktree::stop(&task)?;

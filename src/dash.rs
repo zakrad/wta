@@ -113,6 +113,7 @@ struct Row {
 }
 
 struct App {
+    repo: String, // repo id namespacing sessions + state for this dashboard's repo
     rows: Vec<Row>,
     sel: usize,
     tab: Tab,
@@ -133,6 +134,7 @@ struct App {
 impl App {
     fn new() -> Self {
         App {
+            repo: worktree::repo_id().unwrap_or_default(),
             rows: Vec::new(),
             sel: 0,
             tab: Tab::Preview,
@@ -424,7 +426,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                     let text = std::mem::take(text);
                     app.modal = Modal::None;
                     if !text.trim().is_empty() {
-                        let session = tmux::session_name(&task);
+                        let session = tmux::session_name(&app.repo, &task);
                         if !tmux::has_session(&session) {
                             app.set_err(format!("'{task}' is no longer running"));
                         } else if !tmux::pane_is_idle(&session) {
@@ -660,7 +662,7 @@ fn reorder(app: &mut App, delta: isize) {
     tasks.swap(i, j as usize);
     let map: std::collections::HashMap<String, u32> =
         tasks.iter().enumerate().map(|(idx, t)| (t.clone(), idx as u32)).collect();
-    if let Err(e) = status::write_order(&map) {
+    if let Err(e) = status::write_order(&app.repo, &map) {
         app.set_err(e);
         return;
     }
@@ -730,7 +732,7 @@ fn hash_str(s: &str) -> u64 {
 }
 
 fn refresh(app: &mut App) {
-    let states: HashMap<String, status::AgentState> = status::read_all_states()
+    let states: HashMap<String, status::AgentState> = status::read_states(&app.repo)
         .unwrap_or_default()
         .into_iter()
         .map(|s| (s.task.clone(), s))
@@ -766,7 +768,7 @@ fn refresh(app: &mut App) {
     // end alphabetically. Dedupe first since the sort key isn't the task name.
     let mut seen = HashSet::new();
     order.retain(|t| seen.insert(t.clone()));
-    let rank = status::read_order();
+    let rank = status::read_order(&app.repo);
     order.sort_by(|a, b| {
         let pa = rank.get(a).copied().unwrap_or(u32::MAX);
         let pb = rank.get(b).copied().unwrap_or(u32::MAX);
@@ -807,7 +809,7 @@ fn refresh(app: &mut App) {
             None => (0, 0),
         };
 
-        let session = tmux::session_name(&task);
+        let session = tmux::session_name(&app.repo, &task);
         let alive = tmux::has_session(&session);
 
         let status = if alive {
@@ -1411,7 +1413,7 @@ mod tests {
             status: s,
             added: a,
             removed: d,
-            session: tmux::session_name(task),
+            session: tmux::session_name("t", task),
             alive,
             path: Some(PathBuf::from("/tmp/x")),
         }

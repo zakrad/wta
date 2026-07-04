@@ -138,7 +138,17 @@ fn deliver(task: &str, body: &str) -> String {
     if body.is_empty() {
         return "nothing to send".to_string();
     }
-    let session = tmux::session_name(task);
+    // state is per-repo now — look up which repo this agent belongs to so we name
+    // its (repo-namespaced) tmux session correctly.
+    let repo = match status::read_all_states() {
+        Ok(states) => states.into_iter().find(|s| s.task == task).map(|s| s.repo),
+        Err(_) => None,
+    };
+    let repo = match repo {
+        Some(r) => r,
+        None => return format!("'{task}' not found"),
+    };
+    let session = tmux::session_name(&repo, task);
     if !tmux::has_session(&session) {
         return format!("'{task}' isn't running (resume it in wta first)");
     }

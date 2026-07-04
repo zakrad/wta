@@ -1,8 +1,24 @@
 use anyhow::{bail, Context, Result};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{status, tmux};
+
+/// Stable short id for a repo (hash of its canonical root path). Namespaces tmux
+/// session names + on-disk state so two repos with the same task name never
+/// collide (`wta-<repo>-<task>`, `~/.wta/state/<repo>/<task>.json`).
+pub fn repo_id_of(root: &Path) -> String {
+    let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut h = DefaultHasher::new();
+    h.write(canon.to_string_lossy().as_bytes());
+    format!("{:08x}", h.finish() as u32)
+}
+
+pub fn repo_id() -> Result<String> {
+    Ok(repo_id_of(&repo_root()?))
+}
 
 pub struct Worktree {
     pub task: String,
@@ -152,11 +168,11 @@ fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
     Ok((root, wt))
 }
 
-/// Build the tmux pane command: `env WTA_TASK=<task> <agent_cmd> <tail...>`.
-/// The `env` wrapper is what lets the agent's Claude Code hooks (`wta status`)
-/// know which task they belong to.
-fn agent_argv(task: &str, tail: &[String]) -> (String, Vec<String>) {
-    let mut extra = vec![format!("WTA_TASK={task}"), agent_cmd()];
+/// Build the tmux pane command: `env WTA_TASK=<task> WTA_REPO=<repo> <agent_cmd> <tail...>`.
+/// The `env` wrapper lets the agent's Claude Code hooks (`wta status`) record
+/// state under the right repo + task.
+fn agent_argv(repo: &str, task: &str, tail: &[String]) -> (String, Vec<String>) {
+    let mut extra = vec![format!("WTA_TASK={task}"), format!("WTA_REPO={repo}"), agent_cmd()];
     extra.extend_from_slice(tail);
     ("env".to_string(), extra)
 }
@@ -171,12 +187,41 @@ pub fn new_with_base(task: &str, agent_args: &[String], base: &str) -> Result<()
 }
 
 fn new_impl(task: &str, agent_args: &[String], base: Option<&str>) -> Result<()> {
-    let (_root, wt) = make_worktree(task, base)?;
+    let (root, wt) = make_worktree(task, base)?;
+    let repo = repo_id_of(&root);
     let wt_str = wt.to_string_lossy().into_owned();
-    let session = tmux::session_name(task);
-    let (prog, extra) = agent_argv(task, agent_args);
+    let session = tmux::session_name(&repo, task);
+    let (prog, extra) = agent_argv(&repo, task, agent_args);
     tmux::new_session(&session, &wt, &prog, &extra)?;
-    let _ = status::record(task, "running", &wt_str);
+    let _ = status::record(&repo, task, "running", &wt_str);
+    Ok(())
+}
+
+/// Spawn N agents on the same prompt off one base branch — the front half of a
+/// "spawn → compare (`wta matrix`) → merge the winner (`wta push`) → drop the
+/// rest (`wta rm`)" loop. Names them `<name>-1..N`.
+pub fn fanout(name: &str, count: u32, base: Option<&str>, agent_args: &[String]) -> Result<()> {
+    if count == 0 {
+        bail!("--count must be >= 1");
+    }
+    eprintln!("fanout: starting {count} agents on the same prompt — each is a full agent run (token cost ×{count}).");
+    let mut ok = 0u32;
+    for i in 1..=count {
+        let task = format!("{name}-{i}");
+        let r = match base {
+            Some(b) => new_with_base(&task, agent_args, b),
+            None => new(&task, agent_args),
+        };
+        match r {
+            Ok(_) => {
+                ok += 1;
+                println!("  started {task}");
+            }
+            Err(e) => println!("  skipped {task}: {e}"),
+        }
+    }
+    println!("fanout: {ok}/{count} started. Compare with `wta matrix`, review diffs in `wta dash`,");
+    println!("        merge the winner with `wta push <task> --pr`, drop the rest with `wta rm <task> --force`.");
     Ok(())
 }
 
@@ -197,10 +242,11 @@ pub fn resume_at(task: &str, wt: &Path) -> Result<()> {
     if !wt.exists() {
         bail!("no worktree at {} to resume", wt.display());
     }
-    let session = tmux::session_name(task);
-    let (prog, extra) = agent_argv(task, &resume_args());
+    let repo = repo_id()?;
+    let session = tmux::session_name(&repo, task);
+    let (prog, extra) = agent_argv(&repo, task, &resume_args());
     tmux::new_session(&session, wt, &prog, &extra)?;
-    let _ = status::record(task, "running", &wt.to_string_lossy());
+    let _ = status::record(&repo, task, "running", &wt.to_string_lossy());
     Ok(())
 }
 
@@ -215,7 +261,14 @@ pub fn resume(task: &str) -> Result<()> {
 /// the worktree (and uncommitted work) so it can be resumed later. Contrast with
 /// `rm`, which also removes the worktree and branch.
 pub fn stop(task: &str) -> Result<()> {
-    tmux::kill(&tmux::session_name(task))
+    let root = repo_root()?;
+    let repo = repo_id_of(&root);
+    tmux::kill(&tmux::session_name(&repo, task))?;
+    // mark exited so the dashboard AND the Telegram bridge stop reporting it as
+    // running (the bridge reads state without checking tmux liveness).
+    let wt = worktrees_dir(&root).join(task);
+    let _ = status::record(&repo, task, "exited", &wt.to_string_lossy());
+    Ok(())
 }
 
 fn diffstat(path: &Path, base: &str) -> String {
@@ -266,6 +319,7 @@ fn push_if_managed(out: &mut Vec<Worktree>, base_dir: &Path, path: PathBuf, bran
 
 pub fn ls() -> Result<()> {
     let root = repo_root()?;
+    let repo = repo_id_of(&root);
     let base = base_branch(&root);
     let managed = list_managed()?;
     if managed.is_empty() {
@@ -277,7 +331,7 @@ pub fn ls() -> Result<()> {
         "TASK", "STATE", "BRANCH", base
     );
     for w in managed {
-        let alive = if tmux::has_session(&tmux::session_name(&w.task)) {
+        let alive = if tmux::has_session(&tmux::session_name(&repo, &w.task)) {
             "running"
         } else {
             "exited"
@@ -295,11 +349,12 @@ pub fn ls() -> Result<()> {
 
 pub fn rm(task: &str, force: bool) -> Result<()> {
     let root = repo_root()?;
+    let repo = repo_id_of(&root);
     let branch = branch_name(task);
     let wt = worktrees_dir(&root).join(task);
     let wt_str = wt.to_string_lossy().into_owned();
 
-    let _ = tmux::kill(&tmux::session_name(task));
+    let _ = tmux::kill(&tmux::session_name(&repo, task));
 
     // Remove the worktree only if it's actually there. A worktree with
     // uncommitted/untracked files needs --force — surface that precisely so the
@@ -322,9 +377,7 @@ pub fn rm(task: &str, force: bool) -> Result<()> {
 
     // ALWAYS drop the state file so the agent leaves the dashboard even if it was
     // only a stale entry with no worktree.
-    if let Ok(p) = status::state_path(task) {
-        let _ = std::fs::remove_file(p);
-    }
+    status::remove_state(&repo, task);
     Ok(())
 }
 
@@ -343,12 +396,17 @@ pub fn push(task: &str, make_pr: bool) -> Result<String> {
     }
     let branch = branch_name(task);
 
-    // commit uncommitted changes, if any
-    let dirty = !run_git(&["status", "--porcelain"], Some(&wt))?
+    // Stage everything, then UNSTAGE the wta-injected context files so secrets /
+    // local context (CLAUDE.local.md, .env, …) never land in the PR. Commit only
+    // if real changes remain staged.
+    run_git(&["add", "-A"], Some(&wt))?;
+    for f in context_files() {
+        let _ = run_git(&["reset", "-q", "--", &f], Some(&wt));
+    }
+    let staged = !run_git(&["diff", "--cached", "--name-only"], Some(&wt))?
         .trim()
         .is_empty();
-    if dirty {
-        run_git(&["add", "-A"], Some(&wt))?;
+    if staged {
         run_git(&["commit", "-m", &format!("wta: {task}")], Some(&wt))?;
     }
 
@@ -385,7 +443,7 @@ pub fn push(task: &str, make_pr: bool) -> Result<String> {
 
 /// Attach to an agent's session in the foreground (blocks until detach).
 pub fn attach(task: &str) -> Result<()> {
-    let session = tmux::session_name(task);
+    let session = tmux::session_name(&repo_id()?, task);
     if !tmux::has_session(&session) {
         bail!("no running session for '{task}' — start it with `wta new {task}` or resume from `wta dash`");
     }

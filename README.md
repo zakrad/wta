@@ -51,6 +51,7 @@ In `dash`: `j`/`k` move · `Enter` attach (type in the agent; `Ctrl-q` returns) 
 ```
 wta new <task> [--base <branch>]     start an agent (worktree + branch + tmux session)
 wta ls | matrix                      list agents · preview pairwise branch conflicts
+wta fanout <name> -n N -- <prompt>   spawn N agents on one prompt → compare (matrix) → merge the winner
 wta attach | stop | resume | rm      attach · stop (keep worktree) · resume · destroy
 wta push <task> [--pr]               commit + push the branch (--pr opens a PR via gh)
 wta dash                             the live dashboard
