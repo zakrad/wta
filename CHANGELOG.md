@@ -4,6 +4,17 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.14] — 2026-07-05
+
+### Fixed (audit, cont.)
+- **Isolation slots no longer collide.** `WTA_INDEX`/`WTA_PORT_BASE` are now
+  assigned as the lowest free slot among the repo's current agents (was a
+  `hash % 100` that collided ~50% of the time at ~12 agents) and **persisted per
+  agent**, so the slot stays stable across resume.
+- **`push` can't leak a custom context file.** It now unstages the exact files
+  injected at `new` time (recorded per agent) rather than re-reading
+  `WTA_CONTEXT_FILES` from the (possibly different) push-time environment.
+
 ## [0.1.13] — 2026-07-05
 
 ### Fixed (from a multi-agent code audit)
@@ -162,6 +173,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.14]: https://github.com/zakrad/wta/releases/tag/v0.1.14
 [0.1.13]: https://github.com/zakrad/wta/releases/tag/v0.1.13
 [0.1.12]: https://github.com/zakrad/wta/releases/tag/v0.1.12
 [0.1.11]: https://github.com/zakrad/wta/releases/tag/v0.1.11

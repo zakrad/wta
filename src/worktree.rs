@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn agent_argv_tokenizes_multiword_command() {
         std::env::set_var("WTA_AGENT_CMD", "claude --model haiku");
-        let (prog, extra) = agent_argv("repo", "task", &[]);
+        let (prog, extra) = agent_argv("repo", "task", 0, &[]);
         std::env::remove_var("WTA_AGENT_CMD");
         assert_eq!(prog, "env");
         // the command must be split into separate argv elements, not one string
@@ -170,7 +170,7 @@ fn validate_task(task: &str) -> Result<()> {
 /// Create the worktree + copy context + optional setup, returning the worktree
 /// path. If `base` is given, the new `agent/<task>` branch starts from it;
 /// otherwise from HEAD.
-fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
+fn make_worktree(task: &str, base: Option<&str>, idx: u32) -> Result<(PathBuf, PathBuf, Vec<String>)> {
     validate_task(task)?;
     let root = repo_root()?;
     let branch = branch_name(task);
@@ -212,6 +212,7 @@ fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
         run_git(&["worktree", "add", "-b", &branch, &wt_str], Some(&root))?;
     }
 
+    let mut injected = Vec::new();
     for name in context_files() {
         let src = root.join(&name);
         if src.exists() {
@@ -229,12 +230,13 @@ fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
             } else {
                 std::fs::copy(&src, &dst).ok();
             }
+            injected.push(name);
         }
     }
 
     let setup = root.join(".wta/setup.sh");
     if setup.exists() {
-        let (idx, port) = port_slot(task);
+        let port = port_base(idx);
         let _ = Command::new("bash")
             .arg(&setup)
             .current_dir(&wt)
@@ -244,31 +246,35 @@ fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
             .env("WTA_PORT_BASE", port.to_string())
             .status();
     }
-    Ok((root, wt))
+    Ok((root, wt, injected))
 }
 
-/// Deterministic per-agent slot + port block, so parallel agents' dev servers /
-/// databases don't collide (port 3000, shared dev DB). Stable per task name, so
-/// it survives resume. Exposed as `WTA_INDEX` + `WTA_PORT_BASE` to the agent pane
-/// AND `.wta/setup.sh` — use them e.g. `PORT=$WTA_PORT_BASE npm run dev`,
-/// DB `myapp_$WTA_INDEX`.
-fn port_slot(task: &str) -> (u32, u32) {
-    let mut h = DefaultHasher::new();
-    h.write(task.as_bytes());
-    let idx = (h.finish() % 100) as u32; // 0..=99
-    (idx, 13000 + idx * 10) // a 10-port block per agent
+/// Lowest free isolation slot (0..100) among the repo's current agents, so
+/// parallel agents get DISTINCT `WTA_INDEX`/`WTA_PORT_BASE` (no birthday
+/// collisions). The chosen slot is persisted per agent (`AgentState.index`) so it
+/// stays stable across resume. Exposed to the pane AND `.wta/setup.sh` — use e.g.
+/// `PORT=$WTA_PORT_BASE npm run dev`, DB `myapp_$WTA_INDEX`.
+fn assign_slot(repo: &str) -> u32 {
+    let used: std::collections::HashSet<u32> = status::read_states(repo)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.index)
+        .collect();
+    (0u32..100).find(|i| !used.contains(i)).unwrap_or(0)
+}
+fn port_base(idx: u32) -> u32 {
+    13000 + idx * 10
 }
 
 /// Build the tmux pane command: `env WTA_TASK=… WTA_REPO=… WTA_INDEX=… WTA_PORT_BASE=… <agent_cmd> <tail…>`.
 /// The `env` wrapper lets the agent's Claude Code hooks (`wta status`) record
 /// state under the right repo + task, and gives the agent its isolation slot.
-fn agent_argv(repo: &str, task: &str, tail: &[String]) -> (String, Vec<String>) {
-    let (idx, port) = port_slot(task);
+fn agent_argv(repo: &str, task: &str, idx: u32, tail: &[String]) -> (String, Vec<String>) {
     let mut extra = vec![
         format!("WTA_TASK={task}"),
         format!("WTA_REPO={repo}"),
         format!("WTA_INDEX={idx}"),
-        format!("WTA_PORT_BASE={port}"),
+        format!("WTA_PORT_BASE={}", port_base(idx)),
     ];
     // tmux execs program+args directly (no shell), so a multi-word agent command
     // (`claude --model haiku`, `npx foo`) must be tokenized, not one argv element.
@@ -302,11 +308,15 @@ pub fn new_with_base(task: &str, agent_args: &[String], base: &str) -> Result<()
 }
 
 fn new_impl(task: &str, agent_args: &[String], base: Option<&str>) -> Result<()> {
-    let (root, wt) = make_worktree(task, base)?;
-    let repo = repo_id_of(&root);
+    validate_task(task)?;
+    let repo = repo_id()?;
+    let idx = assign_slot(&repo); // pick the slot before creating, so setup.sh sees it
+    let (_root, wt, injected) = make_worktree(task, base, idx)?;
+    // persist slot + injected list first, so the "running" record below merges over it
+    let _ = status::record_meta(&repo, task, idx, &injected);
     let wt_str = wt.to_string_lossy().into_owned();
     let session = tmux::session_name(&repo, task);
-    let (prog, extra) = agent_argv(&repo, task, agent_args);
+    let (prog, extra) = agent_argv(&repo, task, idx, agent_args);
     tmux::new_session(&session, &wt, &prog, &extra)?;
     let _ = status::record(&repo, task, "running", &wt_str);
     Ok(())
@@ -428,8 +438,9 @@ pub fn resume_at(task: &str, wt: &Path) -> Result<()> {
         bail!("no worktree at {} to resume", wt.display());
     }
     let repo = repo_id()?;
+    let idx = status::read_state(&repo, task).map(|s| s.index).unwrap_or_else(|| assign_slot(&repo));
     let session = tmux::session_name(&repo, task);
-    let (prog, extra) = agent_argv(&repo, task, &resume_args());
+    let (prog, extra) = agent_argv(&repo, task, idx, &resume_args());
     tmux::new_session(&session, wt, &prog, &extra)?;
     let _ = status::record(&repo, task, "running", &wt.to_string_lossy());
     Ok(())
@@ -599,7 +610,14 @@ pub fn push(task: &str, make_pr: bool) -> Result<String> {
     // local context (CLAUDE.local.md, .env, …) never land in the PR. Commit only
     // if real changes remain staged.
     run_git(&["add", "-A"], Some(&wt))?;
-    for f in context_files() {
+    // unstage the EXACT files injected at `new` time (recorded per agent), so a
+    // custom WTA_CONTEXT_FILES can't leak just because push runs in a different env
+    let repo = repo_id_of(&root);
+    let injected = status::read_state(&repo, task)
+        .map(|s| s.context)
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(context_files);
+    for f in injected {
         let _ = run_git(&["reset", "-q", "--", &f], Some(&wt));
     }
     let staged = !run_git(&["diff", "--cached", "--name-only"], Some(&wt))?

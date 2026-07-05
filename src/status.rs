@@ -18,6 +18,10 @@ pub struct AgentState {
     pub status: String, // running | needs_input | waiting | exited | ...
     pub cwd: String,
     pub updated_unix: u64,
+    #[serde(default)]
+    pub index: u32, // stable isolation slot (WTA_INDEX / WTA_PORT_BASE), assigned at creation
+    #[serde(default)]
+    pub context: Vec<String>, // files injected at `new`, unstaged again by `push`
 }
 
 pub fn wta_dir() -> Result<PathBuf> {
@@ -65,15 +69,51 @@ fn save(st: &AgentState) -> Result<()> {
     Ok(())
 }
 
-/// Record state directly (used by `wta new`/`resume`).
+/// Load an agent's persisted state, if any.
+pub fn read_state(repo: &str, task: &str) -> Option<AgentState> {
+    let p = state_path(repo, task).ok()?;
+    let bytes = std::fs::read(p).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Record status/cwd (used by `wta new`/`resume` and by hooks). Merges over any
+/// existing file so the isolation slot + injected-file list set at creation
+/// aren't clobbered by later hook writes.
 pub fn record(repo: &str, task: &str, status: &str, cwd: &str) -> Result<()> {
-    save(&AgentState {
+    let mut st = read_state(repo, task).unwrap_or(AgentState {
+        task: String::new(),
+        repo: String::new(),
+        status: String::new(),
+        cwd: String::new(),
+        updated_unix: 0,
+        index: 0,
+        context: Vec::new(),
+    });
+    st.task = task.to_string();
+    st.repo = repo.to_string();
+    st.status = status.to_string();
+    st.cwd = cwd.to_string();
+    st.updated_unix = now_unix();
+    save(&st)
+}
+
+/// Record the creation-time metadata (isolation slot + injected files), merging
+/// over any existing status/cwd.
+pub fn record_meta(repo: &str, task: &str, index: u32, context: &[String]) -> Result<()> {
+    let mut st = read_state(repo, task).unwrap_or(AgentState {
         task: task.to_string(),
         repo: repo.to_string(),
-        status: status.to_string(),
-        cwd: cwd.to_string(),
+        status: "running".to_string(),
+        cwd: String::new(),
         updated_unix: now_unix(),
-    })
+        index: 0,
+        context: Vec::new(),
+    });
+    st.task = task.to_string();
+    st.repo = repo.to_string();
+    st.index = index;
+    st.context = context.to_vec();
+    save(&st)
 }
 
 fn emit_uservar(name: &str, value: &str) -> std::io::Result<()> {
