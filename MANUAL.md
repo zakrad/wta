@@ -284,6 +284,28 @@ WTA_AGENT_CMD=bash  wta new scratch                    # kick the tyres, no toke
 `--continue`-style resume is Claude's default; set `WTA_AGENT_RESUME_ARGS` for
 another CLI (or empty to just relaunch it).
 
+### Permissions & trust (Claude)
+
+Every wta worktree is a **new folder path** to Claude Code, so by default a fresh
+agent would hit two prompts. wta handles them like this:
+
+- **Folder-trust dialog** ("Is this a directory you created or one you trust?") —
+  wta **pre-accepts trust** for the worktree path in `~/.claude.json` at spawn
+  (and the dashboard dismisses the live dialog as a backstop). On by default;
+  disable with `WTA_AUTO_TRUST=0`. It only writes for the `claude` CLI, never
+  clobbers an unparseable config, and keeps the file `0600`.
+- **Per-tool permission prompts** ("Do you want to allow Bash/Edit…") — these come
+  from your repo's `.claude/settings.local.json`, which is untracked so a worktree
+  doesn't get it. Two ways to stop the re-prompting, both **opt-in** (they let
+  agents run tools unprompted — a real grant):
+  - `WTA_COPY_PERMISSIONS=1` — copies `.claude/settings.local.json` into each
+    worktree (kept out of pushes). Carries the grants you already approved.
+  - `WTA_AGENT_CMD="claude --permission-mode acceptEdits"` — auto-accept file
+    edits (Bash still asks). `bypassPermissions` exists but only inside a
+    container/VM — never on your host.
+  - Or promote stable rules into the **tracked** `.claude/settings.json`, which
+    every worktree inherits via `git checkout` with no wta config at all.
+
 ### What's Claude Code-specific
 
 The **core is agent-agnostic** — worktrees, tmux, attach/quick-send, the
@@ -313,7 +335,8 @@ The defaults also lean Claude — `WTA_AGENT_CMD=claude`,
 | `WTA_REVIEW_AGENT_CMD` | `$WTA_AGENT_CMD` | agent CLI for `wta review` |
 | `WTA_WORKTREE_DIR` | `.agents` | where worktrees live under the repo root |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree (and kept out of pushes) |
-| `WTA_AUTO_TRUST` | `1` | auto-accept Claude's per-folder trust prompt (`0` off) — **Claude only** |
+| `WTA_AUTO_TRUST` | `1` | pre-accept + dismiss Claude's folder-trust prompt (`0` off) — **Claude only** |
+| `WTA_COPY_PERMISSIONS` | `0` | copy `.claude/settings.local.json` (tool grants) into each worktree — **Claude only, opt-in** |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` |
 | `WTA_OPEN_INLINE` | auto | force editor inline (`1`) or detached (`0`) |
 | `WTA_NOTIFY_SOUND` | `1` | notification sound (`0` = silent, or a sound-file path) |

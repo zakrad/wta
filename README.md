@@ -106,7 +106,8 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | Var | Default | |
 |---|---|---|
 | `WTA_AGENT_CMD` | `claude` | program started in each session |
-| `WTA_AUTO_TRUST` | `1` | auto-accept Claude's per-folder trust prompt (`0` disables) — Claude only |
+| `WTA_AUTO_TRUST` | `1` | pre-accept + dismiss Claude's folder-trust prompt for each worktree (`0` off) — Claude only |
+| `WTA_COPY_PERMISSIONS` | `0` | copy `.claude/settings.local.json` (tool grants) into each worktree so agents don't re-approve (opt-in) — Claude only |
 | `WTA_WORKTREE_DIR` | `.agents` | worktree dir under the repo root (gitignore it) |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` (GUI editors like `code` open detached; terminal editors like `nvim` open inline and return to the dash on quit) |

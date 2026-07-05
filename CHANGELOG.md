@@ -4,6 +4,24 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.16] — 2026-07-06
+
+### Fixed
+- **Fresh agents no longer get stuck on Claude's trust prompt.** The matcher was
+  looking for pre-2.1 wording ("Do you trust the files in this folder?") that no
+  longer exists in Claude Code 2.1.x, so auto-trust never fired. Now: (1) the
+  matcher recognizes both wording generations (whitespace-normalized, and refuses
+  the "pre-approves" variant); (2) wta **pre-accepts folder-trust** for each new
+  worktree path in `~/.claude.json` at spawn — so CLI spawns (`new`/`fanout`/
+  `review`) work even with no dashboard watching; (3) the dashboard grace window
+  is anchored to the prompt appearing, with a 120s cap. All gated by
+  `WTA_AUTO_TRUST`; the pre-seed never clobbers an unparseable config and keeps it `0600`.
+
+### Added
+- **`WTA_COPY_PERMISSIONS=1`** (opt-in) — copies the repo's
+  `.claude/settings.local.json` tool-permission grants into each worktree, so
+  agents stop re-approving every Bash/Edit. Kept out of pushes.
+
 ## [0.1.15] — 2026-07-05
 
 ### Added
@@ -181,6 +199,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.16]: https://github.com/zakrad/wta/releases/tag/v0.1.16
 [0.1.15]: https://github.com/zakrad/wta/releases/tag/v0.1.15
 [0.1.14]: https://github.com/zakrad/wta/releases/tag/v0.1.14
 [0.1.13]: https://github.com/zakrad/wta/releases/tag/v0.1.13

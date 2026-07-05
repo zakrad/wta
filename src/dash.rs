@@ -1171,15 +1171,18 @@ fn refresh(app: &mut App) {
 
         let status = if alive {
             let text = tmux::capture(&session).unwrap_or_default();
-            // Auto-dismiss Claude's per-folder trust prompt within a startup grace
-            // window (strict 3-string match, one-shot, opt out via WTA_AUTO_TRUST=0).
+            // Auto-dismiss Claude's per-folder trust prompt. Check the prompt FIRST
+            // (a cold start can take >10s to paint the dialog), one-shot, giving up
+            // only after a generous window. Opt out via WTA_AUTO_TRUST=0.
             if auto_trust && !app.trust_done.contains(&session) {
-                let seen_at = *app.trust_seen.entry(session.clone()).or_insert_with(Instant::now);
-                if seen_at.elapsed() > Duration::from_secs(10) {
-                    app.trust_done.insert(session.clone()); // grace expired: disarm
-                } else if is_trust_prompt(&text) {
-                    let _ = tmux::send_enter(&session); // accept the default "Yes, proceed"
+                if is_trust_prompt(&text) {
+                    let _ = tmux::send_enter(&session); // accept the default (trust) option
                     app.trust_done.insert(session.clone()); // one-shot
+                } else {
+                    let seen_at = *app.trust_seen.entry(session.clone()).or_insert_with(Instant::now);
+                    if seen_at.elapsed() > Duration::from_secs(120) {
+                        app.trust_done.insert(session.clone()); // give up after 2 min
+                    }
                 }
             }
             let h = hash_str(&text);
@@ -1283,12 +1286,24 @@ fn refresh(app: &mut App) {
     }
 }
 
-/// Claude Code's per-folder trust dialog. Strict 3-string co-occurrence so normal
-/// agent output can't trip it (strings confirmed current: claude-code #6797/#9256).
+/// Claude Code's per-folder trust dialog. Matches BOTH wording generations
+/// (Claude ≤2.0 and the 2.1.x "Yes, I trust this folder" dialog), on the
+/// whitespace-normalized capture so pane wrapping can't defeat it. Strict
+/// co-occurrence keeps normal agent output from tripping it.
 fn is_trust_prompt(text: &str) -> bool {
-    text.contains("Do you trust the files in this folder?")
-        && text.contains("Yes, proceed")
-        && text.contains("No, exit")
+    let t = tmux::norm(text);
+    // Never auto-accept the "pre-approves" variant — Enter there would also grant
+    // the repo's checked-in allow rules on an untrusted (e.g. --base) branch.
+    if t.contains("pre-approves") {
+        return false;
+    }
+    let legacy = t.contains("Do you trust the files in this folder?")
+        && t.contains("Yes, proceed")
+        && t.contains("No, exit");
+    let current = t.contains("you created or one you trust")
+        && t.contains("Yes, I trust this folder")
+        && t.contains("No, exit");
+    legacy || current
 }
 
 fn load_detail(app: &mut App) {
@@ -1925,6 +1940,15 @@ mod tests {
              Claude Code may read, write, or execute files in this folder\n\
              1. Yes, proceed\n 2. No, exit";
         assert!(is_trust_prompt(dialog));
+        // current (Claude Code 2.1.x) dialog wording — wrapped across lines
+        let current = "Quick safety check: Is this a project you created\n or one you trust?\n\
+             1. Yes, I trust this folder\n 2. No, exit Claude Code";
+        assert!(is_trust_prompt(current));
+        // the "pre-approves" variant must NOT be auto-accepted (grants allow rules)
+        assert!(!is_trust_prompt(
+            "Is this a directory you created or one you trust? This folder pre-approves \
+             tools. 1. Yes, I trust this folder 2. No, exit"
+        ));
         // normal agent output mentioning one phrase must NOT trip it
         assert!(!is_trust_prompt("I'll proceed. Do you trust the files in this folder?"));
         assert!(!is_trust_prompt("Yes, proceed with the refactor"));

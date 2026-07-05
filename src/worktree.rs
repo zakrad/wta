@@ -65,13 +65,18 @@ fn resume_args() -> Vec<String> {
         .collect()
 }
 fn context_files() -> Vec<String> {
-    env_or(
-        "WTA_CONTEXT_FILES",
-        "CLAUDE.local.md .env .env.local .mcp.json",
-    )
-    .split_whitespace()
-    .map(|s| s.to_string())
-    .collect()
+    let mut v: Vec<String> = env_or("WTA_CONTEXT_FILES", "CLAUDE.local.md .env .env.local .mcp.json")
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    // Opt-in: carry the repo's accumulated tool-permission grants
+    // (`.claude/settings.local.json` → permissions.allow) into each worktree so
+    // agents don't re-approve every Bash/Edit. OFF by default — it lets agents run
+    // those tools UNPROMPTED, which is a real grant you should make deliberately.
+    if std::env::var("WTA_COPY_PERMISSIONS").map(|x| x != "0" && !x.is_empty()).unwrap_or(false) {
+        v.push(".claude/settings.local.json".to_string());
+    }
+    v
 }
 
 fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
@@ -298,6 +303,70 @@ pub fn instructions_hint() -> Option<String> {
     }
 }
 
+/// Pre-accept Claude Code's folder-trust for a worktree path by setting
+/// `projects[<abs path>].hasTrustDialogAccepted = true` in `~/.claude.json` (the
+/// vendor-suggested workaround) BEFORE the agent starts — so agents spawned from
+/// the CLI (`wta new`/`fanout`/`review`), where the dash isn't watching to dismiss
+/// the dialog, don't get stuck on the trust prompt. Claude-only, gated by
+/// `WTA_AUTO_TRUST`, best-effort, preserves every existing key.
+fn preseed_claude_trust(wt: &Path) {
+    if std::env::var("WTA_AUTO_TRUST").map(|v| v == "0").unwrap_or(false) {
+        return;
+    }
+    let is_claude = agent_cmd().split_whitespace().next().map(|c| c.ends_with("claude")).unwrap_or(false);
+    if !is_claude {
+        return; // only meaningful for the claude CLI
+    }
+    let base = std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir);
+    let path = match base {
+        Some(b) => b.join(".claude.json"),
+        None => return,
+    };
+    let abs = std::fs::canonicalize(wt).unwrap_or_else(|_| wt.to_path_buf());
+    let key = abs.to_string_lossy().into_owned();
+    // Missing file → create; existing-but-unparseable → BAIL (never clobber the
+    // real config, which holds the oauth token + all session state).
+    let mut root: serde_json::Value = match std::fs::read(&path) {
+        Ok(b) => match serde_json::from_slice(&b) {
+            Ok(v) => v,
+            Err(_) => return,
+        },
+        Err(_) => serde_json::json!({}),
+    };
+    if !root.is_object() {
+        return;
+    }
+    let projects = root.as_object_mut().unwrap().entry("projects").or_insert_with(|| serde_json::json!({}));
+    if !projects.is_object() {
+        return;
+    }
+    let entry = projects.as_object_mut().unwrap().entry(key).or_insert_with(|| serde_json::json!({}));
+    match entry.as_object_mut() {
+        // already trusted → skip the rewrite (shrinks the last-writer-wins window)
+        Some(o) if o.get("hasTrustDialogAccepted").and_then(|v| v.as_bool()) == Some(true) => return,
+        Some(o) => {
+            o.insert("hasTrustDialogAccepted".into(), serde_json::json!(true));
+        }
+        None => return,
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&root) {
+        let tmp = path.with_extension("json.wta-tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            // the config holds the oauth token — keep it private
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            }
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 pub fn new(task: &str, agent_args: &[String]) -> Result<()> {
     new_impl(task, agent_args, None)
 }
@@ -314,6 +383,7 @@ fn new_impl(task: &str, agent_args: &[String], base: Option<&str>) -> Result<()>
     let (_root, wt, injected) = make_worktree(task, base, idx)?;
     // persist slot + injected list first, so the "running" record below merges over it
     let _ = status::record_meta(&repo, task, idx, &injected);
+    preseed_claude_trust(&wt); // avoid the folder-trust dialog on this fresh worktree
     let wt_str = wt.to_string_lossy().into_owned();
     let session = tmux::session_name(&repo, task);
     let (prog, extra) = agent_argv(&repo, task, idx, agent_args);
@@ -439,6 +509,7 @@ pub fn resume_at(task: &str, wt: &Path) -> Result<()> {
     }
     let repo = repo_id()?;
     let idx = status::read_state(&repo, task).map(|s| s.index).unwrap_or_else(|| assign_slot(&repo));
+    preseed_claude_trust(wt);
     let session = tmux::session_name(&repo, task);
     let (prog, extra) = agent_argv(&repo, task, idx, &resume_args());
     tmux::new_session(&session, wt, &prog, &extra)?;

@@ -156,7 +156,7 @@ pub fn send_enter(name: &str) -> Result<()> {
 }
 
 // collapse whitespace so pane wrapping/padding doesn't defeat a substring match
-fn norm(s: &str) -> String {
+pub(crate) fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
