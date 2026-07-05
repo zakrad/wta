@@ -36,6 +36,7 @@ fn main() -> anyhow::Result<()> {
             agent_args,
         } => worktree::fanout(&name, count, base.as_deref(), &agent_args)?,
         Command::Attach { task } => worktree::attach(&task)?,
+        Command::Open { task } => worktree::open(&task)?,
         Command::Stop { task } => {
             worktree::stop(&task)?;
             println!("stopped '{task}' — worktree kept; resume with `wta resume {task}`");

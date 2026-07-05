@@ -458,6 +458,55 @@ pub fn push(task: &str, make_pr: bool) -> Result<String> {
     Ok(format!("pushed {branch}"))
 }
 
+/// The editor/opener command: `WTA_OPEN_CMD`, else `$EDITOR`/`$VISUAL` (may be
+/// multi-word, e.g. "code --reuse-window").
+pub fn editor_cmd() -> Option<String> {
+    for k in ["WTA_OPEN_CMD", "EDITOR", "VISUAL"] {
+        if let Ok(v) = std::env::var(k) {
+            if !v.trim().is_empty() {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// GUI editors fork and return immediately (open detached); terminal editors
+/// (nvim/vim/helix/emacs -nw/…) take over the tty and must run inline.
+pub fn is_gui_editor(cmd: &str) -> bool {
+    let prog = cmd.split_whitespace().next().unwrap_or("");
+    let base = Path::new(prog).file_name().and_then(|s| s.to_str()).unwrap_or(prog);
+    let base = base.trim_end_matches(".sh").trim_end_matches(".exe");
+    matches!(
+        base,
+        "code" | "code-insiders" | "codium" | "vscodium" | "cursor" | "windsurf"
+            | "subl" | "sublime_text" | "zed" | "zed-preview" | "idea" | "webstorm"
+            | "pycharm" | "rustrover" | "clion" | "goland" | "phpstorm" | "rubymine"
+            | "nova" | "atom" | "bbedit" | "mate" | "fleet"
+    )
+}
+
+/// `wta open <task>` — open the agent's worktree in the editor (foreground; GUI
+/// apps return immediately, terminal editors run until you quit).
+pub fn open(task: &str) -> Result<()> {
+    let root = repo_root()?;
+    let wt = worktrees_dir(&root).join(task);
+    if !wt.exists() {
+        bail!("no worktree for '{task}'");
+    }
+    let cmd = editor_cmd().context("set WTA_OPEN_CMD or $EDITOR to an editor (e.g. nvim, code)")?;
+    let mut it = cmd.split_whitespace();
+    let prog = it.next().unwrap();
+    let args: Vec<&str> = it.collect();
+    Command::new(prog)
+        .args(&args)
+        .arg(&wt)
+        .current_dir(&wt)
+        .status()
+        .with_context(|| format!("failed to run '{cmd}'"))?;
+    Ok(())
+}
+
 /// Attach to an agent's session in the foreground (blocks until detach).
 pub fn attach(task: &str) -> Result<()> {
     let session = tmux::session_name(&repo_id()?, task);

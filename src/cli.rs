@@ -47,6 +47,8 @@ pub enum Command {
     },
     /// Attach to an agent's tmux session in the foreground (Ctrl-q to detach)
     Attach { task: String },
+    /// Open the agent's worktree in your editor ($WTA_OPEN_CMD or $EDITOR, e.g. nvim, code)
+    Open { task: String },
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later
     Stop { task: String },
     /// Resume a stopped agent — re-spawn its session in the existing worktree

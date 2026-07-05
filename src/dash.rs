@@ -153,6 +153,7 @@ struct App {
     spin: usize,
     msg: Option<(String, bool, Instant)>, // (text, is_error, when)
     attach: Option<String>,               // session to attach to after this frame
+    open: Option<(String, PathBuf)>,      // (editor cmd, worktree) to open inline after this frame
     scroll: u16,                          // preview/diff scroll offset
     scrollback: Option<String>,           // Some => Preview scroll mode: full (colored) history snapshot
     prev_status: HashMap<String, Status>, // last-seen status per task, for transition detection
@@ -178,6 +179,7 @@ impl App {
             spin: 0,
             msg: None,
             attach: None,
+            open: None,
             scroll: 0,
             scrollback: None,
             prev_status: HashMap::new(),
@@ -221,6 +223,24 @@ fn ring_bell() {
     let mut o = std::io::stdout();
     let _ = o.write_all(b"\x07");
     let _ = o.flush();
+}
+
+/// Suspend the TUI, run a terminal editor (nvim/…) in the worktree, resume on quit.
+fn open_inline(term: &mut Term, cmd: &str, path: &Path) {
+    disable_raw_mode().ok();
+    execute!(term.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show).ok();
+    let mut it = cmd.split_whitespace();
+    if let Some(prog) = it.next() {
+        let args: Vec<&str> = it.collect();
+        let _ = std::process::Command::new(prog)
+            .args(&args)
+            .arg(path)
+            .current_dir(path)
+            .status();
+    }
+    enable_raw_mode().ok();
+    execute!(term.backend_mut(), EnterAlternateScreen, crossterm::cursor::Hide).ok();
+    let _ = term.clear();
 }
 
 /// Suspend the TUI, attach to the tmux session inline, resume on detach.
@@ -271,6 +291,13 @@ fn event_loop(term: &mut Term) -> Result<()> {
 
         if let Some(session) = app.attach.take() {
             attach_inline(term, &session);
+            refresh(&mut app);
+            load_detail(&mut app);
+            last_tick = Instant::now();
+        }
+
+        if let Some((cmd, path)) = app.open.take() {
+            open_inline(term, &cmd, &path);
             refresh(&mut app);
             load_detail(&mut app);
             last_tick = Instant::now();
@@ -628,6 +655,40 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             Ok(_) => app.set_err("no branches to base an agent on"),
             Err(e) => app.set_err(e),
+        },
+        KeyCode::Char('e') => match app.selected().and_then(|r| r.path.clone()) {
+            None => app.set_err("no worktree to open"),
+            Some(path) => match worktree::editor_cmd() {
+                None => app.set_err("set WTA_OPEN_CMD or $EDITOR (e.g. nvim, code)"),
+                Some(cmd) => {
+                    let forced = std::env::var("WTA_OPEN_INLINE").ok();
+                    let inline = match forced.as_deref() {
+                        Some("1") => true,
+                        Some("0") => false,
+                        _ => !worktree::is_gui_editor(&cmd), // terminal editor → inline
+                    };
+                    if inline {
+                        app.open = Some((cmd, path)); // suspend TUI + run after this frame
+                    } else {
+                        // GUI editor: fire-and-forget so wta stays on the dashboard
+                        let mut it = cmd.split_whitespace();
+                        let prog = it.next().unwrap_or_default().to_string();
+                        let args: Vec<String> = it.map(String::from).collect();
+                        match std::process::Command::new(&prog)
+                            .args(&args)
+                            .arg(&path)
+                            .current_dir(&path)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                        {
+                            Ok(_) => app.set_info(format!("opened in {prog}")),
+                            Err(e) => app.set_err(e),
+                        }
+                    }
+                }
+            },
         },
         KeyCode::Char('J') => reorder(app, 1),
         KeyCode::Char('K') => reorder(app, -1),
@@ -1262,7 +1323,9 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("i", action),
             Span::styled(" send  ", muted),
             Span::styled("p", action),
-            Span::styled(" push  │  ", muted),
+            Span::styled(" push  ", muted),
+            Span::styled("e", action),
+            Span::styled(" edit  │  ", muted),
             Span::styled("tab", action),
             Span::styled(" switch  ", muted),
             Span::styled("?", action),
@@ -1526,6 +1589,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("m", "mergeability matrix (conflict preview)"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("i", "send one line to the agent (when ● ready)"),
+                k("e", "open the worktree in $EDITOR / WTA_OPEN_CMD (nvim, code…)"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("tab", "switch Preview / Diff"),
                 k("Shift+↑↓", "scroll Preview / Diff"),
@@ -1866,6 +1930,17 @@ mod tests {
         assert!(a >= 2, "untracked lines counted in stats, got {a}");
         assert!(full_diff(&dir).contains("new.rs"), "untracked file shown in diff");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gui_vs_terminal_editor_detection() {
+        assert!(worktree::is_gui_editor("code --reuse-window"));
+        assert!(worktree::is_gui_editor("cursor"));
+        assert!(worktree::is_gui_editor("/usr/local/bin/zed"));
+        assert!(!worktree::is_gui_editor("nvim"));
+        assert!(!worktree::is_gui_editor("vim"));
+        assert!(!worktree::is_gui_editor("hx"));
+        assert!(!worktree::is_gui_editor("emacs -nw"));
     }
 
     #[test]

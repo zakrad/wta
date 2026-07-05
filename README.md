@@ -58,12 +58,13 @@ wta new <task> [--base <branch>]     start an agent (worktree + branch + tmux se
 wta ls | matrix                      list agents · preview pairwise branch conflicts
 wta fanout <name> -n N -- <prompt>   spawn N agents on one prompt → compare (matrix) → merge the winner
 wta attach | stop | resume | rm      attach · stop (keep worktree) · resume · destroy
+wta open <task>                      open the agent's worktree in your editor ($EDITOR / WTA_OPEN_CMD)
 wta push <task> [--pr]               commit + push the branch (--pr opens a PR via gh)
 wta dash                             the live dashboard
 ```
 
 Dashboard keys: `n`/`N` new (with prompt) · `b` new from an existing branch ·
-`s` stop · `D` kill · `p` push/PR · `J`/`K` reorder · `Shift+↑`/`↓` scroll the
+`s` stop · `D` kill · `p` push/PR · `e` open in your editor · `J`/`K` reorder · `Shift+↑`/`↓` scroll the
 Preview/Diff (first `Shift+↑` pages back through full scrollback; `Esc` exits) ·
 `q` quit. The Preview keeps the agent's **real colors** (no need to attach).
 Status glyphs: `⠋ running · ● ready · ▲ needs input · ◆ review (finished, unseen) · ✗ exited`.
@@ -94,6 +95,7 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_AUTO_TRUST` | `1` | auto-accept Claude's per-folder trust prompt (`0` disables) |
 | `WTA_WORKTREE_DIR` | `.agents` | worktree dir under the repo root (gitignore it) |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
+| `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` (GUI editors like `code` open detached; terminal editors like `nvim` open inline and return to the dash on quit) |
 
 Per-repo setup/teardown: make `<repo>/.wta/setup.sh` executable — `wta new` runs
 it in the fresh worktree (install deps, symlink `node_modules`, …). A matching

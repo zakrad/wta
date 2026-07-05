@@ -4,6 +4,15 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.9] — 2026-07-05
+
+### Added
+- **Open the worktree in your editor** — `e` in the dashboard (and `wta open <task>`)
+  opens the selected agent's worktree via `WTA_OPEN_CMD` / `$EDITOR`. GUI editors
+  (`code`, `cursor`, `zed`, JetBrains…) launch detached; terminal editors
+  (`nvim`/LazyVim, `vim`, `helix`, `emacs -nw`…) open inline and return you to the
+  dashboard on quit. Force with `WTA_OPEN_INLINE=1`/`0`.
+
 ## [0.1.8] — 2026-07-05
 
 ### Fixed
@@ -101,6 +110,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.9]: https://github.com/zakrad/wta/releases/tag/v0.1.9
 [0.1.8]: https://github.com/zakrad/wta/releases/tag/v0.1.8
 [0.1.7]: https://github.com/zakrad/wta/releases/tag/v0.1.7
 [0.1.6]: https://github.com/zakrad/wta/releases/tag/v0.1.6
