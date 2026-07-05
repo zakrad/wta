@@ -43,6 +43,10 @@ In `dash`: `j`/`k` move · `Enter` attach (type in the agent; `Ctrl-q` returns) 
 - **Mergeability matrix** (`m` / `wta matrix`) — preview which agent branches
   conflict with each other *and* main **before** merging, via `git merge-tree`
   (read-only, nothing committed). Most tools only show conflicts after you try.
+- **Verification gate** — drop a `.wta/verify.sh` (your tests/lint) in the repo and
+  wta runs it for each agent when it finishes (or on demand with `v`), shows
+  `✓`/`✗` in the sidebar, and **grays out failing branches in the matrix** — so you
+  never merge on "the agent said it's done." Runs async; never blocks the UI.
 - **Live status, zero setup** — running / ready / needs-input / exited detected
   automatically; optional Claude Code hooks (`wta install-hooks`) add "needs input".
 - **Notifies you** — when an off-screen agent finishes or needs input, wta rings
@@ -64,7 +68,7 @@ wta dash                             the live dashboard
 ```
 
 Dashboard keys: `n`/`N` new (with prompt) · `b` new from an existing branch ·
-`s` stop · `D` kill · `p` push/PR · `e` open in your editor · `J`/`K` reorder · `Shift+↑`/`↓` scroll the
+`s` stop · `D` kill · `p` push/PR · `v` run checks · `e` open in your editor · `J`/`K` reorder · `Shift+↑`/`↓` scroll the
 Preview/Diff (first `Shift+↑` pages back through full scrollback; `Esc` exits) ·
 `q` quit. The Preview keeps the agent's **real colors** (no need to attach).
 Status glyphs: `⠋ running · ● ready · ▲ needs input · ◆ review (finished, unseen) · ✓ merged (landed in base) · ✗ exited`.
@@ -101,6 +105,10 @@ Per-repo setup/teardown: make `<repo>/.wta/setup.sh` executable — `wta new` ru
 it in the fresh worktree (install deps, symlink `node_modules`, …). A matching
 `<repo>/.wta/teardown.sh` runs on `wta rm`, before the worktree is removed (stop
 containers, free ports, …).
+
+Verification: add an executable `<repo>/.wta/verify.sh` (run your tests/lint,
+exit non-zero on failure). wta runs it per agent when it finishes and on `v`,
+surfacing `✓`/`✗` in the dashboard and the mergeability matrix.
 
 **Isolation slots:** each agent gets a stable `WTA_INDEX` (0–99) and
 `WTA_PORT_BASE` (a unique 10-port block) in its pane *and* in `setup.sh`, so

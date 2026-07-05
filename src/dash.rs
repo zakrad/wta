@@ -138,8 +138,23 @@ struct Row {
     path: Option<PathBuf>,
 }
 
+/// A `.wta/verify.sh` run for one agent. Runs async (spawn + poll) so the repo's
+/// test/lint suite never blocks the dashboard.
+enum Check {
+    Running {
+        child: std::process::Child,
+        log: PathBuf,
+        since: Instant,
+    },
+    Done {
+        code: i32,
+    },
+}
+
 struct App {
     repo: String, // repo id namespacing sessions + state for this dashboard's repo
+    root: PathBuf, // repo root (for locating .wta/verify.sh)
+    checks: HashMap<String, Check>, // task -> verification result/run
     rows: Vec<Row>,
     sel: usize,
     tab: Tab,
@@ -167,6 +182,8 @@ impl App {
     fn new() -> Self {
         App {
             repo: worktree::repo_id().unwrap_or_default(),
+            root: worktree::repo_root().unwrap_or_default(),
+            checks: HashMap::new(),
             rows: Vec::new(),
             sel: 0,
             tab: Tab::Preview,
@@ -278,6 +295,7 @@ fn event_loop(term: &mut Term) -> Result<()> {
                 app.msg = None;
             }
         }
+        poll_checks(&mut app);
         term.draw(|f| ui(f, &mut app))?;
         if app.bell {
             ring_bell(); // an agent finished / needs input while off-screen
@@ -693,12 +711,26 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 }
             },
         },
+        KeyCode::Char('v') => {
+            if let Some((task, path)) =
+                app.selected().and_then(|r| r.path.clone().map(|p| (r.task.clone(), p)))
+            {
+                spawn_check(app, &task, &path);
+            }
+        }
         KeyCode::Char('J') => reorder(app, 1),
         KeyCode::Char('K') => reorder(app, -1),
-        KeyCode::Char('m') => match matrix_lines() {
-            Ok(lines) => app.modal = Modal::Matrix(lines),
-            Err(e) => app.set_err(e),
-        },
+        KeyCode::Char('m') => {
+            let failing: HashSet<String> = app
+                .checks
+                .iter()
+                .filter_map(|(t, c)| matches!(c, Check::Done { code, .. } if *code != 0).then(|| t.clone()))
+                .collect();
+            match matrix_lines(&failing) {
+                Ok(lines) => app.modal = Modal::Matrix(lines),
+                Err(e) => app.set_err(e),
+            }
+        }
         // quick-send one line to the selected agent, gated so we never inject
         // into a busy/streaming pane (only when it's idle at its prompt = Ready).
         KeyCode::Char('i') => match app.selected() {
@@ -721,7 +753,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
 
 /// Build the colored mergeability grid for the `m` overlay (calls git merge-tree
 /// pairwise; read-only, touches no working tree).
-fn matrix_lines() -> anyhow::Result<Vec<Line<'static>>> {
+fn matrix_lines(failing: &HashSet<String>) -> anyhow::Result<Vec<Line<'static>>> {
     let m = worktree::mergeability()?;
     let n = m.labels.len();
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -735,16 +767,18 @@ fn matrix_lines() -> anyhow::Result<Vec<Line<'static>>> {
     let grid = m.grid();
     let w = 9usize;
     let short = |s: &str| -> String { s.chars().take(w - 1).collect() };
+    // agents failing their .wta/verify.sh checks are shown red — don't merge them
+    let label_color = |l: &str| if failing.contains(l) { RED } else { Color::Gray };
 
     let mut header = vec![Span::raw(format!("{:<pad$}", "", pad = w + 2))];
     for l in &m.labels {
-        header.push(Span::styled(format!("{:<w$}", short(l), w = w), Style::default().fg(Color::Gray)));
+        header.push(Span::styled(format!("{:<w$}", short(l), w = w), Style::default().fg(label_color(l))));
     }
     out.push(Line::from(header));
     for i in 0..n {
         let mut spans = vec![Span::styled(
             format!("{:<pad$}", short(&m.labels[i]), pad = w + 2),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(label_color(&m.labels[i])),
         )];
         for j in 0..n {
             let (txt, color) = if i == j {
@@ -926,6 +960,79 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
+// ---- verification gate: run `.wta/verify.sh` per agent, async (never blocks UI) ----
+
+fn read_tail(log: &Path) -> String {
+    let s = std::fs::read_to_string(log).unwrap_or_default();
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(12);
+    lines[start..].join("\n")
+}
+
+/// Spawn `.wta/verify.sh` for a task in its worktree, output to a temp log,
+/// tracked in `app.checks`. Non-blocking — polled by `poll_checks`.
+fn spawn_check(app: &mut App, task: &str, wt: &Path) {
+    let script = app.root.join(".wta/verify.sh");
+    if !script.exists() {
+        app.set_err("no .wta/verify.sh in this repo — add one that exits non-zero on failure");
+        return;
+    }
+    let log = std::env::temp_dir().join(format!("wta-verify-{}-{}.log", app.repo, sanitize_task(task)));
+    let f = match std::fs::File::create(&log) {
+        Ok(f) => f,
+        Err(e) => return app.set_err(e),
+    };
+    let f2 = match f.try_clone() {
+        Ok(f) => f,
+        Err(e) => return app.set_err(e),
+    };
+    match std::process::Command::new("bash")
+        .arg(&script)
+        .current_dir(wt)
+        .stdout(std::process::Stdio::from(f))
+        .stderr(std::process::Stdio::from(f2))
+        .spawn()
+    {
+        Ok(child) => {
+            app.checks.insert(task.to_string(), Check::Running { child, log, since: Instant::now() });
+            app.set_info(format!("running checks for {task}…"));
+        }
+        Err(e) => app.set_err(e),
+    }
+}
+
+/// Poll running checks without blocking; transition to Done when they exit or
+/// time out (>5m).
+fn poll_checks(app: &mut App) {
+    let mut done: Vec<(String, i32, String)> = Vec::new();
+    for (task, chk) in app.checks.iter_mut() {
+        if let Check::Running { child, log, since } = chk {
+            let timed_out = since.elapsed() > Duration::from_secs(300);
+            match child.try_wait() {
+                Ok(Some(status)) => done.push((task.clone(), status.code().unwrap_or(-1), read_tail(log))),
+                Ok(None) if timed_out => {
+                    let _ = child.kill();
+                    done.push((task.clone(), -1, "verify timed out (>5m)".into()));
+                }
+                Ok(None) => {}
+                Err(_) => done.push((task.clone(), -1, "verify failed to run".into())),
+            }
+        }
+    }
+    for (task, code, tail) in done {
+        let is_sel = app.rows.get(app.sel).map(|r| r.task == task).unwrap_or(false);
+        if is_sel {
+            if code == 0 {
+                app.set_info(format!("✓ checks passed: {task}"));
+            } else {
+                let last = tail.lines().last().unwrap_or("").trim();
+                app.set_err(format!("✗ checks failed (exit {code}) — {last}"));
+            }
+        }
+        app.checks.insert(task, Check::Done { code });
+    }
+}
+
 fn refresh(app: &mut App) {
     let states: HashMap<String, status::AgentState> = status::read_states(&app.repo)
         .unwrap_or_default()
@@ -1090,7 +1197,10 @@ fn refresh(app: &mut App) {
     // already looking at. Only on genuine transitions (prev must be known), so a
     // fresh dashboard doesn't nag about pre-existing state.
     let mut ring = false;
+    let has_verify = app.root.join(".wta/verify.sh").exists();
     let sel_now = app.rows.get(app.sel).map(|r| r.task.clone());
+    let mut to_check: Vec<(String, PathBuf)> = Vec::new();
+    let mut invalidate: Vec<String> = Vec::new();
     for r in &app.rows {
         let now = r.status;
         let prev = app.prev_status.get(&r.task).copied();
@@ -1099,9 +1209,25 @@ fn refresh(app: &mut App) {
         if (became_needs || finished) && sel_now.as_deref() != Some(r.task.as_str()) && app.attention.insert(r.task.clone()) {
             ring = true;
         }
+        // auto-run checks when an agent finishes; drop stale results when it resumes
+        if finished && has_verify && !matches!(app.checks.get(&r.task), Some(Check::Running { .. })) {
+            if let Some(p) = &r.path {
+                to_check.push((r.task.clone(), p.clone()));
+            }
+        }
+        if now == Status::Running && matches!(app.checks.get(&r.task), Some(Check::Done { .. })) {
+            invalidate.push(r.task.clone());
+        }
     }
     app.prev_status = app.rows.iter().map(|r| (r.task.clone(), r.status)).collect();
     app.attention.retain(|t| current.contains(t));
+    app.checks.retain(|t, _| current.contains(t));
+    for t in invalidate {
+        app.checks.remove(&t);
+    }
+    for (task, path) in to_check {
+        spawn_check(app, &task, &path);
+    }
     if ring {
         app.bell = true;
     }
@@ -1206,10 +1332,22 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         } else {
             status_glyph(app, r.status)
         };
-        // reserve 2 cols for the status glyph; truncate wide/long task names cleanly
-        let head = truncate_cols(&format!(" {}. {}", i + 1, r.task), inner_w.saturating_sub(2));
-        let pad1 = inner_w.saturating_sub(head.width() + 2);
-        let line1 = Line::from(vec![Span::raw(head), Span::raw(" ".repeat(pad1)), glyph]);
+        // optional verification-check indicator, shown just left of the status glyph
+        let check: Option<Span> = app.checks.get(&r.task).map(|c| match c {
+            Check::Running { .. } => Span::styled("⟳ ".to_string(), Style::default().fg(Color::DarkGray)),
+            Check::Done { code: 0, .. } => Span::styled("✓ ".to_string(), Style::default().fg(GREEN_BRIGHT)),
+            Check::Done { .. } => Span::styled("✗ ".to_string(), Style::default().fg(RED)),
+        });
+        let extra = if check.is_some() { 2 } else { 0 };
+        // reserve cols for status glyph (+ check); truncate wide/long names cleanly
+        let head = truncate_cols(&format!(" {}. {}", i + 1, r.task), inner_w.saturating_sub(2 + extra));
+        let pad1 = inner_w.saturating_sub(head.width() + 2 + extra);
+        let mut spans1 = vec![Span::raw(head), Span::raw(" ".repeat(pad1))];
+        if let Some(c) = check {
+            spans1.push(c);
+        }
+        spans1.push(glyph);
+        let line1 = Line::from(spans1);
 
         let counts_len = format!("+{},-{} ", r.added, r.removed).width();
         // reserve room for the +/- counts first, then truncate the branch to fit
@@ -1361,6 +1499,8 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" send  ", muted),
             Span::styled("p", action),
             Span::styled(" push  ", muted),
+            Span::styled("v", action),
+            Span::styled(" check  ", muted),
             Span::styled("e", action),
             Span::styled(" edit  │  ", muted),
             Span::styled("tab", action),
@@ -1626,6 +1766,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("m", "mergeability matrix (conflict preview)"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("i", "send one line to the agent (when ● ready)"),
+                k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
                 k("e", "open the worktree in $EDITOR / WTA_OPEN_CMD (nvim, code…)"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("tab", "switch Preview / Diff"),
@@ -1967,6 +2108,42 @@ mod tests {
         let (a, _d) = numstat(&dir);
         assert!(a >= 2, "untracked lines counted in stats, got {a}");
         assert!(full_diff(&dir).contains("new.rs"), "untracked file shown in diff");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_check_runs_async_and_reports_exit_code() {
+        let dir = std::env::temp_dir().join(format!("wta-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".wta")).unwrap();
+        // a verify script that fails with a specific code + prints a line
+        std::fs::write(dir.join(".wta/verify.sh"), "#!/usr/bin/env bash\necho 'boom: 2 tests failed'\nexit 3\n").unwrap();
+
+        let mut app = App::new();
+        app.root = dir.clone();
+        app.repo = "t".into();
+        app.rows = vec![row("x", Status::Ready, true, 0, 0)];
+        app.sel = 0;
+        spawn_check(&mut app, "x", &dir);
+        assert!(matches!(app.checks.get("x"), Some(Check::Running { .. })), "check is running async");
+
+        // poll until it finishes (non-blocking) — should not hang the caller
+        let mut done = false;
+        for _ in 0..300 {
+            poll_checks(&mut app);
+            if matches!(app.checks.get("x"), Some(Check::Done { .. })) {
+                done = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(done, "check completed");
+        match app.checks.get("x") {
+            Some(Check::Done { code }) => assert_eq!(*code, 3),
+            _ => panic!("expected Done"),
+        }
+        // failure surfaced for the selected agent
+        assert!(app.msg.as_ref().map(|(t, err, _)| *err && t.contains("failed")).unwrap_or(false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

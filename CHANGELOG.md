@@ -4,6 +4,16 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.11] — 2026-07-05
+
+### Added
+- **Verification gate.** Drop an executable `.wta/verify.sh` (your tests/lint) in
+  the repo; wta runs it for each agent when it finishes (or on demand with `v`),
+  shows `✓`/`⟳`/`✗` in the sidebar, surfaces the failing line, and **grays out
+  failing branches in the mergeability matrix** — so you don't merge on "the agent
+  said it's done." Runs **async** (spawn + poll) so a slow suite never blocks the
+  dashboard.
+
 ## [0.1.10] — 2026-07-05
 
 ### Added
@@ -122,6 +132,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.11]: https://github.com/zakrad/wta/releases/tag/v0.1.11
 [0.1.10]: https://github.com/zakrad/wta/releases/tag/v0.1.10
 [0.1.9]: https://github.com/zakrad/wta/releases/tag/v0.1.9
 [0.1.8]: https://github.com/zakrad/wta/releases/tag/v0.1.8
