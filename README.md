@@ -49,9 +49,11 @@ In `dash`: `j`/`k` move · `Enter` attach (type in the agent; `Ctrl-q` returns) 
   never merge on "the agent said it's done." Runs async; never blocks the UI.
 - **Live status, zero setup** — running / ready / needs-input / exited detected
   automatically; optional Claude Code hooks (`wta install-hooks`) add "needs input".
-- **Notifies you** — when an off-screen agent finishes or needs input, wta rings
-  the terminal bell and marks it for review (`◆`), with a "N need you" count in
-  the menu bar. Viewing the agent clears it.
+- **Notifies you — with sound** — when an off-screen agent finishes or needs
+  input, wta plays a system sound (not just the terminal bell, which many
+  terminals mute) and marks it for review (`◆`), with a "N need you" count in the
+  menu bar. Viewing the agent clears it. Set `WTA_NOTIFY_SOUND=0` to silence, or
+  point it at your own sound file.
 - **Remote** — an optional Telegram bridge pings you when an agent needs you and
   lets you reply to drive it from your phone.
 
@@ -103,6 +105,7 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` (GUI editors like `code` open detached; terminal editors like `nvim` open inline and return to the dash on quit) |
 | `WTA_REVIEW_AGENT_CMD` | `$WTA_AGENT_CMD` | agent CLI used by `wta review` (point it at a cheaper/different model) |
+| `WTA_NOTIFY_SOUND` | `1` | system sound on off-screen finish/needs-input (`0` = silent, or a path to your own sound file) |
 
 Per-repo setup/teardown: make `<repo>/.wta/setup.sh` executable — `wta new` runs
 it in the fresh worktree (install deps, symlink `node_modules`, …). A matching

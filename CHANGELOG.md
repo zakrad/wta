@@ -4,6 +4,14 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.15] — 2026-07-05
+
+### Added
+- **Audible notifications.** Off-screen finish / needs-input now plays a real
+  system sound (`afplay` on macOS, `paplay` on Linux) in addition to the terminal
+  bell, which many terminals mute. Silence with `WTA_NOTIFY_SOUND=0`, or point it
+  at your own sound file.
+
 ## [0.1.14] — 2026-07-05
 
 ### Fixed (audit, cont.)
@@ -173,6 +181,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.15]: https://github.com/zakrad/wta/releases/tag/v0.1.15
 [0.1.14]: https://github.com/zakrad/wta/releases/tag/v0.1.14
 [0.1.13]: https://github.com/zakrad/wta/releases/tag/v0.1.13
 [0.1.12]: https://github.com/zakrad/wta/releases/tag/v0.1.12

@@ -253,8 +253,31 @@ pub fn run() -> Result<()> {
 fn ring_bell() {
     use std::io::Write;
     let mut o = std::io::stdout();
-    let _ = o.write_all(b"\x07");
+    let _ = o.write_all(b"\x07"); // terminal bell (audible or visual, per your terminal)
     let _ = o.flush();
+    play_notify_sound(); // an actual, always-audible system sound
+}
+
+/// Play a system notification sound so alerts are audible even when the terminal
+/// bell is set to visual/off. Opt out with `WTA_NOTIFY_SOUND=0`; point
+/// `WTA_NOTIFY_SOUND=/path/to/sound` at your own. Fire-and-forget, non-blocking.
+fn play_notify_sound() {
+    let cfg = std::env::var("WTA_NOTIFY_SOUND").unwrap_or_default();
+    if cfg == "0" {
+        return;
+    }
+    let custom = (!cfg.is_empty() && cfg != "1").then_some(cfg);
+    let (player, file) = if cfg!(target_os = "macos") {
+        ("afplay", custom.unwrap_or_else(|| "/System/Library/Sounds/Glass.aiff".into()))
+    } else {
+        ("paplay", custom.unwrap_or_else(|| "/usr/share/sounds/freedesktop/stereo/complete.oga".into()))
+    };
+    let _ = std::process::Command::new(player)
+        .arg(file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Suspend the TUI, run a terminal editor (nvim/…) in the worktree, resume on quit.
