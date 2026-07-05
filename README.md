@@ -31,6 +31,9 @@ In `dash`: `j`/`k` move · `Enter` attach (type in the agent; `Ctrl-q` returns) 
 `Tab` Preview/Diff · `i` send one line without attaching · `m` conflict matrix ·
 `?` help. Kick the tyres without spending tokens: `WTA_AGENT_CMD=bash wta new scratch`.
 
+📖 **[Full per-feature manual → MANUAL.md](MANUAL.md)** — how to use every command
+and feature, with examples.
+
 ## Why it's different
 
 - **Isolated** — one worktree + one tmux session per agent; no two touch the same
@@ -68,6 +71,7 @@ wta init                             scaffold .wta/ convention stubs (verify.sh,
 wta attach | stop | resume | rm      attach · stop (keep worktree) · resume · destroy
 wta open <task>                      open the agent's worktree in your editor ($EDITOR / WTA_OPEN_CMD)
 wta push <task> [--pr]               commit + push the branch (--pr opens a PR via gh)
+wta install-hooks [--global]         wire Claude Code hooks for "needs input" status
 wta dash                             the live dashboard
 ```
 
@@ -106,6 +110,9 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` (GUI editors like `code` open detached; terminal editors like `nvim` open inline and return to the dash on quit) |
 | `WTA_REVIEW_AGENT_CMD` | `$WTA_AGENT_CMD` | agent CLI used by `wta review` (point it at a cheaper/different model) |
 | `WTA_NOTIFY_SOUND` | `1` | system sound on off-screen finish/needs-input (`0` = silent, or a path to your own sound file) |
+
+More vars (`WTA_AGENT_RESUME_ARGS`, `WTA_OPEN_INLINE`, `WTA_TMUX_SOCKET`, Telegram)
+and the full per-feature guide are in **[MANUAL.md](MANUAL.md)**.
 
 Per-repo setup/teardown: make `<repo>/.wta/setup.sh` executable — `wta new` runs
 it in the fresh worktree (install deps, symlink `node_modules`, …). A matching
