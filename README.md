@@ -67,7 +67,7 @@ Dashboard keys: `n`/`N` new (with prompt) · `b` new from an existing branch ·
 `s` stop · `D` kill · `p` push/PR · `e` open in your editor · `J`/`K` reorder · `Shift+↑`/`↓` scroll the
 Preview/Diff (first `Shift+↑` pages back through full scrollback; `Esc` exits) ·
 `q` quit. The Preview keeps the agent's **real colors** (no need to attach).
-Status glyphs: `⠋ running · ● ready · ▲ needs input · ◆ review (finished, unseen) · ✗ exited`.
+Status glyphs: `⠋ running · ● ready · ▲ needs input · ◆ review (finished, unseen) · ✓ merged (landed in base) · ✗ exited`.
 Pass `--server default` to run on your own tmux server instead of the isolated one.
 
 ## Chat history
@@ -101,6 +101,11 @@ Per-repo setup/teardown: make `<repo>/.wta/setup.sh` executable — `wta new` ru
 it in the fresh worktree (install deps, symlink `node_modules`, …). A matching
 `<repo>/.wta/teardown.sh` runs on `wta rm`, before the worktree is removed (stop
 containers, free ports, …).
+
+**Isolation slots:** each agent gets a stable `WTA_INDEX` (0–99) and
+`WTA_PORT_BASE` (a unique 10-port block) in its pane *and* in `setup.sh`, so
+parallel agents don't collide on port 3000 or a shared dev DB — e.g.
+`PORT=$WTA_PORT_BASE npm run dev`, or a `myapp_$WTA_INDEX` database.
 
 ## How it compares
 

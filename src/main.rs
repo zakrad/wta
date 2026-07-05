@@ -26,6 +26,9 @@ fn main() -> anyhow::Result<()> {
                 None => worktree::new(&task, &agent_args)?,
             }
             println!("started agent '{task}' — attach with `wta attach {task}` (or `wta dash`)");
+            if let Some(hint) = worktree::instructions_hint() {
+                eprintln!("{hint}");
+            }
         }
         Command::Ls => worktree::ls()?,
         Command::Matrix => worktree::matrix()?,

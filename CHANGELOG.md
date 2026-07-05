@@ -4,6 +4,18 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.10] — 2026-07-05
+
+### Added
+- **Per-worktree isolation slots.** Each agent gets a stable `WTA_INDEX` (0–99)
+  and `WTA_PORT_BASE` (a unique 10-port block) in its pane and in `setup.sh`, so
+  parallel agents stop colliding on port 3000 / a shared dev DB.
+- **`✓ merged` status.** Agents whose branch has landed in the base branch show a
+  distinct glyph, so you know which are safe to `rm`.
+- **No-instructions nudge.** `wta new` prints a one-line tip when the repo has no
+  `AGENTS.md`/`CLAUDE.md` (agents ground better with one). Never creates or commits
+  anything.
+
 ## [0.1.9] — 2026-07-05
 
 ### Added
@@ -110,6 +122,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.10]: https://github.com/zakrad/wta/releases/tag/v0.1.10
 [0.1.9]: https://github.com/zakrad/wta/releases/tag/v0.1.9
 [0.1.8]: https://github.com/zakrad/wta/releases/tag/v0.1.8
 [0.1.7]: https://github.com/zakrad/wta/releases/tag/v0.1.7

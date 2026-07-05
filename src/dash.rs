@@ -67,6 +67,7 @@ enum Status {
     Running,
     Ready,
     NeedsInput,
+    Merged,
     Exited,
     Idle,
 }
@@ -147,6 +148,7 @@ struct App {
     diff_text: String,
     hashes: HashMap<String, u64>,
     diffcache: HashMap<String, (u32, u32)>, // task -> (added, removed), cadence-refreshed
+    mergedcache: HashMap<String, bool>,     // task -> branch merged into base, cadence-refreshed
     tick: u64,                              // refresh counter driving the diffstat cadence
     trust_seen: HashMap<String, Instant>,   // session -> first time we saw it (trust grace)
     trust_done: HashSet<String>,            // sessions whose trust prompt is handled/disarmed
@@ -173,6 +175,7 @@ impl App {
             diff_text: String::new(),
             hashes: HashMap::new(),
             diffcache: HashMap::new(),
+            mergedcache: HashMap::new(),
             tick: 0,
             trust_seen: HashMap::new(),
             trust_done: HashSet::new(),
@@ -834,6 +837,20 @@ fn base_of(path: &Path) -> String {
 fn merge_base(path: &Path) -> Option<String> {
     git_in(path, &["merge-base", "HEAD", &base_of(path)]).filter(|s| !s.is_empty())
 }
+/// True if the agent's branch has landed in the base branch (all its commits are
+/// ancestors of base) — and it isn't just a fresh branch sitting at base's tip.
+fn is_merged(path: &Path, branch: &str) -> bool {
+    let base = base_of(path);
+    if base == branch || branch.is_empty() {
+        return false;
+    }
+    if git_in(path, &["merge-base", "--is-ancestor", branch, &base]).is_none() {
+        return false; // has commits not in base → not merged
+    }
+    let bt = git_in(path, &["rev-parse", branch]);
+    let base_t = git_in(path, &["rev-parse", &base]);
+    bt.is_some() && bt != base_t // exclude the un-worked branch sitting exactly at base
+}
 /// Like `git_in` but returns stdout even on a non-zero exit (needed for
 /// `git diff --no-index`, which exits 1 whenever the files differ).
 fn git_stdout(path: &Path, args: &[&str]) -> Option<String> {
@@ -987,6 +1004,21 @@ fn refresh(app: &mut App) {
             None => (0, 0),
         };
 
+        // "merged" (branch landed in base) — cached on the same slow cadence as diffstat
+        let merged = match path.as_deref() {
+            Some(p) => {
+                let is_sel = sel_task.as_deref() == Some(task.as_str());
+                if full_sweep || is_sel || !app.mergedcache.contains_key(&task) {
+                    let v = is_merged(p, &branch);
+                    app.mergedcache.insert(task.clone(), v);
+                    v
+                } else {
+                    app.mergedcache.get(&task).copied().unwrap_or(false)
+                }
+            }
+            None => false,
+        };
+
         let session = tmux::session_name(&app.repo, &task);
         let alive = tmux::has_session(&session);
 
@@ -1019,6 +1051,12 @@ fn refresh(app: &mut App) {
         } else {
             Status::Idle
         };
+        // a landed branch reads as "merged" once it's not actively working
+        let status = if merged && matches!(status, Status::Ready | Status::Exited | Status::Idle) {
+            Status::Merged
+        } else {
+            status
+        };
 
         rows.push(Row {
             task,
@@ -1042,6 +1080,7 @@ fn refresh(app: &mut App) {
     let current: HashSet<&String> = app.rows.iter().map(|r| &r.task).collect();
     app.hashes.retain(|k, _| current.contains(k));
     app.diffcache.retain(|k, _| current.contains(k));
+    app.mergedcache.retain(|k, _| current.contains(k));
     let live: HashSet<String> = app.rows.iter().map(|r| r.session.clone()).collect();
     app.trust_seen.retain(|k, _| live.contains(k));
     app.trust_done.retain(|k| live.contains(k));
@@ -1121,6 +1160,7 @@ fn status_glyph(app: &App, s: Status) -> Span<'static> {
         ),
         Status::Ready => Span::styled("● ".to_string(), Style::default().fg(GREEN)),
         Status::NeedsInput => Span::styled("▲ ".to_string(), Style::default().fg(Color::Yellow)),
+        Status::Merged => Span::styled("✓ ".to_string(), Style::default().fg(Color::Cyan)),
         Status::Exited => Span::styled("✗ ".to_string(), Style::default().fg(RED)),
         Status::Idle => Span::styled("· ".to_string(), Style::default().fg(Color::DarkGray)),
     }
@@ -1302,11 +1342,8 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" quit", muted),
         ]
     } else {
-        let exited = app
-            .selected()
-            .map(|r| r.status == Status::Exited)
-            .unwrap_or(false);
-        let (fkey, flabel) = if exited {
+        let dead = app.selected().map(|r| !r.alive).unwrap_or(false);
+        let (fkey, flabel) = if dead {
             ("↵", " resume  ")
         } else {
             ("↵/o", " attach  ")
@@ -1596,6 +1633,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("n", "new agent"),
                 k("N", "new agent with an initial prompt"),
                 k("s", "stop (keep worktree — resume later)"),
+                k("glyphs", "⠋ running · ● ready · ▲ needs input · ✓ merged · ✗ exited"),
                 k("D", "kill (destroy worktree + branch)"),
                 k("p", "commit + push + open a PR"),
                 k("b", "new agent based on an existing branch"),
@@ -1929,6 +1967,37 @@ mod tests {
         let (a, _d) = numstat(&dir);
         assert!(a >= 2, "untracked lines counted in stats, got {a}");
         assert!(full_diff(&dir).contains("new.rs"), "untracked file shown in diff");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merged_detection() {
+        let dir = std::env::temp_dir().join(format!("wta-merged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+        };
+        git(&["init", "-qb", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("a.txt"), "1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        // fresh branch sitting at base tip → NOT merged (no work)
+        git(&["branch", "agent/fresh"]);
+        assert!(!is_merged(&dir, "agent/fresh"), "unworked branch is not 'merged'");
+        // a branch with a commit, not yet in main → NOT merged
+        git(&["checkout", "-qb", "agent/work"]);
+        std::fs::write(dir.join("b.txt"), "2\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "work"]);
+        assert!(!is_merged(&dir, "agent/work"), "unmerged work is not 'merged'");
+        // merge it into main (no-ff) → now merged
+        git(&["checkout", "-q", "main"]);
+        git(&["merge", "--no-ff", "-q", "-m", "merge", "agent/work"]);
+        assert!(is_merged(&dir, "agent/work"), "landed branch reads as merged");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -163,23 +163,60 @@ fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
 
     let setup = root.join(".wta/setup.sh");
     if setup.exists() {
+        let (idx, port) = port_slot(task);
         let _ = Command::new("bash")
             .arg(&setup)
             .current_dir(&wt)
             .env("WTA_TASK", task)
             .env("WTA_ROOT", &root)
+            .env("WTA_INDEX", idx.to_string())
+            .env("WTA_PORT_BASE", port.to_string())
             .status();
     }
     Ok((root, wt))
 }
 
-/// Build the tmux pane command: `env WTA_TASK=<task> WTA_REPO=<repo> <agent_cmd> <tail...>`.
+/// Deterministic per-agent slot + port block, so parallel agents' dev servers /
+/// databases don't collide (port 3000, shared dev DB). Stable per task name, so
+/// it survives resume. Exposed as `WTA_INDEX` + `WTA_PORT_BASE` to the agent pane
+/// AND `.wta/setup.sh` — use them e.g. `PORT=$WTA_PORT_BASE npm run dev`,
+/// DB `myapp_$WTA_INDEX`.
+fn port_slot(task: &str) -> (u32, u32) {
+    let mut h = DefaultHasher::new();
+    h.write(task.as_bytes());
+    let idx = (h.finish() % 100) as u32; // 0..=99
+    (idx, 13000 + idx * 10) // a 10-port block per agent
+}
+
+/// Build the tmux pane command: `env WTA_TASK=… WTA_REPO=… WTA_INDEX=… WTA_PORT_BASE=… <agent_cmd> <tail…>`.
 /// The `env` wrapper lets the agent's Claude Code hooks (`wta status`) record
-/// state under the right repo + task.
+/// state under the right repo + task, and gives the agent its isolation slot.
 fn agent_argv(repo: &str, task: &str, tail: &[String]) -> (String, Vec<String>) {
-    let mut extra = vec![format!("WTA_TASK={task}"), format!("WTA_REPO={repo}"), agent_cmd()];
+    let (idx, port) = port_slot(task);
+    let mut extra = vec![
+        format!("WTA_TASK={task}"),
+        format!("WTA_REPO={repo}"),
+        format!("WTA_INDEX={idx}"),
+        format!("WTA_PORT_BASE={port}"),
+        agent_cmd(),
+    ];
     extra.extend_from_slice(tail);
     ("env".to_string(), extra)
+}
+
+/// Hint for `wta new` when the repo has no agent-instructions file — agents ground
+/// much better with one. `None` if a file already exists. Prints only; never
+/// creates or commits anything.
+pub fn instructions_hint() -> Option<String> {
+    let root = repo_root().ok()?;
+    let has = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".github/copilot-instructions.md", ".cursorrules"]
+        .iter()
+        .any(|f| root.join(f).exists());
+    if has {
+        None
+    } else {
+        Some("tip: no AGENTS.md/CLAUDE.md in this repo — a short instructions file makes agents noticeably more reliable.".into())
+    }
 }
 
 pub fn new(task: &str, agent_args: &[String]) -> Result<()> {
