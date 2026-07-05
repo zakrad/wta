@@ -218,6 +218,18 @@ impl App {
     }
 }
 
+impl Drop for App {
+    // never leave a verify.sh orphaned when the dashboard quits
+    fn drop(&mut self) {
+        for c in self.checks.values_mut() {
+            if let Check::Running { child, .. } = c {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
 pub fn run() -> Result<()> {
@@ -977,7 +989,11 @@ fn spawn_check(app: &mut App, task: &str, wt: &Path) {
         app.set_err("no .wta/verify.sh in this repo — add one that exits non-zero on failure");
         return;
     }
-    let log = std::env::temp_dir().join(format!("wta-verify-{}-{}.log", app.repo, sanitize_task(task)));
+    // keep the log in wta's own per-user state dir, not world-writable /tmp
+    let log = match status::repo_dir(&app.repo) {
+        Ok(d) => d.join(format!("verify-{}.log", sanitize_task(task))),
+        Err(e) => return app.set_err(e),
+    };
     let f = match std::fs::File::create(&log) {
         Ok(f) => f,
         Err(e) => return app.set_err(e),
@@ -1012,6 +1028,7 @@ fn poll_checks(app: &mut App) {
                 Ok(Some(status)) => done.push((task.clone(), status.code().unwrap_or(-1), read_tail(log))),
                 Ok(None) if timed_out => {
                     let _ = child.kill();
+                    let _ = child.wait(); // reap so it doesn't linger as a zombie
                     done.push((task.clone(), -1, "verify timed out (>5m)".into()));
                 }
                 Ok(None) => {}
@@ -1221,7 +1238,17 @@ fn refresh(app: &mut App) {
     }
     app.prev_status = app.rows.iter().map(|r| (r.task.clone(), r.status)).collect();
     app.attention.retain(|t| current.contains(t));
-    app.checks.retain(|t, _| current.contains(t));
+    // drop checks for gone tasks — but kill+reap any still-running verify first
+    app.checks.retain(|t, c| {
+        if current.contains(t) {
+            return true;
+        }
+        if let Check::Running { child, .. } = c {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        false
+    });
     for t in invalidate {
         app.checks.remove(&t);
     }

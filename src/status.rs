@@ -37,7 +37,14 @@ pub fn repo_dir(repo: &str) -> Result<PathBuf> {
 }
 
 pub fn state_path(repo: &str, task: &str) -> Result<PathBuf> {
-    Ok(repo_dir(repo)?.join(format!("{task}.json")))
+    // sanitize like tmux::session_name so the state filename never diverges from
+    // the session name or escapes the repo's state dir (belt-and-suspenders on top
+    // of worktree::validate_task)
+    let safe: String = task
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    Ok(repo_dir(repo)?.join(format!("{safe}.json")))
 }
 
 pub fn remove_state(repo: &str, task: &str) {

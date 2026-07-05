@@ -4,6 +4,24 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.13] — 2026-07-05
+
+### Fixed (from a multi-agent code audit)
+- **Multi-word agent commands now work.** `WTA_AGENT_CMD="claude --model haiku"`
+  and `wta review --by "…"` were passed as a single program name → the pane died
+  instantly, leaving an orphan worktree that looked alive. The command is now
+  tokenized like the other configurable commands.
+- **Task names are validated** (letters, digits, `-`, `_`, ≤64 chars). Names with
+  `/`, `.`, `..`, or spaces are rejected up front, so the tmux session, worktree
+  path, and state file can never diverge or escape `.agents`.
+- **`wta new <task> --base X`** now errors instead of silently reusing a leftover
+  unmerged `agent/<task>` branch and ignoring `--base`.
+- **Telegram bridge** is keyed by `(repo, task)` — no more spurious/suppressed
+  pings for same-named agents across repos; `deliver` prefers a live session.
+- **Verify-check processes are reaped** (kill + wait on timeout, on task removal,
+  and on dashboard quit) — no orphaned/zombie `verify.sh`.
+- **Verify logs** moved from world-writable `/tmp` into wta's per-user state dir.
+
 ## [0.1.12] — 2026-07-05
 
 ### Added
@@ -144,6 +162,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.13]: https://github.com/zakrad/wta/releases/tag/v0.1.13
 [0.1.12]: https://github.com/zakrad/wta/releases/tag/v0.1.12
 [0.1.11]: https://github.com/zakrad/wta/releases/tag/v0.1.11
 [0.1.10]: https://github.com/zakrad/wta/releases/tag/v0.1.10

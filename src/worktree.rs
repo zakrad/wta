@@ -122,10 +122,56 @@ fn branch_name(task: &str) -> String {
     format!("agent/{task}")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_validation_rejects_unsafe_names() {
+        for ok in ["good_1", "feature-x", "a1"] {
+            assert!(validate_task(ok).is_ok(), "{ok} should be valid");
+        }
+        for bad in ["a/b", "v1.2", "../evil", "-flag", "", "has space", "a\\b"] {
+            assert!(validate_task(bad).is_err(), "{bad:?} should be rejected");
+        }
+        assert!(validate_task(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn agent_argv_tokenizes_multiword_command() {
+        std::env::set_var("WTA_AGENT_CMD", "claude --model haiku");
+        let (prog, extra) = agent_argv("repo", "task", &[]);
+        std::env::remove_var("WTA_AGENT_CMD");
+        assert_eq!(prog, "env");
+        // the command must be split into separate argv elements, not one string
+        assert!(extra.contains(&"claude".to_string()));
+        assert!(extra.contains(&"--model".to_string()));
+        assert!(extra.contains(&"haiku".to_string()));
+        assert!(!extra.iter().any(|s| s == "claude --model haiku"));
+    }
+}
+
+/// Reject task names that aren't safe as a tmux session name, a filesystem path,
+/// and a git branch all at once — keeping those three representations identical
+/// (no `/`, `.`, `..`, spaces, etc. that would diverge or escape `.agents`).
+fn validate_task(task: &str) -> Result<()> {
+    if task.is_empty() || task.len() > 64 {
+        bail!("task name must be 1–64 characters");
+    }
+    if task.starts_with('-') {
+        bail!("task name can't start with '-'");
+    }
+    if !task.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        bail!("invalid task name '{task}' — use letters, digits, '-' and '_' only");
+    }
+    Ok(())
+}
+
 /// Create the worktree + copy context + optional setup, returning the worktree
 /// path. If `base` is given, the new `agent/<task>` branch starts from it;
 /// otherwise from HEAD.
 fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
+    validate_task(task)?;
     let root = repo_root()?;
     let branch = branch_name(task);
     let wt = worktrees_dir(&root).join(task);
@@ -150,6 +196,12 @@ fn make_worktree(task: &str, base: Option<&str>) -> Result<(PathBuf, PathBuf)> {
     )
     .is_ok();
     if branch_exists {
+        // Reusing a leftover branch (e.g. after a non-force `rm` that couldn't
+        // delete an unmerged branch) would silently ignore an explicit --base and
+        // resurrect the old agent's commits. Refuse rather than mislead.
+        if base.is_some() {
+            bail!("branch {branch} already exists — `wta rm --force {task}` to recreate it from --base, or omit --base to reuse the existing branch");
+        }
         run_git(&["worktree", "add", &wt_str, &branch], Some(&root))?;
     } else if let Some(base) = base {
         run_git(
@@ -217,8 +269,10 @@ fn agent_argv(repo: &str, task: &str, tail: &[String]) -> (String, Vec<String>) 
         format!("WTA_REPO={repo}"),
         format!("WTA_INDEX={idx}"),
         format!("WTA_PORT_BASE={port}"),
-        agent_cmd(),
     ];
+    // tmux execs program+args directly (no shell), so a multi-word agent command
+    // (`claude --model haiku`, `npx foo`) must be tokenized, not one argv element.
+    extra.extend(agent_cmd().split_whitespace().map(String::from));
     extra.extend_from_slice(tail);
     ("env".to_string(), extra)
 }

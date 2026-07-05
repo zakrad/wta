@@ -138,20 +138,23 @@ fn deliver(task: &str, body: &str) -> String {
     if body.is_empty() {
         return "nothing to send".to_string();
     }
-    // state is per-repo now — look up which repo this agent belongs to so we name
-    // its (repo-namespaced) tmux session correctly.
-    let repo = match status::read_all_states() {
-        Ok(states) => states.into_iter().find(|s| s.task == task).map(|s| s.repo),
-        Err(_) => None,
+    // state is per-repo now — find this agent's repo. With same-named agents in
+    // multiple repos, prefer one whose tmux session is actually live.
+    let repos: Vec<String> = match status::read_all_states() {
+        Ok(states) => states.into_iter().filter(|s| s.task == task).map(|s| s.repo).collect(),
+        Err(_) => Vec::new(),
     };
-    let repo = match repo {
-        Some(r) => r,
-        None => return format!("'{task}' not found"),
-    };
-    let session = tmux::session_name(&repo, task);
-    if !tmux::has_session(&session) {
-        return format!("'{task}' isn't running (resume it in wta first)");
+    if repos.is_empty() {
+        return format!("'{task}' not found");
     }
+    let session = repos
+        .iter()
+        .map(|r| tmux::session_name(r, task))
+        .find(|s| tmux::has_session(s));
+    let session = match session {
+        Some(s) => s,
+        None => return format!("'{task}' isn't running (resume it in wta first)"),
+    };
     match tmux::send_text(&session, body) {
         Ok(_) => {
             let echo: String = body.chars().take(60).collect();
@@ -198,7 +201,7 @@ pub fn run(test: bool) -> Result<()> {
     let _ = send(&c, "wta bridge online — /help for commands");
     // skip any backlog so old messages don't replay as commands
     let mut offset = get_updates(&c, 0).map(|(o, _)| o).unwrap_or(0);
-    let mut last: HashMap<String, String> = HashMap::new();
+    let mut last: HashMap<(String, String), String> = HashMap::new();
     let mut primed = false;
     let mut selected: Option<String> = None;
     println!("wta bridge running (inbound + outbound). Ctrl-C to stop.");
@@ -222,13 +225,16 @@ pub fn run(test: bool) -> Result<()> {
         // outbound: notify on attention-worthy status transitions
         if let Ok(states) = status::read_all_states() {
             for st in states {
+                // key by (repo, task) so same-named agents in different repos don't
+                // share one slot (which caused spurious/suppressed pings)
+                let key = (st.repo.clone(), st.task.clone());
                 if primed {
-                    let prev = last.get(&st.task).map(|s| s.as_str());
+                    let prev = last.get(&key).map(|s| s.as_str());
                     if let Some(msg) = attention_message(prev, &st.status, &st.task) {
                         let _ = send(&c, &msg);
                     }
                 }
-                last.insert(st.task, st.status);
+                last.insert(key, st.status);
             }
             primed = true;
         }
