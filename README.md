@@ -17,7 +17,9 @@ cargo install --git https://github.com/zakrad/wta                               
 
 Needs **tmux**, **git ≥ 2.20**, and an agent CLI on your PATH (`claude` by
 default — set `WTA_AGENT_CMD` to change). Add `--features telegram` for remote
-control.
+control. The core is agent-agnostic; two conveniences (`▲ needs-input` status and
+auto-trust-dismiss) are Claude Code-specific — see
+[MANUAL: what's Claude-specific](MANUAL.md#whats-claude-code-specific).
 
 ## Quickstart
 
@@ -52,8 +54,8 @@ and feature, with examples.
   never merge on "the agent said it's done." Runs async; never blocks the UI.
 - **Live status, zero setup** — running / ready / needs-input / exited detected
   automatically; optional Claude Code hooks (`wta install-hooks`) add "needs input".
-- **Notifies you — with sound** — when an off-screen agent finishes or needs
-  input, wta plays a system sound (not just the terminal bell, which many
+- **Notifies you — with sound** — when an off-screen agent finishes (or needs
+  input, with Claude's hooks), wta plays a system sound (not just the terminal bell, which many
   terminals mute) and marks it for review (`◆`), with a "N need you" count in the
   menu bar. Viewing the agent clears it. Set `WTA_NOTIFY_SOUND=0` to silence, or
   point it at your own sound file.
@@ -104,7 +106,7 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | Var | Default | |
 |---|---|---|
 | `WTA_AGENT_CMD` | `claude` | program started in each session |
-| `WTA_AUTO_TRUST` | `1` | auto-accept Claude's per-folder trust prompt (`0` disables) |
+| `WTA_AUTO_TRUST` | `1` | auto-accept Claude's per-folder trust prompt (`0` disables) — Claude only |
 | `WTA_WORKTREE_DIR` | `.agents` | worktree dir under the repo root (gitignore it) |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` (GUI editors like `code` open detached; terminal editors like `nvim` open inline and return to the dash on quit) |

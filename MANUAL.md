@@ -87,7 +87,8 @@ Right: **Preview** (live, full-color capture of the agent's pane) and **Diff**
 
 **Status glyphs:** `⠋` running · `●` ready · `▲` needs input · `◆` review
 (finished, unseen) · `✓` merged (landed in base) · `✗` exited. A verify check adds
-`⟳`/`✓`/`✗` to the left of the status.
+`⟳`/`✓`/`✗` to the left of the status. (`▲` needs-input requires the Claude Code
+hooks — [see Notifications](#notifications); other agents show running/ready/exited.)
 
 ---
 
@@ -181,7 +182,8 @@ When an agent **you're not looking at** finishes or needs input, wta:
 Selecting/opening the agent clears it. Silence with `WTA_NOTIFY_SOUND=0`, or set it
 to a sound-file path for your own alert.
 
-"Needs input" detection is best with the optional Claude Code hooks:
+**Finish/ready** detection is pane-based and works for **any agent**. **"Needs
+input" (`▲`)** requires the Claude Code hooks (**Claude only**):
 
 ```sh
 wta install-hooks            # this repo (writes .claude/settings.json)
@@ -282,6 +284,24 @@ WTA_AGENT_CMD=bash  wta new scratch                    # kick the tyres, no toke
 `--continue`-style resume is Claude's default; set `WTA_AGENT_RESUME_ARGS` for
 another CLI (or empty to just relaunch it).
 
+### What's Claude Code-specific
+
+The **core is agent-agnostic** — worktrees, tmux, attach/quick-send, the
+mergeability matrix, verify gate, cross-agent review, fanout, open-in-editor, and
+**finish notifications** all work with any CLI. Two conveniences are **Claude Code
+only** and simply don't apply to other agents:
+
+- **`▲ needs input` status** (and its Telegram "needs input" pings) comes from the
+  Claude Code hooks that `wta install-hooks` writes into `.claude/settings.json`.
+  Other agents still get running / ready / finished / exited from their pane —
+  just never `▲`.
+- **Auto-trust-dismiss** (`WTA_AUTO_TRUST`) only matches Claude's folder-trust
+  prompt; it's a harmless no-op for other agents.
+
+The defaults also lean Claude — `WTA_AGENT_CMD=claude`,
+`WTA_AGENT_RESUME_ARGS=--continue`, and `CLAUDE.local.md`/`.mcp.json` in
+`WTA_CONTEXT_FILES`. Override them for your CLI and everything else works.
+
 ---
 
 ## Configuration reference
@@ -293,7 +313,7 @@ another CLI (or empty to just relaunch it).
 | `WTA_REVIEW_AGENT_CMD` | `$WTA_AGENT_CMD` | agent CLI for `wta review` |
 | `WTA_WORKTREE_DIR` | `.agents` | where worktrees live under the repo root |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree (and kept out of pushes) |
-| `WTA_AUTO_TRUST` | `1` | auto-accept Claude's per-folder trust prompt (`0` off) |
+| `WTA_AUTO_TRUST` | `1` | auto-accept Claude's per-folder trust prompt (`0` off) — **Claude only** |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` |
 | `WTA_OPEN_INLINE` | auto | force editor inline (`1`) or detached (`0`) |
 | `WTA_NOTIFY_SOUND` | `1` | notification sound (`0` = silent, or a sound-file path) |
