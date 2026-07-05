@@ -40,6 +40,8 @@ fn main() -> anyhow::Result<()> {
         } => worktree::fanout(&name, count, base.as_deref(), &agent_args)?,
         Command::Attach { task } => worktree::attach(&task)?,
         Command::Open { task } => worktree::open(&task)?,
+        Command::Review { builder, by } => worktree::review(&builder, by.as_deref())?,
+        Command::Init => worktree::init()?,
         Command::Stop { task } => {
             worktree::stop(&task)?;
             println!("stopped '{task}' — worktree kept; resume with `wta resume {task}`");

@@ -4,6 +4,18 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.12] — 2026-07-05
+
+### Added
+- **Cross-agent review** — `wta review <builder> [--by <cmd>]` spawns an
+  independent reviewer agent (`review-<builder>`) on the builder's branch that
+  critiques the diff against tests/spec and ends with `REVIEW: PASS`/`FAIL`
+  (agents can't self-grade). Point `--by` / `WTA_REVIEW_AGENT_CMD` at a cheaper model.
+- **`wta init`** — scaffold `.wta/` convention stubs (`verify.sh`, `setup.sh`,
+  `teardown.sh`); idempotent, never overwrites.
+- **Run-log** — when a `.wta/` dir exists, wta appends stop/rm/push events to
+  `.wta/run-log.md` for a lightweight audit trail.
+
 ## [0.1.11] — 2026-07-05
 
 ### Added
@@ -132,6 +144,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.12]: https://github.com/zakrad/wta/releases/tag/v0.1.12
 [0.1.11]: https://github.com/zakrad/wta/releases/tag/v0.1.11
 [0.1.10]: https://github.com/zakrad/wta/releases/tag/v0.1.10
 [0.1.9]: https://github.com/zakrad/wta/releases/tag/v0.1.9

@@ -61,6 +61,8 @@ In `dash`: `j`/`k` move · `Enter` attach (type in the agent; `Ctrl-q` returns) 
 wta new <task> [--base <branch>]     start an agent (worktree + branch + tmux session)
 wta ls | matrix                      list agents · preview pairwise branch conflicts
 wta fanout <name> -n N -- <prompt>   spawn N agents on one prompt → compare (matrix) → merge the winner
+wta review <builder> [--by <cmd>]    spawn an independent reviewer agent on <builder>'s branch (maker/checker)
+wta init                             scaffold .wta/ convention stubs (verify.sh, setup.sh, teardown.sh)
 wta attach | stop | resume | rm      attach · stop (keep worktree) · resume · destroy
 wta open <task>                      open the agent's worktree in your editor ($EDITOR / WTA_OPEN_CMD)
 wta push <task> [--pr]               commit + push the branch (--pr opens a PR via gh)
@@ -100,15 +102,18 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_WORKTREE_DIR` | `.agents` | worktree dir under the repo root (gitignore it) |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` (GUI editors like `code` open detached; terminal editors like `nvim` open inline and return to the dash on quit) |
+| `WTA_REVIEW_AGENT_CMD` | `$WTA_AGENT_CMD` | agent CLI used by `wta review` (point it at a cheaper/different model) |
 
 Per-repo setup/teardown: make `<repo>/.wta/setup.sh` executable — `wta new` runs
 it in the fresh worktree (install deps, symlink `node_modules`, …). A matching
 `<repo>/.wta/teardown.sh` runs on `wta rm`, before the worktree is removed (stop
 containers, free ports, …).
 
-Verification: add an executable `<repo>/.wta/verify.sh` (run your tests/lint,
-exit non-zero on failure). wta runs it per agent when it finishes and on `v`,
-surfacing `✓`/`✗` in the dashboard and the mergeability matrix.
+`wta init` scaffolds the `.wta/` stubs below. Verification: an executable
+`<repo>/.wta/verify.sh` (run your tests/lint, exit non-zero on failure) runs per
+agent when it finishes and on `v`, surfacing `✓`/`✗` in the dashboard and matrix.
+When a `.wta/` dir exists, wta appends lifecycle events (stop/rm/push) to
+`.wta/run-log.md`.
 
 **Isolation slots:** each agent gets a stable `WTA_INDEX` (0–99) and
 `WTA_PORT_BASE` (a unique 10-port block) in its pane *and* in `setup.sh`, so

@@ -20,6 +20,25 @@ pub fn repo_id() -> Result<String> {
     Ok(repo_id_of(&repo_root()?))
 }
 
+/// Append an audit line to `<repo>/.wta/run-log.md` — but only if the repo has
+/// opted into wta conventions (a `.wta/` dir already exists), so we never create
+/// files in a repo that isn't using them.
+fn append_run_log(root: &Path, task: &str, action: &str) {
+    let dir = root.join(".wta");
+    if !dir.is_dir() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("- `{now}`  **{action}**  {task}\n");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("run-log.md")) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 pub struct Worktree {
     pub task: String,
     pub path: PathBuf,
@@ -267,6 +286,76 @@ pub fn fanout(name: &str, count: u32, base: Option<&str>, agent_args: &[String])
     Ok(())
 }
 
+/// Spawn an INDEPENDENT reviewer agent on a builder's branch (maker/checker —
+/// agents can't self-grade). Names it `review-<builder>`, based on the builder's
+/// branch so it can see + test the changes. Optionally uses a different/cheaper
+/// agent CLI (`--by` / `WTA_REVIEW_AGENT_CMD`).
+pub fn review(builder: &str, by: Option<&str>) -> Result<()> {
+    let root = repo_root()?;
+    let builder_branch = branch_name(builder);
+    let exists = run_git(
+        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{builder_branch}")],
+        Some(&root),
+    )
+    .is_ok();
+    if !exists {
+        bail!("no agent '{builder}' (branch {builder_branch} not found)");
+    }
+    let base = base_branch(&root);
+    let reviewer = format!("review-{builder}");
+    let _ = rm(&reviewer, true); // clear any prior review so re-review is clean
+
+    let prompt = format!(
+        "You are an INDEPENDENT code reviewer. Another agent wrote the changes on \
+         this branch versus `{base}`. Do NOT trust the author's claims. Inspect the \
+         diff (`git diff {base}...HEAD`), run the tests/build, and confirm it does \
+         what was intended. Report concrete issues, then end with a single line \
+         exactly: `REVIEW: PASS` or `REVIEW: FAIL`."
+    );
+    // reviewer runs an (optionally cheaper / different) agent CLI. This is a
+    // one-shot CLI process, so overriding its own WTA_AGENT_CMD env is safe.
+    let cmd = by
+        .map(String::from)
+        .or_else(|| std::env::var("WTA_REVIEW_AGENT_CMD").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(agent_cmd);
+    std::env::set_var("WTA_AGENT_CMD", &cmd);
+    new_with_base(&reviewer, &[prompt], &builder_branch)?;
+    println!("started reviewer '{reviewer}' on {builder}'s branch — watch it in `wta dash`");
+    Ok(())
+}
+
+/// `wta init` — scaffold `.wta/` convention stubs (verify/setup/teardown) if
+/// absent. Explicit + idempotent; never overwrites, never touches tracked files.
+pub fn init() -> Result<()> {
+    let root = repo_root()?;
+    let dir = root.join(".wta");
+    std::fs::create_dir_all(&dir)?;
+    let files = [
+        ("verify.sh", "#!/usr/bin/env bash\n# wta runs this per agent to gate merges — exit non-zero on failure.\nset -e\n# e.g.: cargo test   |   npm test   |   pytest -q   |   make check\n"),
+        ("setup.sh", "#!/usr/bin/env bash\n# Runs in each fresh worktree on `wta new`.\n# Isolation slots are available as $WTA_INDEX (0-99) and $WTA_PORT_BASE.\n# e.g.: ln -s ../../node_modules node_modules\n"),
+        ("teardown.sh", "#!/usr/bin/env bash\n# Runs on `wta rm`, before the worktree is removed.\n# e.g.: docker compose -p \"$WTA_TASK\" down\n"),
+    ];
+    let mut created = Vec::new();
+    for (name, body) in files {
+        let p = dir.join(name);
+        if !p.exists() {
+            std::fs::write(&p, body)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
+            }
+            created.push(name);
+        }
+    }
+    if created.is_empty() {
+        println!(".wta/ is already set up (verify.sh, setup.sh, teardown.sh)");
+    } else {
+        println!("scaffolded .wta/{{{}}} — edit them for your stack", created.join(", "));
+    }
+    Ok(())
+}
+
 /// Local branches a new agent could be based on (excludes wta's own `agent/*`).
 pub fn list_branches() -> Result<Vec<String>> {
     let root = repo_root()?;
@@ -310,6 +399,7 @@ pub fn stop(task: &str) -> Result<()> {
     // running (the bridge reads state without checking tmux liveness).
     let wt = worktrees_dir(&root).join(task);
     let _ = status::record(&repo, task, "exited", &wt.to_string_lossy());
+    append_run_log(&root, task, "stop");
     Ok(())
 }
 
@@ -432,6 +522,7 @@ pub fn rm(task: &str, force: bool) -> Result<()> {
     // ALWAYS drop the state file so the agent leaves the dashboard even if it was
     // only a stale entry with no worktree.
     status::remove_state(&repo, task);
+    append_run_log(&root, task, "rm");
     Ok(())
 }
 
@@ -466,6 +557,7 @@ pub fn push(task: &str, make_pr: bool) -> Result<String> {
 
     run_git(&["push", "-u", "origin", &branch], Some(&wt))
         .context("git push failed (is `origin` set?)")?;
+    append_run_log(&root, task, "push");
 
     if make_pr {
         // best-effort: create a PR, or report the existing one.

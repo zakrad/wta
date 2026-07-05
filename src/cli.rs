@@ -49,6 +49,16 @@ pub enum Command {
     Attach { task: String },
     /// Open the agent's worktree in your editor ($WTA_OPEN_CMD or $EDITOR, e.g. nvim, code)
     Open { task: String },
+    /// Spawn an independent reviewer agent on <builder>'s branch (maker/checker)
+    Review {
+        /// the agent whose work to review
+        builder: String,
+        /// agent CLI for the reviewer (default: $WTA_REVIEW_AGENT_CMD or $WTA_AGENT_CMD)
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// Scaffold `.wta/` convention stubs (verify.sh, setup.sh, teardown.sh)
+    Init,
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later
     Stop { task: String },
     /// Resume a stopped agent — re-spawn its session in the existing worktree
