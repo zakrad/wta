@@ -388,11 +388,62 @@ pub fn new_with_base(task: &str, agent_args: &[String], base: &str) -> Result<()
     new_impl(task, agent_args, Some(base))
 }
 
+/// A short "other agents active now" snapshot for turn-zero awareness, derived
+/// from the worktrees + branches wta already tracks. Empty if this is the only agent.
+fn fleet_digest(root: &Path, exclude: &str) -> String {
+    let base = base_branch(root);
+    let mut rows = Vec::new();
+    for w in list_managed().unwrap_or_default() {
+        if w.task == exclude {
+            continue;
+        }
+        let files = run_git(&["diff", "--name-only", &format!("{base}...{}", w.branch)], Some(root)).unwrap_or_default();
+        let list: Vec<&str> = files.lines().filter(|l| !l.is_empty()).take(4).collect();
+        let f = if list.is_empty() { "no changes yet".to_string() } else { list.join(", ") };
+        rows.push(format!("- **{}** (branch `{}`): {}", w.task, w.branch, f));
+    }
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n## Other wta agents active now (snapshot at your creation)\n");
+    out.push_str("You are one of several parallel agents, each isolated in its own git worktree:\n");
+    for r in rows.iter().take(20) {
+        out.push_str(r);
+        out.push('\n');
+    }
+    out.push_str(
+        "Avoid editing files another agent owns. Coordinate: `wta send <agent> \"msg\"` to \
+         message a peer, `wta board` to see/append shared claims. Re-read this before big refactors/merges.\n",
+    );
+    out
+}
+
+/// Append the fleet digest to the worktree's CLAUDE.local.md (create if absent).
+/// Returns "CLAUDE.local.md" if written, so the caller records it as injected
+/// (keeping it out of pushes).
+fn write_fleet_digest(root: &Path, wt: &Path, task: &str) -> Option<String> {
+    let digest = fleet_digest(root, task);
+    if digest.is_empty() {
+        return None;
+    }
+    let file = wt.join("CLAUDE.local.md");
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&file).ok()?;
+    f.write_all(digest.as_bytes()).ok()?;
+    Some("CLAUDE.local.md".to_string())
+}
+
 fn new_impl(task: &str, agent_args: &[String], base: Option<&str>) -> Result<()> {
     validate_task(task)?;
     let repo = repo_id()?;
     let idx = assign_slot(&repo); // pick the slot before creating, so setup.sh sees it
-    let (_root, wt, injected) = make_worktree(task, base, idx)?;
+    let (root, wt, mut injected) = make_worktree(task, base, idx)?;
+    // turn-zero awareness: tell the new agent who else is active + how to coordinate
+    if let Some(f) = write_fleet_digest(&root, &wt, task) {
+        if !injected.contains(&f) {
+            injected.push(f);
+        }
+    }
     // persist slot + injected list first, so the "running" record below merges over it
     let _ = status::record_meta(&repo, task, idx, &injected);
     preseed_claude_trust(&wt); // avoid the folder-trust dialog on this fresh worktree
@@ -499,6 +550,76 @@ pub fn init() -> Result<()> {
     } else {
         println!("scaffolded .wta/{{{}}} — edit them for your stack", created.join(", "));
     }
+    Ok(())
+}
+
+/// Resolve the repo id, preferring the `WTA_REPO` env (set in each agent's pane)
+/// so a `wta send`/`wta board` invoked BY an agent inside its worktree resolves the
+/// MAIN repo, not the worktree (which `repo_root()` would return).
+fn resolve_repo() -> Result<String> {
+    match std::env::var("WTA_REPO") {
+        Ok(r) if !r.is_empty() => Ok(r),
+        _ => repo_id(),
+    }
+}
+
+/// The MAIN repo root, resolved from anywhere (incl. a linked worktree) via
+/// `--git-common-dir` — so `wta board` works whether you or an agent runs it.
+fn main_root() -> Result<PathBuf> {
+    let out = run_git(&["rev-parse", "--git-common-dir"], None).context("not inside a git repo")?;
+    let gc = std::fs::canonicalize(out.trim()).unwrap_or_else(|_| PathBuf::from(out.trim()));
+    Ok(gc.parent().map(|p| p.to_path_buf()).unwrap_or(gc))
+}
+
+/// Shared coordination board at `<main-root>/.wta/board.md`. `wta board` prints it;
+/// `wta board "<text>"` appends a claim (O_APPEND, one line, no locks). Advisory —
+/// agents read it at turn-zero / when told; the relay is the mid-session channel.
+pub fn board(entry: Option<&str>) -> Result<()> {
+    let dir = main_root()?.join(".wta");
+    let file = dir.join("board.md");
+    match entry {
+        Some(text) if !text.trim().is_empty() => {
+            std::fs::create_dir_all(&dir)?;
+            let from = std::env::var("WTA_TASK").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "you".into());
+            let line = format!("- [{from}] {}\n", text.trim().replace('\n', " "));
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&file)?;
+            f.write_all(line.as_bytes())?;
+            println!("board += {}", line.trim());
+        }
+        _ => match std::fs::read_to_string(&file) {
+            Ok(s) if !s.trim().is_empty() => print!("{s}"),
+            _ => println!("(board empty — claim work with: wta board \"owning src/auth/**\")"),
+        },
+    }
+    Ok(())
+}
+
+/// Peer relay: type a note into another agent's pane — the only channel that
+/// reaches a running agent mid-session. Agents can call `wta send` themselves
+/// (their pane has the wta binary + WTA_* env). REFUSES if the target is at a
+/// dialog (so the message can't silently answer a permission/trust prompt) or busy.
+pub fn send(task: &str, message: &str) -> Result<()> {
+    let msg = message.trim();
+    if msg.is_empty() {
+        bail!("nothing to send");
+    }
+    let repo = resolve_repo()?;
+    let session = tmux::session_name(&repo, task);
+    if !tmux::has_session(&session) {
+        bail!("'{task}' isn't running (resume it first)");
+    }
+    let pane = tmux::capture(&session).unwrap_or_default();
+    if tmux::looks_interactive_dialog(&pane) {
+        bail!("'{task}' is at a prompt/dialog — refusing to send (it could answer it). Try again once it's ready.");
+    }
+    if !tmux::pane_is_idle(&session) {
+        bail!("'{task}' is busy — try again when it's idle");
+    }
+    let from = std::env::var("WTA_TASK").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "you".into());
+    let framed = format!("[wta:{from}] {}", msg.replace('\n', " "));
+    tmux::send_text(&session, &framed)?;
+    println!("→ {task}: {}", msg.chars().take(70).collect::<String>());
     Ok(())
 }
 

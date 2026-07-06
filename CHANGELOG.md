@@ -4,6 +4,18 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.18] — 2026-07-06
+
+### Added — cross-agent awareness (agents isolated, but not blind)
+- **Fleet digest** — each new agent's `CLAUDE.local.md` is seeded with a snapshot of
+  the other active agents and the files they're touching (from the worktrees/branches
+  wta already tracks), so it starts aware of its peers. Kept out of pushes.
+- **Peer relay** — `wta send <task> "<msg>"` types a note into another agent's pane;
+  agents can call it themselves. **Refuses to send when the target is at a
+  permission/trust dialog** (so a message can't silently answer it) or busy.
+- **Shared board** — `wta board` prints `<repo>/.wta/board.md`; `wta board "<claim>"`
+  appends a line. Works from any worktree. Advisory coordination.
+
 ## [0.1.17] — 2026-07-06
 
 ### Added
@@ -207,6 +219,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.18]: https://github.com/zakrad/wta/releases/tag/v0.1.18
 [0.1.17]: https://github.com/zakrad/wta/releases/tag/v0.1.17
 [0.1.16]: https://github.com/zakrad/wta/releases/tag/v0.1.16
 [0.1.15]: https://github.com/zakrad/wta/releases/tag/v0.1.15

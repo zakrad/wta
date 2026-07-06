@@ -52,6 +52,11 @@ fn main() -> anyhow::Result<()> {
         Command::Open { task } => worktree::open(&task)?,
         Command::Review { builder, by } => worktree::review(&builder, by.as_deref())?,
         Command::Init => worktree::init()?,
+        Command::Send { task, message } => worktree::send(&task, &message.join(" "))?,
+        Command::Board { entry } => {
+            let joined = entry.join(" ");
+            worktree::board(if joined.trim().is_empty() { None } else { Some(joined.as_str()) })?
+        }
         Command::Stop { task } => {
             worktree::stop(&task)?;
             println!("stopped '{task}' — worktree kept; resume with `wta resume {task}`");

@@ -59,6 +59,10 @@ and feature, with examples.
   terminals mute) and marks it for review (`◆`), with a "N need you" count in the
   menu bar. Viewing the agent clears it. Set `WTA_NOTIFY_SOUND=0` to silence, or
   point it at your own sound file.
+- **Cross-agent awareness** — isolated but not blind: each new agent is seeded with
+  a snapshot of the others (and the files they're touching), agents can message each
+  other (`wta send`, refuses to type into a dialog), and a shared `wta board` holds
+  claims. Advisory — the worktree isolation stays the safety layer.
 - **Remote** — an optional Telegram bridge pings you when an agent needs you and
   lets you reply to drive it from your phone.
 
@@ -69,6 +73,8 @@ wta new <task> [--base <branch>] [--yolo]   start an agent (--yolo = no permissi
 wta ls | matrix                      list agents · preview pairwise branch conflicts
 wta fanout <name> -n N -- <prompt>   spawn N agents on one prompt → compare (matrix) → merge the winner
 wta review <builder> [--by <cmd>]    spawn an independent reviewer agent on <builder>'s branch (maker/checker)
+wta send <task> "<msg>"              relay a note into another agent's pane (agents can call this too)
+wta board ["<claim>"]                shared coordination board (print, or append a claim)
 wta init                             scaffold .wta/ convention stubs (verify.sh, setup.sh, teardown.sh)
 wta attach | stop | resume | rm      attach · stop (keep worktree) · resume · destroy
 wta open <task>                      open the agent's worktree in your editor ($EDITOR / WTA_OPEN_CMD)

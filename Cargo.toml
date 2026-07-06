@@ -1,6 +1,6 @@
 [package]
 name = "wta"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 rust-version = "1.75"
 description = "Run parallel AI coding agents in isolated git worktrees + persistent tmux sessions, from one TUI dashboard"

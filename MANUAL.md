@@ -14,6 +14,7 @@ how to use each feature on its own.
 - [Notifications](#notifications) · sound, review glyph, hooks
 - [Agent lifecycle](#agent-lifecycle) · stop/resume/kill, merged
 - [Per-repo setup](#per-repo-setup) · `init`, setup/teardown, isolation slots, run-log
+- [Cross-agent awareness](#cross-agent-awareness) · `send`, `board`, fleet digest
 - [Multiple repos](#multiple-repos)
 - [Remote control (Telegram)](#remote-control-telegram)
 - [Using a different agent CLI](#using-a-different-agent-cli)
@@ -242,6 +243,41 @@ wta init    # scaffold .wta/{verify.sh, setup.sh, teardown.sh} (idempotent)
 Add `.agents/` (and `.wta/run-log.md` if you like) to `.gitignore`.
 
 ---
+
+## Cross-agent awareness
+
+Agents are **file-isolated** (separate worktrees) but can be made **aware of each
+other** through three advisory channels. Isolation + the mergeability matrix stay
+the real safety layer — these are for coordination, not enforcement.
+
+**The honest limit:** agents don't re-read files mid-session, so a shared file only
+helps at turn-zero or when an agent is told to re-read. The **only channel that
+reaches a running agent is the relay** (a typed line into its pane).
+
+- **Fleet digest (automatic).** When you create an agent, wta injects a short
+  "other agents active now + the files they're touching" snapshot into that
+  worktree's `CLAUDE.local.md`, so a new agent starts aware of its peers and how to
+  coordinate. Derived from the worktrees/branches wta already tracks; kept out of
+  pushes.
+
+- **Peer relay** — `wta send <task> "<message>"` types a one-line note into another
+  agent's pane. **Agents can call it themselves** (their pane has the `wta` binary
+  + `WTA_*` env), so one agent can tell another "I finished auth, rebase." It
+  **refuses to send when the target is at a permission/trust dialog** (so a message
+  can't accidentally answer it) or busy.
+
+- **Shared board** — `wta board` prints `<repo>/.wta/board.md`; `wta board
+  "<claim>"` appends a line (e.g. `owning src/auth/**`). Works from any worktree.
+  Advisory claims agents read at turn-zero / when told.
+
+```sh
+wta send payments "auth is done on agent/auth — rebase before you touch src/user.rs"
+wta board "auth: owning src/auth/** and src/user.rs"
+wta board                       # see all claims
+```
+
+Not built (by design): no daemon/message queue, no shared DB, no enforced locks,
+no task-claiming scheduler. If it must reach an agent mid-session, use the relay.
 
 ## Multiple repos
 

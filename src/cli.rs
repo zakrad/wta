@@ -65,6 +65,20 @@ pub enum Command {
     },
     /// Scaffold `.wta/` convention stubs (verify.sh, setup.sh, teardown.sh)
     Init,
+    /// Send a one-line note into another agent's pane (agents can call this too)
+    Send {
+        /// the agent to message
+        task: String,
+        /// the message (everything after the task name)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        message: Vec<String>,
+    },
+    /// Shared coordination board: `wta board` prints it, `wta board "<claim>"` appends
+    Board {
+        /// a claim to append (omit to print the board)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        entry: Vec<String>,
+    },
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later
     Stop { task: String },
     /// Resume a stopped agent — re-spawn its session in the existing worktree

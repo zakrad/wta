@@ -160,6 +160,22 @@ pub(crate) fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Heuristic: does the pane look like it's showing an interactive dialog awaiting a
+/// keystroke (trust/permission prompt, numbered menu, y/n)? Used to REFUSE relaying
+/// a peer message that would otherwise silently answer the dialog. Errs toward true.
+pub fn looks_interactive_dialog(text: &str) -> bool {
+    let t = norm(text);
+    t.contains("Do you want to")
+        || t.contains("Do you trust the files")
+        || t.contains("Yes, I trust this folder")
+        || t.contains("you created or one you trust")
+        || t.contains("No, exit")
+        || (t.contains("1. Yes") && t.contains("2. No"))
+        || t.contains("(y/n)")
+        || t.contains("[y/N]")
+        || t.contains("❯ 1.")
+}
+
 /// Two captures a short interval apart are byte-identical => the pane isn't
 /// actively rendering (agent idle at its prompt). Used to gate quick-send.
 pub fn pane_is_idle(name: &str) -> bool {
@@ -272,4 +288,21 @@ pub fn attach_blocking(name: &str) -> Result<()> {
         .status()
         .context("tmux attach failed")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dialog_guard_flags_prompts_but_not_normal_output() {
+        // interactive dialogs the relay must refuse to send into
+        assert!(looks_interactive_dialog("Do you want to allow Bash(rm)? 1. Yes 2. No"));
+        assert!(looks_interactive_dialog("Is this a directory you created or one you trust?"));
+        assert!(looks_interactive_dialog("Overwrite file? (y/n)"));
+        assert!(looks_interactive_dialog("❯ 1. Accept  2. Reject"));
+        // normal agent output must be relayable
+        assert!(!looks_interactive_dialog("Running tests... 42 passed"));
+        assert!(!looks_interactive_dialog("I'll refactor the auth module now."));
+    }
 }
