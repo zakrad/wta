@@ -19,8 +19,12 @@ fn main() -> anyhow::Result<()> {
         Command::New {
             task,
             base,
+            yolo,
             agent_args,
         } => {
+            if yolo {
+                std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
+            }
             match base {
                 Some(b) => worktree::new_with_base(&task, &agent_args, &b)?,
                 None => worktree::new(&task, &agent_args)?,
@@ -36,8 +40,14 @@ fn main() -> anyhow::Result<()> {
             name,
             count,
             base,
+            yolo,
             agent_args,
-        } => worktree::fanout(&name, count, base.as_deref(), &agent_args)?,
+        } => {
+            if yolo {
+                std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
+            }
+            worktree::fanout(&name, count, base.as_deref(), &agent_args)?
+        }
         Command::Attach { task } => worktree::attach(&task)?,
         Command::Open { task } => worktree::open(&task)?,
         Command::Review { builder, by } => worktree::review(&builder, by.as_deref())?,

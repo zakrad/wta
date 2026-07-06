@@ -65,7 +65,7 @@ and feature, with examples.
 ## Commands & keys
 
 ```
-wta new <task> [--base <branch>]     start an agent (worktree + branch + tmux session)
+wta new <task> [--base <branch>] [--yolo]   start an agent (--yolo = no permission prompts)
 wta ls | matrix                      list agents · preview pairwise branch conflicts
 wta fanout <name> -n N -- <prompt>   spawn N agents on one prompt → compare (matrix) → merge the winner
 wta review <builder> [--by <cmd>]    spawn an independent reviewer agent on <builder>'s branch (maker/checker)
@@ -108,6 +108,7 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_AGENT_CMD` | `claude` | program started in each session |
 | `WTA_AUTO_TRUST` | `1` | pre-accept + dismiss Claude's folder-trust prompt for each worktree (`0` off) — Claude only |
 | `WTA_COPY_PERMISSIONS` | `0` | copy `.claude/settings.local.json` (tool grants) into each worktree so agents don't re-approve (opt-in) — Claude only |
+| `WTA_SKIP_PERMISSIONS` | `0` | run agents with `--dangerously-skip-permissions` (same as `wta new --yolo`) — Claude only, opt-in |
 | `WTA_WORKTREE_DIR` | `.agents` | worktree dir under the repo root (gitignore it) |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` (GUI editors like `code` open detached; terminal editors like `nvim` open inline and return to the dash on quit) |

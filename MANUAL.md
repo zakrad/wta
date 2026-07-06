@@ -37,6 +37,7 @@ store your conversation (Claude Code does, per directory).
 wta new fix-auth                       # worktree + agent/fix-auth branch + agent, from HEAD
 wta new fix-auth --base develop        # base the branch on an existing branch
 wta new fix-auth -- "add a login test" # everything after -- is passed to the agent (an initial prompt for claude)
+wta new fix-auth --yolo                # run with no permission prompts (--dangerously-skip-permissions)
 ```
 
 Task names must be letters/digits/`-`/`_` (≤64 chars). From the dashboard press
@@ -298,11 +299,16 @@ agent would hit two prompts. wta handles them like this:
   from your repo's `.claude/settings.local.json`, which is untracked so a worktree
   doesn't get it. Two ways to stop the re-prompting, both **opt-in** (they let
   agents run tools unprompted — a real grant):
-  - `WTA_COPY_PERMISSIONS=1` — copies `.claude/settings.local.json` into each
-    worktree (kept out of pushes). Carries the grants you already approved.
+  - **`wta new <task> --yolo`** (or `WTA_SKIP_PERMISSIONS=1` as a default for all
+    agents) — run with **no** permission prompts, i.e. `claude
+    --dangerously-skip-permissions`. Fully unattended; the worktree is the only
+    file blast radius, but the agent can still run any command on your machine —
+    use it when you trust the task. Also on `wta fanout --yolo`.
+  - `WTA_COPY_PERMISSIONS=1` — softer: copies `.claude/settings.local.json` into
+    each worktree (kept out of pushes) so agents reuse the grants you already
+    approved, and still prompt for anything new.
   - `WTA_AGENT_CMD="claude --permission-mode acceptEdits"` — auto-accept file
-    edits (Bash still asks). `bypassPermissions` exists but only inside a
-    container/VM — never on your host.
+    edits only (Bash still asks).
   - Or promote stable rules into the **tracked** `.claude/settings.json`, which
     every worktree inherits via `git checkout` with no wta config at all.
 
@@ -337,6 +343,7 @@ The defaults also lean Claude — `WTA_AGENT_CMD=claude`,
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree (and kept out of pushes) |
 | `WTA_AUTO_TRUST` | `1` | pre-accept + dismiss Claude's folder-trust prompt (`0` off) — **Claude only** |
 | `WTA_COPY_PERMISSIONS` | `0` | copy `.claude/settings.local.json` (tool grants) into each worktree — **Claude only, opt-in** |
+| `WTA_SKIP_PERMISSIONS` | `0` | run agents with `--dangerously-skip-permissions` (same as `--yolo`) — **Claude only, opt-in** |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` |
 | `WTA_OPEN_INLINE` | auto | force editor inline (`1`) or detached (`0`) |
 | `WTA_NOTIFY_SOUND` | `1` | notification sound (`0` = silent, or a sound-file path) |

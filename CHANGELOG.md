@@ -4,6 +4,14 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.17] — 2026-07-06
+
+### Added
+- **`wta new <task> --yolo`** (and `wta fanout --yolo`, or `WTA_SKIP_PERMISSIONS=1`
+  as a default) — run the agent with **no permission prompts**, i.e. `claude
+  --dangerously-skip-permissions`. Fully unattended; the worktree is the only file
+  blast radius. Off by default; Claude-only.
+
 ## [0.1.16] — 2026-07-06
 
 ### Fixed
@@ -199,6 +207,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.17]: https://github.com/zakrad/wta/releases/tag/v0.1.17
 [0.1.16]: https://github.com/zakrad/wta/releases/tag/v0.1.16
 [0.1.15]: https://github.com/zakrad/wta/releases/tag/v0.1.15
 [0.1.14]: https://github.com/zakrad/wta/releases/tag/v0.1.14

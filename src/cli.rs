@@ -23,6 +23,9 @@ pub enum Command {
         /// Base the agent's branch on an existing branch (default: HEAD)
         #[arg(long)]
         base: Option<String>,
+        /// Run the agent with no permission prompts (claude --dangerously-skip-permissions)
+        #[arg(long)]
+        yolo: bool,
         /// Everything after `--` is passed to the agent command (default: claude)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,
@@ -41,6 +44,9 @@ pub enum Command {
         /// base the agents' branches on an existing branch (default: HEAD)
         #[arg(long)]
         base: Option<String>,
+        /// run agents with no permission prompts (claude --dangerously-skip-permissions)
+        #[arg(long)]
+        yolo: bool,
         /// everything after `--` is passed to each agent (e.g. the prompt)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,

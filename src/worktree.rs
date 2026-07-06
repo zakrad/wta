@@ -145,14 +145,18 @@ mod tests {
     #[test]
     fn agent_argv_tokenizes_multiword_command() {
         std::env::set_var("WTA_AGENT_CMD", "claude --model haiku");
+        std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
         let (prog, extra) = agent_argv("repo", "task", 0, &[]);
         std::env::remove_var("WTA_AGENT_CMD");
+        std::env::remove_var("WTA_SKIP_PERMISSIONS");
         assert_eq!(prog, "env");
         // the command must be split into separate argv elements, not one string
         assert!(extra.contains(&"claude".to_string()));
         assert!(extra.contains(&"--model".to_string()));
         assert!(extra.contains(&"haiku".to_string()));
         assert!(!extra.iter().any(|s| s == "claude --model haiku"));
+        // --yolo / WTA_SKIP_PERMISSIONS appends the real Claude flag
+        assert!(extra.contains(&"--dangerously-skip-permissions".to_string()));
     }
 }
 
@@ -283,7 +287,15 @@ fn agent_argv(repo: &str, task: &str, idx: u32, tail: &[String]) -> (String, Vec
     ];
     // tmux execs program+args directly (no shell), so a multi-word agent command
     // (`claude --model haiku`, `npx foo`) must be tokenized, not one argv element.
-    extra.extend(agent_cmd().split_whitespace().map(String::from));
+    let cmd = agent_cmd();
+    let is_claude = cmd.split_whitespace().next().map(|c| c.ends_with("claude")).unwrap_or(false);
+    extra.extend(cmd.split_whitespace().map(String::from));
+    // WTA_SKIP_PERMISSIONS / `wta new --yolo`: run the agent with no permission
+    // prompts. Claude's flag is `--dangerously-skip-permissions`; the worktree is
+    // the (only) blast radius.
+    if is_claude && std::env::var("WTA_SKIP_PERMISSIONS").map(|v| v != "0" && !v.is_empty()).unwrap_or(false) {
+        extra.push("--dangerously-skip-permissions".to_string());
+    }
     extra.extend_from_slice(tail);
     ("env".to_string(), extra)
 }
