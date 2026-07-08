@@ -20,6 +20,43 @@ pub fn repo_id() -> Result<String> {
     Ok(repo_id_of(&repo_root()?))
 }
 
+/// Keep wta's ephemeral files (`board.md`, `run-log.md`, logs) out of `git status`
+/// and out of a stray `git add -A`, without ignoring the tracked `.wta/*.sh` stubs.
+fn ensure_wta_gitignore(dir: &Path) {
+    let gi = dir.join(".gitignore");
+    if !gi.exists() {
+        let _ = std::fs::write(&gi, "board.md\nrun-log.md\n*.log\n");
+    }
+}
+
+/// Add wta-injected files to this worktree's git exclude, so the AGENT's own
+/// `git add -A` (or push) can never stage/commit them — closing the "injected
+/// context / fleet digest could be committed & pushed" leak. Uses `--git-path` so
+/// git itself tells us which exclude file it honors for this worktree.
+fn exclude_in_worktree(wt: &Path, files: &[String]) {
+    if files.is_empty() {
+        return;
+    }
+    let p = match run_git(&["rev-parse", "--git-path", "info/exclude"], Some(wt)) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return,
+    };
+    let exclude = if Path::new(&p).is_absolute() { PathBuf::from(&p) } else { wt.join(&p) };
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&exclude) {
+        for name in files {
+            let pat = format!("/{name}"); // anchored to the worktree root
+            if !existing.lines().any(|l| l.trim() == pat || l.trim() == name.as_str()) {
+                let _ = writeln!(f, "{pat}");
+            }
+        }
+    }
+}
+
 /// Append an audit line to `<repo>/.wta/run-log.md` — but only if the repo has
 /// opted into wta conventions (a `.wta/` dir already exists), so we never create
 /// files in a repo that isn't using them.
@@ -28,6 +65,7 @@ fn append_run_log(root: &Path, task: &str, action: &str) {
     if !dir.is_dir() {
         return;
     }
+    ensure_wta_gitignore(&dir);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -366,7 +404,9 @@ fn preseed_claude_trust(wt: &Path) {
         None => return,
     }
     if let Ok(bytes) = serde_json::to_vec_pretty(&root) {
-        let tmp = path.with_extension("json.wta-tmp");
+        // per-process tmp so two concurrent writers never share the same inode
+        // (a shared tmp could be truncated by one while the other renames it)
+        let tmp = path.with_extension(format!("json.wta-tmp.{}", std::process::id()));
         if std::fs::write(&tmp, &bytes).is_ok() {
             // the config holds the oauth token — keep it private
             #[cfg(unix)]
@@ -374,7 +414,9 @@ fn preseed_claude_trust(wt: &Path) {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
             }
-            let _ = std::fs::rename(&tmp, &path);
+            if std::fs::rename(&tmp, &path).is_err() {
+                let _ = std::fs::remove_file(&tmp); // don't orphan a config copy
+            }
         }
     }
 }
@@ -444,6 +486,9 @@ fn new_impl(task: &str, agent_args: &[String], base: Option<&str>) -> Result<()>
             injected.push(f);
         }
     }
+    // git-exclude every injected file in the worktree so the agent's own commits
+    // (or push) can never publish local context / the fleet digest
+    exclude_in_worktree(&wt, &injected);
     // persist slot + injected list first, so the "running" record below merges over it
     let _ = status::record_meta(&repo, task, idx, &injected);
     preseed_claude_trust(&wt); // avoid the folder-trust dialog on this fresh worktree
@@ -527,6 +572,7 @@ pub fn init() -> Result<()> {
     let root = repo_root()?;
     let dir = root.join(".wta");
     std::fs::create_dir_all(&dir)?;
+    ensure_wta_gitignore(&dir);
     let files = [
         ("verify.sh", "#!/usr/bin/env bash\n# wta runs this per agent to gate merges — exit non-zero on failure.\nset -e\n# e.g.: cargo test   |   npm test   |   pytest -q   |   make check\n"),
         ("setup.sh", "#!/usr/bin/env bash\n# Runs in each fresh worktree on `wta new`.\n# Isolation slots are available as $WTA_INDEX (0-99) and $WTA_PORT_BASE.\n# e.g.: ln -s ../../node_modules node_modules\n"),
@@ -580,6 +626,7 @@ pub fn board(entry: Option<&str>) -> Result<()> {
     match entry {
         Some(text) if !text.trim().is_empty() => {
             std::fs::create_dir_all(&dir)?;
+            ensure_wta_gitignore(&dir);
             let from = std::env::var("WTA_TASK").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "you".into());
             let line = format!("- [{from}] {}\n", text.trim().replace('\n', " "));
             use std::io::Write;

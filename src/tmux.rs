@@ -164,16 +164,19 @@ pub(crate) fn norm(s: &str) -> String {
 /// keystroke (trust/permission prompt, numbered menu, y/n)? Used to REFUSE relaying
 /// a peer message that would otherwise silently answer the dialog. Errs toward true.
 pub fn looks_interactive_dialog(text: &str) -> bool {
-    let t = norm(text);
-    t.contains("Do you want to")
-        || t.contains("Do you trust the files")
-        || t.contains("Yes, I trust this folder")
-        || t.contains("you created or one you trust")
-        || t.contains("No, exit")
-        || (t.contains("1. Yes") && t.contains("2. No"))
-        || t.contains("(y/n)")
-        || t.contains("[y/N]")
-        || t.contains("❯ 1.")
+    let l = norm(text).to_lowercase(); // case-insensitive so [Y/n]/(Y/N)/etc. don't slip through
+    l.contains("do you want to")
+        || l.contains("do you trust the files")
+        || l.contains("i trust this folder")
+        || l.contains("you created or one you trust")
+        || l.contains("no, exit")
+        || (l.contains("1. yes") && l.contains("2. no"))
+        || l.contains("(y/n)")
+        || l.contains("[y/n]")
+        || l.contains("(yes/no)")
+        || l.contains("press enter to")
+        || l.contains("❯ 1")
+        || l.contains("│ 1")
 }
 
 /// Two captures a short interval apart are byte-identical => the pane isn't
@@ -218,6 +221,11 @@ pub fn send_text(name: &str, text: &str) -> Result<()> {
         }
     }
 
+    // Never press Enter into a dialog — re-check right before submitting, closing
+    // the check→send window (a static permission/trust prompt looks "idle").
+    if capture(name).map(|p| looks_interactive_dialog(&p)).unwrap_or(false) {
+        bail!("send aborted: '{name}' is at a prompt/dialog");
+    }
     send_enter(name)?;
 
     // if nothing moved at all, the Enter was likely lost — retry once (a 2nd Enter
@@ -301,6 +309,10 @@ mod tests {
         assert!(looks_interactive_dialog("Is this a directory you created or one you trust?"));
         assert!(looks_interactive_dialog("Overwrite file? (y/n)"));
         assert!(looks_interactive_dialog("❯ 1. Accept  2. Reject"));
+        // case-insensitive + broadened cues (audit round 2)
+        assert!(looks_interactive_dialog("Continue? [Y/n]"));
+        assert!(looks_interactive_dialog("Proceed (Yes/No)"));
+        assert!(looks_interactive_dialog("Press ENTER to continue"));
         // normal agent output must be relayable
         assert!(!looks_interactive_dialog("Running tests... 42 passed"));
         assert!(!looks_interactive_dialog("I'll refactor the auth module now."));

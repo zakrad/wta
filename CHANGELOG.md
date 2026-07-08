@@ -4,6 +4,24 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.19] — 2026-07-06
+
+### Fixed (second multi-agent audit, of the v0.1.16–0.1.18 code)
+- **`~/.claude.json` can't be corrupted by concurrent writers.** The trust pre-seed
+  wrote a fixed `~/.claude.json.wta-tmp`; two concurrent wta processes could share
+  that inode and rename a half-written config over your real one. Now a
+  per-process temp file, cleaned up if the rename fails.
+- **The peer-relay dialog guard no longer fails open.** It's now case-insensitive
+  and broader (`[Y/n]`, `(yes/no)`, "press enter", numbered menus), and `send_text`
+  re-checks the pane right before pressing Enter — so a relayed/quick-send message
+  can never silently answer a permission/trust prompt.
+- **Injected context files + the fleet digest can't be committed by the agent.**
+  They're added to each worktree's git exclude, so the agent's own `git add -A`
+  never stages them — closing a leak the push-time unstage couldn't (an agent that
+  self-commits mid-run). Also fixes the diff/`ls` count inflation.
+- **wta's ephemeral files** (`board.md`, `run-log.md`) get a `.wta/.gitignore` so
+  they don't clutter `git status`.
+
 ## [0.1.18] — 2026-07-06
 
 ### Added — cross-agent awareness (agents isolated, but not blind)
@@ -219,6 +237,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.19]: https://github.com/zakrad/wta/releases/tag/v0.1.19
 [0.1.18]: https://github.com/zakrad/wta/releases/tag/v0.1.18
 [0.1.17]: https://github.com/zakrad/wta/releases/tag/v0.1.17
 [0.1.16]: https://github.com/zakrad/wta/releases/tag/v0.1.16
