@@ -331,22 +331,20 @@ agent would hit two prompts. wta handles them like this:
   (and the dashboard dismisses the live dialog as a backstop). On by default;
   disable with `WTA_AUTO_TRUST=0`. It only writes for the `claude` CLI, never
   clobbers an unparseable config, and keeps the file `0600`.
-- **Per-tool permission prompts** ("Do you want to allow Bash/Edit…") — these come
-  from your repo's `.claude/settings.local.json`, which is untracked so a worktree
-  doesn't get it. Two ways to stop the re-prompting, both **opt-in** (they let
-  agents run tools unprompted — a real grant):
-  - **`wta new <task> --yolo`** (or `WTA_SKIP_PERMISSIONS=1` as a default for all
-    agents) — run with **no** permission prompts, i.e. `claude
-    --dangerously-skip-permissions`. Fully unattended; the worktree is the only
-    file blast radius, but the agent can still run any command on your machine —
-    use it when you trust the task. Also on `wta fanout --yolo`.
-  - `WTA_COPY_PERMISSIONS=1` — softer: copies `.claude/settings.local.json` into
-    each worktree (kept out of pushes) so agents reuse the grants you already
-    approved, and still prompt for anything new.
-  - `WTA_AGENT_CMD="claude --permission-mode acceptEdits"` — auto-accept file
-    edits only (Bash still asks).
-  - Or promote stable rules into the **tracked** `.claude/settings.json`, which
-    every worktree inherits via `git checkout` with no wta config at all.
+- **Per-tool permission prompts** ("Do you want to allow Bash/Edit…") — **by
+  default wta runs claude with `--dangerously-skip-permissions`**, so agents run
+  fully unattended with no prompts. The worktree isolates *files*, but the agent
+  can still run any command on your machine — this is a deliberate "trust the
+  task" default. To dial it back:
+  - **`wta new <task> --safe`** — keep prompts ON for that one agent. (`--yolo`
+    forces the skip explicitly; it's the default anyway.)
+  - **`WTA_SKIP_PERMISSIONS=0`** — turn the default off globally (put it in your
+    shell profile).
+  - With prompts on, avoid re-approving every call: `WTA_COPY_PERMISSIONS=1`
+    copies your repo's `.claude/settings.local.json` grants into each worktree, or
+    `WTA_AGENT_CMD="claude --permission-mode acceptEdits"` auto-accepts edits
+    (Bash still asks), or promote stable rules into the **tracked**
+    `.claude/settings.json` (worktrees inherit it via `git checkout`).
 
 ### What's Claude Code-specific
 
@@ -379,7 +377,7 @@ The defaults also lean Claude — `WTA_AGENT_CMD=claude`,
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree (and kept out of pushes) |
 | `WTA_AUTO_TRUST` | `1` | pre-accept + dismiss Claude's folder-trust prompt (`0` off) — **Claude only** |
 | `WTA_COPY_PERMISSIONS` | `0` | copy `.claude/settings.local.json` (tool grants) into each worktree — **Claude only, opt-in** |
-| `WTA_SKIP_PERMISSIONS` | `0` | run agents with `--dangerously-skip-permissions` (same as `--yolo`) — **Claude only, opt-in** |
+| `WTA_SKIP_PERMISSIONS` | `1` | agents run with `--dangerously-skip-permissions` (no prompts). `0` or `wta new --safe` re-enables prompts — **Claude only** |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` |
 | `WTA_OPEN_INLINE` | auto | force editor inline (`1`) or detached (`0`) |
 | `WTA_NOTIFY_SOUND` | `1` | notification sound (`0` = silent, or a sound-file path) |

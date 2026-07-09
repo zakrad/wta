@@ -4,6 +4,15 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.20] — 2026-07-06
+
+### Changed
+- **Agents now skip permission prompts by default.** `wta new`/`fanout` run claude
+  with `--dangerously-skip-permissions` out of the box, so agents work fully
+  unattended (the worktree isolates files; the agent can still run any command —
+  a deliberate "trust the task" default). Opt out per-agent with **`wta new --safe`**
+  or globally with **`WTA_SKIP_PERMISSIONS=0`**.
+
 ## [0.1.19] — 2026-07-06
 
 ### Fixed (second multi-agent audit, of the v0.1.16–0.1.18 code)
@@ -237,6 +246,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.20]: https://github.com/zakrad/wta/releases/tag/v0.1.20
 [0.1.19]: https://github.com/zakrad/wta/releases/tag/v0.1.19
 [0.1.18]: https://github.com/zakrad/wta/releases/tag/v0.1.18
 [0.1.17]: https://github.com/zakrad/wta/releases/tag/v0.1.17

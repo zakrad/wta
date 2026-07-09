@@ -20,9 +20,12 @@ fn main() -> anyhow::Result<()> {
             task,
             base,
             yolo,
+            safe,
             agent_args,
         } => {
-            if yolo {
+            if safe {
+                std::env::set_var("WTA_SKIP_PERMISSIONS", "0");
+            } else if yolo {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
             match base {
@@ -41,9 +44,12 @@ fn main() -> anyhow::Result<()> {
             count,
             base,
             yolo,
+            safe,
             agent_args,
         } => {
-            if yolo {
+            if safe {
+                std::env::set_var("WTA_SKIP_PERMISSIONS", "0");
+            } else if yolo {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
             worktree::fanout(&name, count, base.as_deref(), &agent_args)?
