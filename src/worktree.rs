@@ -879,11 +879,6 @@ pub fn rm(task: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// The `.agents` directory of the current repo (where wta keeps its worktrees).
-pub fn agents_dir() -> Result<PathBuf> {
-    Ok(worktrees_dir(&repo_root()?))
-}
-
 /// Commit any uncommitted work in the agent's worktree, push its branch, and
 /// (if `make_pr`) open a PR via `gh`. Returns a short human summary.
 pub fn push(task: &str, make_pr: bool) -> Result<String> {
