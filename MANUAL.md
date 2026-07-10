@@ -11,7 +11,7 @@ how to use each feature on its own.
 - [Verification gate](#verification-gate) · `.wta/verify.sh`
 - [Cross-agent review](#cross-agent-review) · `review`
 - [Open in your editor](#open-in-your-editor) · `open`, nvim/GUI
-- [Notifications](#notifications) · sound, review glyph, hooks
+- [Notifications](#notifications) · banner, sound, review glyph, hooks
 - [Agent lifecycle](#agent-lifecycle) · stop/resume/kill, merged
 - [Per-repo setup](#per-repo-setup) · `init`, setup/teardown, isolation slots, run-log
 - [Cross-agent awareness](#cross-agent-awareness) · `send`, `board`, fleet digest
@@ -182,15 +182,22 @@ Force either behavior with `WTA_OPEN_INLINE=1` (inline) or `0` (detached).
 
 ## Notifications
 
-When an agent **you're not looking at** finishes or needs input, wta:
+When an agent finishes or needs input, wta:
 
+- posts a **desktop notification** (`osascript` on macOS, `notify-send` on Linux)
+  naming which agent — title `wta · <repo>`, body `<task> finished` /
+  `<task> needs input` — so you know what happened without opening the dashboard,
 - plays a **system sound** (`afplay` on macOS, `paplay` on Linux) — because the
   terminal bell is muted in many terminals,
-- marks the agent `◆` (review / unseen),
+- marks the agent `◆` (review / unseen) **if it's off-screen**,
 - shows a **"N need you"** count in the menu bar.
 
-Selecting/opening the agent clears it. Silence with `WTA_NOTIFY_SOUND=0`, or set it
-to a sound-file path for your own alert.
+The banner + sound fire for **every** agent — including the one currently selected —
+so a dashboard left open in one terminal tab still alerts you while you work in
+another. The `◆` review marker is the only part limited to off-screen agents;
+selecting/opening the agent clears it. Silence the banner with
+`WTA_NOTIFY_DESKTOP=0` and the sound with `WTA_NOTIFY_SOUND=0` (or set the latter to
+a sound-file path for your own alert).
 
 **Finish/ready** detection is pane-based and works for **any agent**. **"Needs
 input" (`▲`)** requires the Claude Code hooks (**Claude only**):
@@ -388,6 +395,7 @@ The defaults also lean Claude — `WTA_AGENT_CMD=claude`,
 | `WTA_SKIP_PERMISSIONS` | `1` | agents run with `--dangerously-skip-permissions` (no prompts). `0` or `wta new --safe` re-enables prompts — **Claude only** |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` |
 | `WTA_OPEN_INLINE` | auto | force editor inline (`1`) or detached (`0`) |
+| `WTA_NOTIFY_DESKTOP` | `1` | desktop notification banner naming the task + repo (`0` = off) |
 | `WTA_NOTIFY_SOUND` | `1` | notification sound (`0` = silent, or a sound-file path) |
 | `WTA_TMUX_SOCKET` | `wta` | tmux server socket (`default` = your own tmux; same as `--server`) |
 | `WTA_TELEGRAM_TOKEN` / `WTA_TELEGRAM_CHAT` | — | Telegram bridge bot token + chat id |

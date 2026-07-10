@@ -295,6 +295,42 @@ fn play_notify_sound() {
         .spawn();
 }
 
+/// Post a desktop notification banner naming *which* agent needs you (task + repo
+/// + why), so you see what happened without switching to the dashboard — like the
+/// GUI tools. macOS uses `osascript display notification`; other platforms use
+/// `notify-send`. Strings are passed as `argv`, so no shell/AppleScript escaping is
+/// needed. Opt out with `WTA_NOTIFY_DESKTOP=0`. Fire-and-forget, never blocks.
+fn notify_desktop(title: &str, body: &str) {
+    if std::env::var("WTA_NOTIFY_DESKTOP").unwrap_or_default() == "0" {
+        return;
+    }
+    let mut cmd;
+    #[cfg(target_os = "macos")]
+    {
+        cmd = std::process::Command::new("osascript");
+        cmd.args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display notification (item 1 of argv) with title (item 2 of argv)",
+            "-e",
+            "end run",
+            "--",
+        ]);
+        cmd.arg(body).arg(title);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        cmd = std::process::Command::new("notify-send");
+        cmd.arg(title).arg(body);
+    }
+    let _ = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Suspend the TUI, run a terminal editor (nvim/…) in the worktree, resume on quit.
 fn open_inline(term: &mut Term, cmd: &str, path: &Path) {
     disable_raw_mode().ok();
@@ -1375,11 +1411,14 @@ fn refresh(app: &mut App) {
             if sel_now.as_deref() != Some(r.session.as_str()) {
                 app.attention.insert(r.session.clone());
             }
-            // The chime fires on every finish/needs-input edge — even the selected
-            // agent. In a multi-tab setup the agent you walked away from is usually
-            // the selected one, and suppressing its sound is exactly wrong. The edge
-            // (prev==Running → now Ready) fires once per finish, so this can't nag.
+            // The chime + banner fire on every finish/needs-input edge — even the
+            // selected agent. In a multi-tab setup the agent you walked away from is
+            // usually the selected one, and suppressing its alert is exactly wrong.
+            // The edge (prev==Running → now Ready) fires once per finish, so this
+            // can't nag.
             ring = true;
+            let what = if became_needs { "needs input" } else { "finished" };
+            notify_desktop(&format!("wta · {}", r.repo_name), &format!("{} {}", r.task, what));
         }
         let has_verify = r.root.join(".wta/verify.sh").exists();
         if finished && has_verify && !matches!(app.checks.get(&r.session), Some(Check::Running { .. })) {

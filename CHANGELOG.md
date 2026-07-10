@@ -4,6 +4,16 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.23] — 2026-07-10
+
+### Added
+- **Desktop notification banners.** When an agent finishes or needs input, wta now
+  posts a real OS notification naming *which* agent — title `wta · <repo>`, body
+  `<task> finished` / `<task> needs input` — so you know what happened without
+  switching to the dashboard, like the GUI tools. macOS uses `osascript`; Linux uses
+  `notify-send`. Fires alongside the existing sound. Opt out with
+  `WTA_NOTIFY_DESKTOP=0`.
+
 ## [0.1.22] — 2026-07-10
 
 ### Fixed

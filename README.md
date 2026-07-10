@@ -58,12 +58,14 @@ and feature, with examples.
   never merge on "the agent said it's done." Runs async; never blocks the UI.
 - **Live status, zero setup** — running / ready / needs-input / exited detected
   automatically; optional Claude Code hooks (`wta install-hooks`) add "needs input".
-- **Notifies you — with sound** — when an agent finishes (or needs input, with
-  Claude's hooks), wta plays a system sound (not just the terminal bell, which many
-  terminals mute) — even for the agent you're watching, so leaving the dashboard
-  open in one tab while you work in another still chimes. Off-screen agents are also
-  marked for review (`◆`) with a "N need you" count in the menu bar; viewing one
-  clears it. Set `WTA_NOTIFY_SOUND=0` to silence, or point it at your own sound file.
+- **Notifies you — banner + sound** — when an agent finishes (or needs input, with
+  Claude's hooks), wta posts a desktop notification naming *which* agent (`wta ·
+  <repo>` → `<task> finished`) **and** plays a system sound (not just the terminal
+  bell, which many terminals mute) — even for the agent you're watching, so leaving
+  the dashboard open in one tab while you work in another still alerts you.
+  Off-screen agents are also marked for review (`◆`) with a "N need you" count in the
+  menu bar; viewing one clears it. `WTA_NOTIFY_DESKTOP=0` silences the banner,
+  `WTA_NOTIFY_SOUND=0` the sound (or point the latter at your own sound file).
 - **Cross-agent awareness** — isolated but not blind: each new agent is seeded with
   a snapshot of the others (and the files they're touching), agents can message each
   other (`wta send`, refuses to type into a dialog), and a shared `wta board` holds
@@ -124,7 +126,8 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` (GUI editors like `code` open detached; terminal editors like `nvim` open inline and return to the dash on quit) |
 | `WTA_REVIEW_AGENT_CMD` | `$WTA_AGENT_CMD` | agent CLI used by `wta review` (point it at a cheaper/different model) |
-| `WTA_NOTIFY_SOUND` | `1` | system sound on off-screen finish/needs-input (`0` = silent, or a path to your own sound file) |
+| `WTA_NOTIFY_DESKTOP` | `1` | desktop notification banner on finish/needs-input, naming the task + repo (`0` = off; macOS `osascript` / Linux `notify-send`) |
+| `WTA_NOTIFY_SOUND` | `1` | system sound on finish/needs-input (`0` = silent, or a path to your own sound file) |
 
 More vars (`WTA_AGENT_RESUME_ARGS`, `WTA_OPEN_INLINE`, `WTA_TMUX_SOCKET`, Telegram)
 and the full per-feature guide are in **[MANUAL.md](MANUAL.md)**.
