@@ -12,7 +12,7 @@ pub struct Cli {
     pub server: Option<String>,
 
     #[command(subcommand)]
-    pub cmd: Command,
+    pub cmd: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -108,8 +108,12 @@ pub enum Command {
         #[arg(long)]
         global: bool,
     },
-    /// Live full-screen dashboard of all agents
-    Dash,
+    /// Live dashboard — all repos by default (a tree), or `--here` for the current repo
+    Dash {
+        /// only the current repo's agents (default is a global tree of every repo)
+        #[arg(long)]
+        here: bool,
+    },
     /// Notify a Telegram chat when an agent needs input / finishes
     /// (set WTA_TELEGRAM_TOKEN + WTA_TELEGRAM_CHAT)
     #[cfg(feature = "telegram")]

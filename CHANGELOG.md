@@ -4,6 +4,15 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.21] — 2026-07-06
+
+### Added
+- **Global dashboard.** Bare `wta` (and `wta dash`) now opens one dashboard showing
+  **every repo's agents** in a selectable tree grouped by repo — start an agent in
+  any repo and it appears under that repo automatically, no relaunch. Every action
+  (attach/kill/push/verify/…) runs in the selected agent's own repo; `n` prompts for
+  which repo to create in. `wta dash --here` keeps the old current-repo-only view.
+
 ## [0.1.20] — 2026-07-06
 
 ### Changed
@@ -246,6 +255,7 @@ agents in parallel — each in its own **git worktree + persistent tmux session*
 on a dedicated tmux server. Attach/detach (`Ctrl-q`), a Preview/Diff view, live
 status, `push`/PR, and `brew`/`curl`/`cargo` install.
 
+[0.1.21]: https://github.com/zakrad/wta/releases/tag/v0.1.21
 [0.1.20]: https://github.com/zakrad/wta/releases/tag/v0.1.20
 [0.1.19]: https://github.com/zakrad/wta/releases/tag/v0.1.19
 [0.1.18]: https://github.com/zakrad/wta/releases/tag/v0.1.18

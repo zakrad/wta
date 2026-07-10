@@ -735,9 +735,42 @@ fn diffstat(path: &Path, base: &str) -> String {
 }
 
 pub fn list_managed() -> Result<Vec<Worktree>> {
-    let root = repo_root()?;
-    let base_dir = worktrees_dir(&root);
-    let out = run_git(&["worktree", "list", "--porcelain"], Some(&root))?;
+    list_managed_in(&repo_root()?)
+}
+
+/// Short display name for a repo (its root dir name).
+pub fn repo_name(root: &Path) -> String {
+    root.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string())
+}
+
+/// All repos wta currently knows agents in — derived from the global state
+/// (`~/.wta/state/<repo>/`), each agent's `cwd` giving `<root>/<subdir>/<task>`.
+/// Returns `(repo_id, repo_root)`, sorted by path. Used by the global dashboard.
+pub fn discover_repos() -> Vec<(String, PathBuf)> {
+    let mut map: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    for st in status::read_all_states().unwrap_or_default() {
+        if st.cwd.is_empty() {
+            continue;
+        }
+        let wt = PathBuf::from(&st.cwd);
+        if let Some(root) = wt.parent().and_then(|p| p.parent()) {
+            if root.exists() {
+                map.entry(st.repo.clone()).or_insert_with(|| root.to_path_buf());
+            }
+        }
+    }
+    let mut v: Vec<(String, PathBuf)> = map.into_iter().collect();
+    v.sort_by(|a, b| a.1.cmp(&b.1));
+    v
+}
+
+/// `list_managed`, but for an explicit repo root (so the global dash can scan
+/// repos other than the current directory).
+pub fn list_managed_in(root: &Path) -> Result<Vec<Worktree>> {
+    let base_dir = worktrees_dir(root);
+    let out = run_git(&["worktree", "list", "--porcelain"], Some(root))?;
     let mut result = Vec::new();
     let mut cur_path: Option<PathBuf> = None;
     let mut cur_branch = String::new();

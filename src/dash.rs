@@ -100,7 +100,15 @@ enum Modal {
     Matrix(Vec<Line<'static>>),
     QuickSend {
         task: String,
+        session: String,
         text: String,
+    },
+    /// Pick which repo a new agent goes in (global dash). Enter → NewTask in `root`.
+    RepoPick {
+        repos: Vec<(String, PathBuf)>, // (display name, root)
+        filter: String,
+        sel: usize,
+        prompt: bool, // carry N (new-with-prompt) through the picker
     },
     Help,
 }
@@ -129,6 +137,9 @@ fn branch_matches<'a>(branches: &'a [String], filter: &str) -> Vec<&'a String> {
 
 struct Row {
     task: String,
+    repo: String,       // repo id (namespaces the session + state)
+    root: PathBuf,      // repo root (for git ops in the global dash)
+    repo_name: String,  // display name (root dir), for the tree header
     branch: String,
     status: Status,
     added: u32,
@@ -152,9 +163,11 @@ enum Check {
 }
 
 struct App {
-    repo: String, // repo id namespacing sessions + state for this dashboard's repo
-    root: PathBuf, // repo root (for locating .wta/verify.sh)
-    checks: HashMap<String, Check>, // task -> verification result/run
+    global: bool, // true = show every repo's agents as a tree; false = current repo only
+    repo: String, // launch repo id (current-repo mode + the "current" repo default)
+    root: PathBuf, // launch repo root
+    op_root: PathBuf, // repo root for the pending modal action (kill/push/resume/new)
+    checks: HashMap<String, Check>, // session -> verification result/run
     rows: Vec<Row>,
     sel: usize,
     tab: Tab,
@@ -181,8 +194,10 @@ struct App {
 impl App {
     fn new() -> Self {
         App {
+            global: false,
             repo: worktree::repo_id().unwrap_or_default(),
             root: worktree::repo_root().unwrap_or_default(),
+            op_root: PathBuf::new(),
             checks: HashMap::new(),
             rows: Vec::new(),
             sel: 0,
@@ -232,12 +247,12 @@ impl Drop for App {
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
-pub fn run() -> Result<()> {
+pub fn run(here: bool) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
     let mut term = Term::new(CrosstermBackend::new(stdout))?;
-    let res = event_loop(&mut term);
+    let res = event_loop(&mut term, !here);
     disable_raw_mode().ok();
     execute!(
         term.backend_mut(),
@@ -298,6 +313,22 @@ fn open_inline(term: &mut Term, cmd: &str, path: &Path) {
     let _ = term.clear();
 }
 
+/// Run `f` with the process cwd set to `root`, restoring it after — lets the
+/// cwd-based worktree ops (rm/push/resume/new) act on any repo from the global
+/// dash. Safe because the dashboard is single-threaded.
+fn in_repo<T>(root: &Path, f: impl FnOnce() -> T) -> T {
+    let prev = std::env::current_dir().ok();
+    if root.as_os_str().is_empty() {
+        return f();
+    }
+    let _ = std::env::set_current_dir(root);
+    let r = f();
+    if let Some(p) = prev {
+        let _ = std::env::set_current_dir(p);
+    }
+    r
+}
+
 /// Suspend the TUI, attach to the tmux session inline, resume on detach.
 fn attach_inline(term: &mut Term, session: &str) {
     disable_raw_mode().ok();
@@ -318,8 +349,9 @@ fn attach_inline(term: &mut Term, session: &str) {
     let _ = term.clear();
 }
 
-fn event_loop(term: &mut Term) -> Result<()> {
+fn event_loop(term: &mut Term, global: bool) -> Result<()> {
     let mut app = App::new();
+    app.global = global;
     refresh(&mut app);
     load_detail(&mut app);
     let mut last_tick = Instant::now();
@@ -385,7 +417,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                         };
                     } else {
                         app.modal = Modal::None;
-                        if let Err(e) = worktree::new(&task, &[]) {
+                        let root = app.op_root.clone();
+                        if let Err(e) = in_repo(&root, || worktree::new(&task, &[])) {
                             app.set_err(e);
                         }
                         refresh(app);
@@ -413,7 +446,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                     } else {
                         vec![prompt]
                     };
-                    if let Err(e) = worktree::new(&task, &args) {
+                    let root = app.op_root.clone();
+                    if let Err(e) = in_repo(&root, || worktree::new(&task, &args)) {
                         app.set_err(e);
                     }
                     refresh(app);
@@ -434,7 +468,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 KeyCode::Char('y') => {
                     let task = task.clone();
                     app.modal = Modal::None;
-                    match worktree::rm(&task, false) {
+                    let root = app.op_root.clone();
+                    match in_repo(&root, || worktree::rm(&task, false)) {
                         Ok(_) => {
                             refresh(app);
                             load_detail(app);
@@ -463,7 +498,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 KeyCode::Char('y') => {
                     let task = task.clone();
                     app.modal = Modal::None;
-                    if let Err(e) = worktree::rm(&task, true) {
+                    let root = app.op_root.clone();
+                    if let Err(e) = in_repo(&root, || worktree::rm(&task, true)) {
                         app.set_err(e);
                     }
                     refresh(app);
@@ -486,7 +522,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                         .and_then(|r| r.path.clone())
                     {
                         Some(p) => {
-                            if let Err(e) = worktree::resume_at(&task, &p) {
+                            let root = app.op_root.clone();
+                            if let Err(e) = in_repo(&root, || worktree::resume_at(&task, &p)) {
                                 app.set_err(e);
                             }
                         }
@@ -521,10 +558,47 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                     app.modal = Modal::None;
                     if let Some(base) = picked {
                         let task = sanitize_task(&base);
-                        if let Err(e) = worktree::new_with_base(&task, &[], &base) {
+                        let root = app.op_root.clone();
+                        if let Err(e) = in_repo(&root, || worktree::new_with_base(&task, &[], &base)) {
                             app.set_err(e);
                         }
                         refresh(app);
+                    }
+                }
+                KeyCode::Backspace => {
+                    filter.pop();
+                    *sel = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    filter.push(c);
+                    *sel = 0;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::RepoPick { repos, filter, sel, prompt } => {
+            let matches: Vec<(String, PathBuf)> = repos
+                .iter()
+                .filter(|(name, _)| filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase()))
+                .cloned()
+                .collect();
+            match key.code {
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Up => *sel = sel.saturating_sub(1),
+                KeyCode::Down => {
+                    if *sel + 1 < matches.len() {
+                        *sel += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let want_prompt = *prompt;
+                    let picked = matches.get(*sel).map(|(_, r)| r.clone());
+                    if let Some(root) = picked {
+                        app.op_root = root;
+                        app.modal = Modal::NewTask { name: String::new(), prompt: want_prompt };
+                    } else {
+                        app.modal = Modal::None;
                     }
                 }
                 KeyCode::Backspace => {
@@ -545,7 +619,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                     let task = task.clone();
                     app.modal = Modal::None;
                     app.set_info(format!("pushing {task}…"));
-                    match worktree::push(&task, true) {
+                    let root = app.op_root.clone();
+                    match in_repo(&root, || worktree::push(&task, true)) {
                         Ok(summary) => app.set_info(summary),
                         Err(e) => app.set_err(e),
                     }
@@ -557,14 +632,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
-        Modal::QuickSend { task, text } => {
+        Modal::QuickSend { task, session, text } => {
             match key.code {
                 KeyCode::Enter => {
                     let task = std::mem::take(task);
+                    let session = std::mem::take(session);
                     let text = std::mem::take(text);
                     app.modal = Modal::None;
                     if !text.trim().is_empty() {
-                        let session = tmux::session_name(&app.repo, &task);
                         if !tmux::has_session(&session) {
                             app.set_err(format!("'{task}' is no longer running"));
                         } else if !tmux::pane_is_idle(&session) {
@@ -664,27 +739,26 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             app.scroll = 0;
             load_detail(app);
         }
-        KeyCode::Enter | KeyCode::Char('o') => match app.selected() {
-            Some(r) if r.alive => app.attach = Some(r.session.clone()),
-            Some(r) if r.path.is_some() => app.modal = Modal::Resume(r.task.clone()),
-            Some(_) => app.set_err("no session and no worktree to resume"),
-            None => {}
-        },
-        KeyCode::Char('n') => {
-            app.modal = Modal::NewTask {
-                name: String::new(),
-                prompt: false,
+        KeyCode::Enter | KeyCode::Char('o') => {
+            if let Some(r) = app.selected() {
+                let (alive, session, task, root, has_path) =
+                    (r.alive, r.session.clone(), r.task.clone(), r.root.clone(), r.path.is_some());
+                if alive {
+                    app.attach = Some(session);
+                } else if has_path {
+                    app.op_root = root;
+                    app.modal = Modal::Resume(task);
+                } else {
+                    app.set_err("no session and no worktree to resume");
+                }
             }
         }
-        KeyCode::Char('N') => {
-            app.modal = Modal::NewTask {
-                name: String::new(),
-                prompt: true,
-            }
-        }
+        KeyCode::Char('n') => open_new(app, false),
+        KeyCode::Char('N') => open_new(app, true),
         KeyCode::Char('s') => {
-            if let Some(task) = app.selected().map(|r| r.task.clone()) {
-                if let Err(e) = worktree::stop(&task) {
+            if let Some(r) = app.selected() {
+                let (task, root) = (r.task.clone(), r.root.clone());
+                if let Err(e) = in_repo(&root, || worktree::stop(&task)) {
                     app.set_err(e);
                 }
                 refresh(app);
@@ -692,26 +766,36 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
         }
         KeyCode::Char('D') => {
-            if let Some(task) = app.selected().map(|r| r.task.clone()) {
+            if let Some((task, root)) = app.selected().map(|r| (r.task.clone(), r.root.clone())) {
+                app.op_root = root;
                 app.modal = Modal::Confirm(task);
             }
         }
         KeyCode::Char('p') => {
-            if let Some(task) = app.selected().map(|r| r.task.clone()) {
+            if let Some((task, root)) = app.selected().map(|r| (r.task.clone(), r.root.clone())) {
+                app.op_root = root;
                 app.modal = Modal::Push(task);
             }
         }
-        KeyCode::Char('b') => match worktree::list_branches() {
-            Ok(bs) if !bs.is_empty() => {
-                app.modal = Modal::BranchPick {
-                    branches: bs,
-                    filter: String::new(),
-                    sel: 0,
+        KeyCode::Char('b') => {
+            let root = app
+                .selected()
+                .map(|r| r.root.clone())
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| app.root.clone());
+            if root.as_os_str().is_empty() {
+                app.set_err("cd into a repo to base an agent on a branch");
+            } else {
+                app.op_root = root.clone();
+                match in_repo(&root, worktree::list_branches) {
+                    Ok(bs) if !bs.is_empty() => {
+                        app.modal = Modal::BranchPick { branches: bs, filter: String::new(), sel: 0 }
+                    }
+                    Ok(_) => app.set_err("no branches to base an agent on"),
+                    Err(e) => app.set_err(e),
                 }
             }
-            Ok(_) => app.set_err("no branches to base an agent on"),
-            Err(e) => app.set_err(e),
-        },
+        }
         KeyCode::Char('e') => match app.selected().and_then(|r| r.path.clone()) {
             None => app.set_err("no worktree to open"),
             Some(path) => match worktree::editor_cmd() {
@@ -747,23 +831,30 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             },
         },
         KeyCode::Char('v') => {
-            if let Some((task, path)) =
-                app.selected().and_then(|r| r.path.clone().map(|p| (r.task.clone(), p)))
-            {
-                spawn_check(app, &task, &path);
+            if let Some(r) = app.selected() {
+                if let Some(path) = r.path.clone() {
+                    let (session, root) = (r.session.clone(), r.root.clone());
+                    spawn_check(app, &session, &root, &path);
+                }
             }
         }
         KeyCode::Char('J') => reorder(app, 1),
         KeyCode::Char('K') => reorder(app, -1),
         KeyCode::Char('m') => {
-            let failing: HashSet<String> = app
-                .checks
-                .iter()
-                .filter_map(|(t, c)| matches!(c, Check::Done { code, .. } if *code != 0).then(|| t.clone()))
-                .collect();
-            match matrix_lines(&failing) {
-                Ok(lines) => app.modal = Modal::Matrix(lines),
-                Err(e) => app.set_err(e),
+            if let Some(r) = app.selected() {
+                let (root, repo) = (r.root.clone(), r.repo.clone());
+                // task names in THIS repo whose checks are failing
+                let failing: HashSet<String> = app
+                    .rows
+                    .iter()
+                    .filter(|x| x.repo == repo)
+                    .filter(|x| matches!(app.checks.get(&x.session), Some(Check::Done { code }) if *code != 0))
+                    .map(|x| x.task.clone())
+                    .collect();
+                match in_repo(&root, || matrix_lines(&failing)) {
+                    Ok(lines) => app.modal = Modal::Matrix(lines),
+                    Err(e) => app.set_err(e),
+                }
             }
         }
         // quick-send one line to the selected agent, gated so we never inject
@@ -773,7 +864,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             Some(r) if r.status == Status::Running => app.set_err("agent is working — wait for ● ready"),
             Some(r) if r.status == Status::NeedsInput => app.set_err("agent needs input — attach (↵) to answer"),
             Some(r) if r.status == Status::Ready => {
-                app.modal = Modal::QuickSend { task: r.task.clone(), text: String::new() }
+                app.modal = Modal::QuickSend { task: r.task.clone(), session: r.session.clone(), text: String::new() }
             }
             _ => {}
         },
@@ -862,17 +953,50 @@ fn reorder(app: &mut App, delta: isize) {
     if app.rows.is_empty() || j < 0 || j as usize >= app.rows.len() {
         return;
     }
-    let mut tasks: Vec<String> = app.rows.iter().map(|r| r.task.clone()).collect();
-    tasks.swap(i, j as usize);
+    let j = j as usize;
+    // only reorder within one repo group (rows are grouped by repo)
+    let repo = app.rows[i].repo.clone();
+    if app.rows[j].repo != repo {
+        return;
+    }
+    let (ti, tj) = (app.rows[i].task.clone(), app.rows[j].task.clone());
+    let mut tasks: Vec<String> = app.rows.iter().filter(|r| r.repo == repo).map(|r| r.task.clone()).collect();
+    if let (Some(pi), Some(pj)) = (tasks.iter().position(|t| *t == ti), tasks.iter().position(|t| *t == tj)) {
+        tasks.swap(pi, pj);
+    }
     let map: std::collections::HashMap<String, u32> =
         tasks.iter().enumerate().map(|(idx, t)| (t.clone(), idx as u32)).collect();
-    if let Err(e) = status::write_order(&app.repo, &map) {
+    if let Err(e) = status::write_order(&repo, &map) {
         app.set_err(e);
         return;
     }
-    // refresh() re-sorts by the new order and keeps the selection on the moved task.
     refresh(app);
     load_detail(app);
+}
+
+/// Open the "new agent" flow: a repo picker in the global dash (unless only one
+/// repo is known), else straight to the name modal for the current/selected repo.
+fn open_new(app: &mut App, prompt: bool) {
+    let repos = worktree::discover_repos();
+    if app.global && repos.len() > 1 {
+        let list: Vec<(String, PathBuf)> =
+            repos.iter().map(|(_, root)| (worktree::repo_name(root), root.clone())).collect();
+        app.modal = Modal::RepoPick { repos: list, filter: String::new(), sel: 0, prompt };
+    } else {
+        let root = app
+            .selected()
+            .map(|r| r.root.clone())
+            .filter(|p| !p.as_os_str().is_empty())
+            .or_else(|| (!app.root.as_os_str().is_empty()).then(|| app.root.clone()))
+            .or_else(|| repos.first().map(|(_, r)| r.clone()))
+            .unwrap_or_default();
+        if root.as_os_str().is_empty() {
+            app.set_err("cd into a repo to create an agent");
+            return;
+        }
+        app.op_root = root;
+        app.modal = Modal::NewTask { name: String::new(), prompt };
+    }
 }
 
 // ---------- git helpers ----------
@@ -1006,15 +1130,19 @@ fn read_tail(log: &Path) -> String {
 
 /// Spawn `.wta/verify.sh` for a task in its worktree, output to a temp log,
 /// tracked in `app.checks`. Non-blocking — polled by `poll_checks`.
-fn spawn_check(app: &mut App, task: &str, wt: &Path) {
-    let script = app.root.join(".wta/verify.sh");
+fn spawn_check(app: &mut App, session: &str, root: &Path, wt: &Path) {
+    let script = root.join(".wta/verify.sh");
     if !script.exists() {
         app.set_err("no .wta/verify.sh in this repo — add one that exits non-zero on failure");
         return;
     }
-    // keep the log in wta's own per-user state dir, not world-writable /tmp
-    let log = match status::repo_dir(&app.repo) {
-        Ok(d) => d.join(format!("verify-{}.log", sanitize_task(task))),
+    // keep the log in wta's own per-user dir, not world-writable /tmp
+    let log = match status::wta_dir() {
+        Ok(d) => {
+            let l = d.join("logs");
+            let _ = std::fs::create_dir_all(&l);
+            l.join(format!("verify-{session}.log"))
+        }
         Err(e) => return app.set_err(e),
     };
     let f = match std::fs::File::create(&log) {
@@ -1033,48 +1161,52 @@ fn spawn_check(app: &mut App, task: &str, wt: &Path) {
         .spawn()
     {
         Ok(child) => {
-            app.checks.insert(task.to_string(), Check::Running { child, log, since: Instant::now() });
-            app.set_info(format!("running checks for {task}…"));
+            app.checks.insert(session.to_string(), Check::Running { child, log, since: Instant::now() });
+            app.set_info("running checks…");
         }
         Err(e) => app.set_err(e),
     }
 }
 
 /// Poll running checks without blocking; transition to Done when they exit or
-/// time out (>5m).
+/// time out (>5m). Keyed by session (globally unique).
 fn poll_checks(app: &mut App) {
     let mut done: Vec<(String, i32, String)> = Vec::new();
-    for (task, chk) in app.checks.iter_mut() {
+    for (session, chk) in app.checks.iter_mut() {
         if let Check::Running { child, log, since } = chk {
             let timed_out = since.elapsed() > Duration::from_secs(300);
             match child.try_wait() {
-                Ok(Some(status)) => done.push((task.clone(), status.code().unwrap_or(-1), read_tail(log))),
+                Ok(Some(status)) => done.push((session.clone(), status.code().unwrap_or(-1), read_tail(log))),
                 Ok(None) if timed_out => {
                     let _ = child.kill();
                     let _ = child.wait(); // reap so it doesn't linger as a zombie
-                    done.push((task.clone(), -1, "verify timed out (>5m)".into()));
+                    done.push((session.clone(), -1, "verify timed out (>5m)".into()));
                 }
                 Ok(None) => {}
-                Err(_) => done.push((task.clone(), -1, "verify failed to run".into())),
+                Err(_) => done.push((session.clone(), -1, "verify failed to run".into())),
             }
         }
     }
-    for (task, code, tail) in done {
-        let is_sel = app.rows.get(app.sel).map(|r| r.task == task).unwrap_or(false);
+    for (session, code, tail) in done {
+        let is_sel = app.rows.get(app.sel).map(|r| r.session == session).unwrap_or(false);
         if is_sel {
             if code == 0 {
-                app.set_info(format!("✓ checks passed: {task}"));
+                app.set_info("✓ checks passed");
             } else {
                 let last = tail.lines().last().unwrap_or("").trim();
                 app.set_err(format!("✗ checks failed (exit {code}) — {last}"));
             }
         }
-        app.checks.insert(task, Check::Done { code });
+        app.checks.insert(session, Check::Done { code });
     }
 }
 
-fn refresh(app: &mut App) {
-    let states: HashMap<String, status::AgentState> = status::read_states(&app.repo)
+/// Build the rows for ONE repo (merging managed worktrees + state agents), keyed
+/// by the globally-unique session so the global dash's caches never collide across
+/// repos that reuse a task name.
+fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
+    let repo_name = worktree::repo_name(root);
+    let states: HashMap<String, status::AgentState> = status::read_states(repo)
         .unwrap_or_default()
         .into_iter()
         .map(|s| (s.task.clone(), s))
@@ -1083,114 +1215,89 @@ fn refresh(app: &mut App) {
     let mut order: Vec<String> = Vec::new();
     let mut paths: HashMap<String, PathBuf> = HashMap::new();
     let mut branches: HashMap<String, String> = HashMap::new();
-
-    if let Ok(managed) = worktree::list_managed() {
+    if let Ok(managed) = worktree::list_managed_in(root) {
         for w in managed {
             order.push(w.task.clone());
             branches.insert(w.task.clone(), w.branch);
             paths.insert(w.task, w.path);
         }
     }
-    // Fold in state-file agents (hooks/`wta new` write these), but ONLY ones that
-    // belong to this repo's `.agents` dir and whose worktree still exists — so
-    // stale/ghost entries and agents from other repos don't pollute the board.
-    let agents_dir = worktree::agents_dir().ok();
+    let subdir = std::env::var("WTA_WORKTREE_DIR").unwrap_or_else(|_| ".agents".into());
+    let agents_dir = root.join(subdir);
     for (task, st) in &states {
         if paths.contains_key(task) || st.cwd.is_empty() {
             continue;
         }
         let p = PathBuf::from(&st.cwd);
-        let in_repo = agents_dir.as_ref().map(|d| p.starts_with(d)).unwrap_or(false);
-        if in_repo && p.exists() {
+        if p.starts_with(&agents_dir) && p.exists() {
             order.push(task.clone());
             paths.insert(task.clone(), p);
         }
     }
-    // Sort by the persisted manual order (from J/K); unranked tasks fall to the
-    // end alphabetically. Dedupe first since the sort key isn't the task name.
     let mut seen = HashSet::new();
     order.retain(|t| seen.insert(t.clone()));
-    let rank = status::read_order(&app.repo);
+    let rank = status::read_order(repo);
     order.sort_by(|a, b| {
         let pa = rank.get(a).copied().unwrap_or(u32::MAX);
         let pb = rank.get(b).copied().unwrap_or(u32::MAX);
         pa.cmp(&pb).then_with(|| a.cmp(b))
     });
 
-    let prev_task = app.selected().map(|r| r.task.clone());
-    app.tick = app.tick.wrapping_add(1);
-    let full_sweep = app.tick % 5 == 0; // recompute all diffstats every ~5th tick (~3s)
-    let sel_task = prev_task.clone();
+    let full_sweep = app.tick % 5 == 0;
+    let sel_session = app.selected().map(|r| r.session.clone());
     let auto_trust = std::env::var("WTA_AUTO_TRUST").map(|v| v != "0").unwrap_or(true);
 
-    let mut rows = Vec::new();
     for task in order {
         let path = paths.get(&task).cloned();
         let branch = branches
             .get(&task)
             .cloned()
-            .or_else(|| {
-                path.as_deref()
-                    .and_then(|p| git_in(p, &["rev-parse", "--abbrev-ref", "HEAD"]))
-            })
+            .or_else(|| path.as_deref().and_then(|p| git_in(p, &["rev-parse", "--abbrev-ref", "HEAD"])))
             .unwrap_or_default();
+        let session = tmux::session_name(repo, &task);
+        let is_sel = sel_session.as_deref() == Some(session.as_str());
 
-        // Heavy git diffstat runs only for the selected row each tick + all rows on
-        // a slower cadence (or when new). Keyed by task, so J/K reorder is safe.
         let (added, removed) = match path.as_deref() {
             Some(p) => {
-                let is_sel = sel_task.as_deref() == Some(task.as_str());
-                if full_sweep || is_sel || !app.diffcache.contains_key(&task) {
+                if full_sweep || is_sel || !app.diffcache.contains_key(&session) {
                     let v = numstat(p);
-                    app.diffcache.insert(task.clone(), v);
+                    app.diffcache.insert(session.clone(), v);
                     v
                 } else {
-                    app.diffcache.get(&task).copied().unwrap_or((0, 0))
+                    app.diffcache.get(&session).copied().unwrap_or((0, 0))
                 }
             }
             None => (0, 0),
         };
-
-        // "merged" (branch landed in base) — cached on the same slow cadence as diffstat
         let merged = match path.as_deref() {
             Some(p) => {
-                let is_sel = sel_task.as_deref() == Some(task.as_str());
-                if full_sweep || is_sel || !app.mergedcache.contains_key(&task) {
+                if full_sweep || is_sel || !app.mergedcache.contains_key(&session) {
                     let v = is_merged(p, &branch);
-                    app.mergedcache.insert(task.clone(), v);
+                    app.mergedcache.insert(session.clone(), v);
                     v
                 } else {
-                    app.mergedcache.get(&task).copied().unwrap_or(false)
+                    app.mergedcache.get(&session).copied().unwrap_or(false)
                 }
             }
             None => false,
         };
 
-        let session = tmux::session_name(&app.repo, &task);
         let alive = tmux::has_session(&session);
-
         let status = if alive {
             let text = tmux::capture(&session).unwrap_or_default();
-            // Auto-dismiss Claude's per-folder trust prompt. Check the prompt FIRST
-            // (a cold start can take >10s to paint the dialog), one-shot, giving up
-            // only after a generous window. Opt out via WTA_AUTO_TRUST=0.
             if auto_trust && !app.trust_done.contains(&session) {
                 if is_trust_prompt(&text) {
-                    let _ = tmux::send_enter(&session); // accept the default (trust) option
-                    app.trust_done.insert(session.clone()); // one-shot
+                    let _ = tmux::send_enter(&session);
+                    app.trust_done.insert(session.clone());
                 } else {
                     let seen_at = *app.trust_seen.entry(session.clone()).or_insert_with(Instant::now);
                     if seen_at.elapsed() > Duration::from_secs(120) {
-                        app.trust_done.insert(session.clone()); // give up after 2 min
+                        app.trust_done.insert(session.clone());
                     }
                 }
             }
             let h = hash_str(&text);
-            let changed = app
-                .hashes
-                .insert(task.clone(), h)
-                .map(|old| old != h)
-                .unwrap_or(true);
+            let changed = app.hashes.insert(session.clone(), h).map(|old| old != h).unwrap_or(true);
             match states.get(&task).map(|s| s.status.as_str()) {
                 Some("needs_input") => Status::NeedsInput,
                 _ if changed => Status::Running,
@@ -1201,15 +1308,17 @@ fn refresh(app: &mut App) {
         } else {
             Status::Idle
         };
-        // a landed branch reads as "merged" once it's not actively working
         let status = if merged && matches!(status, Status::Ready | Status::Exited | Status::Idle) {
             Status::Merged
         } else {
             status
         };
 
-        rows.push(Row {
+        out.push(Row {
             task,
+            repo: repo.to_string(),
+            root: root.to_path_buf(),
+            repo_name: repo_name.clone(),
             branch,
             status,
             added,
@@ -1219,54 +1328,65 @@ fn refresh(app: &mut App) {
             path,
         });
     }
+}
 
+fn refresh(app: &mut App) {
+    let prev_sel = app.selected().map(|r| r.session.clone());
+    app.tick = app.tick.wrapping_add(1);
+
+    // targets: every repo with agents (global), or just the launch repo (--here)
+    let targets: Vec<(String, PathBuf)> = if app.global {
+        worktree::discover_repos()
+    } else if !app.repo.is_empty() {
+        vec![(app.repo.clone(), app.root.clone())]
+    } else {
+        Vec::new()
+    };
+
+    let mut rows = Vec::new();
+    for (repo, root) in &targets {
+        repo_rows(app, repo, root, &mut rows);
+    }
     app.rows = rows;
-    app.sel = prev_task
-        .and_then(|t| app.rows.iter().position(|r| r.task == t))
+    app.sel = prev_sel
+        .and_then(|s| app.rows.iter().position(|r| r.session == s))
         .unwrap_or(0)
         .min(app.rows.len().saturating_sub(1));
 
-    // bounded memory: drop entries for tasks/sessions that no longer exist
-    let current: HashSet<&String> = app.rows.iter().map(|r| &r.task).collect();
-    app.hashes.retain(|k, _| current.contains(k));
-    app.diffcache.retain(|k, _| current.contains(k));
-    app.mergedcache.retain(|k, _| current.contains(k));
+    // caches are keyed by session (globally unique)
     let live: HashSet<String> = app.rows.iter().map(|r| r.session.clone()).collect();
+    app.hashes.retain(|k, _| live.contains(k));
+    app.diffcache.retain(|k, _| live.contains(k));
+    app.mergedcache.retain(|k, _| live.contains(k));
     app.trust_seen.retain(|k, _| live.contains(k));
     app.trust_done.retain(|k| live.contains(k));
 
-    // Attention: flag "needs review" + ring the bell on the edges that matter — an
-    // agent finishing a run, or newly asking for input — unless it's the pane you're
-    // already looking at. Only on genuine transitions (prev must be known), so a
-    // fresh dashboard doesn't nag about pre-existing state.
     let mut ring = false;
-    let has_verify = app.root.join(".wta/verify.sh").exists();
-    let sel_now = app.rows.get(app.sel).map(|r| r.task.clone());
-    let mut to_check: Vec<(String, PathBuf)> = Vec::new();
+    let sel_now = app.rows.get(app.sel).map(|r| r.session.clone());
+    let mut to_check: Vec<(String, PathBuf, PathBuf)> = Vec::new(); // (session, root, worktree)
     let mut invalidate: Vec<String> = Vec::new();
     for r in &app.rows {
         let now = r.status;
-        let prev = app.prev_status.get(&r.task).copied();
+        let prev = app.prev_status.get(&r.session).copied();
         let became_needs = prev.is_some() && now == Status::NeedsInput && prev != Some(Status::NeedsInput);
         let finished = prev == Some(Status::Running) && matches!(now, Status::Ready | Status::Exited);
-        if (became_needs || finished) && sel_now.as_deref() != Some(r.task.as_str()) && app.attention.insert(r.task.clone()) {
+        if (became_needs || finished) && sel_now.as_deref() != Some(r.session.as_str()) && app.attention.insert(r.session.clone()) {
             ring = true;
         }
-        // auto-run checks when an agent finishes; drop stale results when it resumes
-        if finished && has_verify && !matches!(app.checks.get(&r.task), Some(Check::Running { .. })) {
+        let has_verify = r.root.join(".wta/verify.sh").exists();
+        if finished && has_verify && !matches!(app.checks.get(&r.session), Some(Check::Running { .. })) {
             if let Some(p) = &r.path {
-                to_check.push((r.task.clone(), p.clone()));
+                to_check.push((r.session.clone(), r.root.clone(), p.clone()));
             }
         }
-        if now == Status::Running && matches!(app.checks.get(&r.task), Some(Check::Done { .. })) {
-            invalidate.push(r.task.clone());
+        if now == Status::Running && matches!(app.checks.get(&r.session), Some(Check::Done { .. })) {
+            invalidate.push(r.session.clone());
         }
     }
-    app.prev_status = app.rows.iter().map(|r| (r.task.clone(), r.status)).collect();
-    app.attention.retain(|t| current.contains(t));
-    // drop checks for gone tasks — but kill+reap any still-running verify first
-    app.checks.retain(|t, c| {
-        if current.contains(t) {
+    app.prev_status = app.rows.iter().map(|r| (r.session.clone(), r.status)).collect();
+    app.attention.retain(|s| live.contains(s));
+    app.checks.retain(|s, c| {
+        if live.contains(s) {
             return true;
         }
         if let Check::Running { child, .. } = c {
@@ -1275,11 +1395,11 @@ fn refresh(app: &mut App) {
         }
         false
     });
-    for t in invalidate {
-        app.checks.remove(&t);
+    for s in invalidate {
+        app.checks.remove(&s);
     }
-    for (task, path) in to_check {
-        spawn_check(app, &task, &path);
+    for (session, root, wt) in to_check {
+        spawn_check(app, &session, &root, &wt);
     }
     if ring {
         app.bell = true;
@@ -1308,8 +1428,8 @@ fn is_trust_prompt(text: &str) -> bool {
 
 fn load_detail(app: &mut App) {
     // viewing an agent clears its "needs review" flag
-    if let Some(t) = app.selected().map(|r| r.task.clone()) {
-        app.attention.remove(&t);
+    if let Some(s) = app.selected().map(|r| r.session.clone()) {
+        app.attention.remove(&s);
     }
     let (alive, session, path) = match app.selected() {
         Some(r) => (r.alive, r.session.clone(), r.path.clone()),
@@ -1381,7 +1501,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(HL))
-        .title(" Instances ")
+        .title(if app.global { " Agents · all repos " } else { " Instances " })
         .title_style(
             Style::default()
                 .bg(GREEN)
@@ -1390,22 +1510,38 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         );
     let inner_w = area.width.saturating_sub(2) as usize;
     let mut items: Vec<ListItem> = Vec::new();
+    let mut sel_visual: Option<usize> = None; // visual item index of the selected agent
+    let mut last_repo: Option<String> = None;
     for (i, r) in app.rows.iter().enumerate() {
+        // repo header before each group (global tree only)
+        if app.global && last_repo.as_deref() != Some(r.repo.as_str()) {
+            let n = app.rows.iter().filter(|x| x.repo == r.repo).count();
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!("▸ {} ", r.repo_name), Style::default().fg(GREEN_BRIGHT).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("({n})"), Style::default().fg(Color::DarkGray)),
+            ])));
+            last_repo = Some(r.repo.clone());
+        }
         // finished-but-unviewed agents get a bright review glyph; needs-input keeps ▲
-        let glyph = if app.attention.contains(&r.task) && r.status != Status::NeedsInput {
+        let glyph = if app.attention.contains(&r.session) && r.status != Status::NeedsInput {
             Span::styled("◆ ".to_string(), Style::default().fg(Color::LightYellow))
         } else {
             status_glyph(app, r.status)
         };
         // optional verification-check indicator, shown just left of the status glyph
-        let check: Option<Span> = app.checks.get(&r.task).map(|c| match c {
+        let check: Option<Span> = app.checks.get(&r.session).map(|c| match c {
             Check::Running { .. } => Span::styled("⟳ ".to_string(), Style::default().fg(Color::DarkGray)),
             Check::Done { code: 0, .. } => Span::styled("✓ ".to_string(), Style::default().fg(GREEN_BRIGHT)),
             Check::Done { .. } => Span::styled("✗ ".to_string(), Style::default().fg(RED)),
         });
         let extra = if check.is_some() { 2 } else { 0 };
-        // reserve cols for status glyph (+ check); truncate wide/long names cleanly
-        let head = truncate_cols(&format!(" {}. {}", i + 1, r.task), inner_w.saturating_sub(2 + extra));
+        // indent agents under the repo header in the global tree
+        let head_txt = if app.global {
+            format!("   {}", r.task)
+        } else {
+            format!(" {}. {}", i + 1, r.task)
+        };
+        let head = truncate_cols(&head_txt, inner_w.saturating_sub(2 + extra));
         let pad1 = inner_w.saturating_sub(head.width() + 2 + extra);
         let mut spans1 = vec![Span::raw(head), Span::raw(" ".repeat(pad1))];
         if let Some(c) = check {
@@ -1415,8 +1551,8 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         let line1 = Line::from(spans1);
 
         let counts_len = format!("+{},-{} ", r.added, r.removed).width();
-        // reserve room for the +/- counts first, then truncate the branch to fit
-        let bhead = truncate_cols(&format!("   Ꮧ-{}", r.branch), inner_w.saturating_sub(counts_len));
+        let indent = if app.global { "     Ꮧ-" } else { "   Ꮧ-" };
+        let bhead = truncate_cols(&format!("{indent}{}", r.branch), inner_w.saturating_sub(counts_len));
         let pad2 = inner_w.saturating_sub(bhead.width() + counts_len);
         let line2 = Line::from(vec![
             Span::styled(bhead, Style::default().fg(Color::DarkGray)),
@@ -1425,13 +1561,18 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(",", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("-{} ", r.removed), Style::default().fg(RED)),
         ]);
+        if i == app.sel {
+            sel_visual = Some(items.len());
+        }
         items.push(ListItem::new(vec![line1, line2, Line::from("")]));
     }
     if items.is_empty() {
-        items.push(ListItem::new(Line::styled(
-            "  no agents — press 'n'",
-            Style::default().fg(Color::DarkGray),
-        )));
+        let msg = if app.global {
+            "  no agents anywhere — press 'n'"
+        } else {
+            "  no agents — press 'n'"
+        };
+        items.push(ListItem::new(Line::styled(msg, Style::default().fg(Color::DarkGray))));
     }
     let list = List::new(items).block(block).highlight_style(
         Style::default()
@@ -1441,7 +1582,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
     );
     let mut st = ListState::default();
     if !app.rows.is_empty() {
-        st.select(Some(app.sel));
+        st.select(sel_visual.or(Some(0)));
     }
     f.render_stateful_widget(list, area, &mut st);
 }
@@ -1783,7 +1924,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
-        Modal::QuickSend { task, text } => {
+        Modal::QuickSend { task, text, .. } => {
             let area = centered(64, 6, f.area());
             f.render_widget(Clear, area);
             f.render_widget(
@@ -1795,6 +1936,42 @@ fn render_modal(f: &mut Frame, app: &App) {
                             .border_style(Style::default().fg(GREEN))
                             .title(format!(" send to '{task}' (Enter sends, Esc cancels) ")),
                     ),
+                area,
+            );
+        }
+        Modal::RepoPick { repos, filter, sel, .. } => {
+            let area = centered(58, 16, f.area());
+            f.render_widget(Clear, area);
+            let matches: Vec<&(String, PathBuf)> = repos
+                .iter()
+                .filter(|(name, _)| filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase()))
+                .collect();
+            let mut lines = vec![Line::from(vec![
+                Span::styled("repo: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{filter}▏")),
+            ])];
+            let h = area.height.saturating_sub(3) as usize;
+            if matches.is_empty() {
+                lines.push(Line::styled("  no matching repos", Style::default().fg(Color::DarkGray)));
+            } else {
+                let start = if *sel >= h { *sel + 1 - h } else { 0 };
+                for (off, (name, _)) in matches.iter().skip(start).take(h).enumerate() {
+                    let idx = start + off;
+                    let style = if idx == *sel {
+                        Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(GREEN_SOFT)
+                    };
+                    lines.push(Line::styled(format!(" {name}"), style));
+                }
+            }
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(HL))
+                        .title(" new agent — pick a repo (↑↓ Enter, Esc) "),
+                ),
                 area,
             );
         }
@@ -1903,6 +2080,9 @@ mod tests {
     fn row(task: &str, s: Status, alive: bool, a: u32, d: u32) -> Row {
         Row {
             task: task.into(),
+            repo: "t".into(),
+            root: PathBuf::from("/tmp"),
+            repo_name: "tmp".into(),
             branch: format!("agent/{task}"),
             status: s,
             added: a,
@@ -2198,27 +2378,49 @@ mod tests {
         app.repo = "t".into();
         app.rows = vec![row("x", Status::Ready, true, 0, 0)];
         app.sel = 0;
-        spawn_check(&mut app, "x", &dir);
-        assert!(matches!(app.checks.get("x"), Some(Check::Running { .. })), "check is running async");
+        let session = app.rows[0].session.clone(); // checks are keyed by session
+        spawn_check(&mut app, &session, &dir, &dir); // (session, root, worktree)
+        assert!(matches!(app.checks.get(&session), Some(Check::Running { .. })), "check is running async");
 
         // poll until it finishes (non-blocking) — should not hang the caller
         let mut done = false;
         for _ in 0..300 {
             poll_checks(&mut app);
-            if matches!(app.checks.get("x"), Some(Check::Done { .. })) {
+            if matches!(app.checks.get(&session), Some(Check::Done { .. })) {
                 done = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(done, "check completed");
-        match app.checks.get("x") {
+        match app.checks.get(&session) {
             Some(Check::Done { code }) => assert_eq!(*code, 3),
             _ => panic!("expected Done"),
         }
         // failure surfaced for the selected agent
         assert!(app.msg.as_ref().map(|(t, err, _)| *err && t.contains("failed")).unwrap_or(false));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn global_dash_groups_agents_by_repo() {
+        let mut app = App::new();
+        app.global = true;
+        let mut a = row("auth", Status::Ready, true, 1, 0);
+        a.repo = "r1".into();
+        a.repo_name = "alpha".into();
+        a.root = PathBuf::from("/tmp/alpha");
+        let mut b = row("payments", Status::Running, true, 2, 1);
+        b.repo = "r2".into();
+        b.repo_name = "beta".into();
+        b.root = PathBuf::from("/tmp/beta");
+        app.rows = vec![a, b];
+        app.sel = 1;
+        let screen = render_to_string(&mut app, 100, 22);
+        // both repo headers + both agents appear in the one tree
+        assert!(screen.contains("alpha"), "repo alpha header");
+        assert!(screen.contains("beta"), "repo beta header");
+        assert!(screen.contains("auth") && screen.contains("payments"), "agents shown");
     }
 
     #[test]

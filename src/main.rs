@@ -15,7 +15,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(server) = &cli.server {
         std::env::set_var("WTA_TMUX_SOCKET", server);
     }
-    match cli.cmd {
+    // bare `wta` opens the (global) dashboard
+    let cmd = cli.cmd.unwrap_or(Command::Dash { here: false });
+    match cmd {
         Command::New {
             task,
             base,
@@ -81,7 +83,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Status { state } => status::emit(&state)?,
         Command::InstallHooks { global } => status::install_hooks(global)?,
-        Command::Dash => dash::run()?,
+        Command::Dash { here } => dash::run(here)?,
         #[cfg(feature = "telegram")]
         Command::Bridge { test } => bridge::run(test)?,
     }

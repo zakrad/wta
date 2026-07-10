@@ -62,10 +62,18 @@ wta rm refactor-3 --force
 ## The dashboard
 
 ```sh
-wta dash
+wta               # global — a tree of every repo's agents (same as `wta dash`)
+wta dash --here   # only the current repo's agents
 ```
 
-Left: the **Instances** sidebar (index, task, branch, `+adds/-dels`, status).
+**Global by default:** bare `wta` opens one dashboard showing **every repo** you
+have agents in, grouped into a tree by repo and selectable. Start an agent in any
+repo (from its directory) and it appears under that repo automatically — you never
+relaunch per repo. Every action (attach, kill, push, verify…) runs in the selected
+agent's own repo. Pressing `n` asks which repo to create the new agent in.
+
+Left: the sidebar — in the global view, repo headers (`▸ name (N)`) with agents
+indented under them; each agent shows task, branch, `+adds/-dels`, status.
 Right: **Preview** (live, full-color capture of the agent's pane) and **Diff**
 (colorized diff vs the base branch, including untracked files) — `Tab` switches.
 
@@ -282,8 +290,8 @@ no task-claiming scheduler. If it must reach an agent mid-session, use the relay
 ## Multiple repos
 
 Sessions and state are namespaced per repo, so the **same task name in two repos
-never collides**. `wta dash` shows only the current repo's agents. Just `cd` to a
-repo and run wta there.
+never collides**. Bare `wta` (the global dashboard) shows every repo's agents in
+one tree; `wta dash --here` scopes to the current repo.
 
 ---
 

@@ -26,8 +26,12 @@ auto-trust-dismiss) are Claude Code-specific — see
 ```sh
 cd your-repo
 wta new fix-auth     # new worktree + branch + starts the agent in a tmux session
-wta dash             # the dashboard
+wta                  # the dashboard — a live tree of EVERY repo's agents
 ```
+
+Bare `wta` opens a **global dashboard**: one tree of every repo you've got agents
+in, grouped and selectable — start an agent in any repo and it appears under that
+repo automatically. Use `wta dash --here` for just the current repo.
 
 In `dash`: `j`/`k` move · `Enter` attach (type in the agent; `Ctrl-q` returns) ·
 `Tab` Preview/Diff · `i` send one line without attaching · `m` conflict matrix ·
@@ -80,7 +84,7 @@ wta attach | stop | resume | rm      attach · stop (keep worktree) · resume ·
 wta open <task>                      open the agent's worktree in your editor ($EDITOR / WTA_OPEN_CMD)
 wta push <task> [--pr]               commit + push the branch (--pr opens a PR via gh)
 wta install-hooks [--global]         wire Claude Code hooks for "needs input" status
-wta dash                             the live dashboard
+wta / wta dash [--here]              the live dashboard (all repos by default; --here = current repo)
 ```
 
 Dashboard keys: `n`/`N` new (with prompt) · `b` new from an existing branch ·
