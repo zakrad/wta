@@ -58,14 +58,16 @@ and feature, with examples.
   never merge on "the agent said it's done." Runs async; never blocks the UI.
 - **Live status, zero setup** — running / ready / needs-input / exited detected
   automatically; optional Claude Code hooks (`wta install-hooks`) add "needs input".
-- **Notifies you — banner + sound** — when an agent finishes (or needs input, with
-  Claude's hooks), wta posts a desktop notification naming *which* agent (`wta ·
-  <repo>` → `<task> finished`) **and** plays a system sound (not just the terminal
-  bell, which many terminals mute) — even for the agent you're watching, so leaving
-  the dashboard open in one tab while you work in another still alerts you.
-  Off-screen agents are also marked for review (`◆`) with a "N need you" count in the
-  menu bar; viewing one clears it. `WTA_NOTIFY_DESKTOP=0` silences the banner,
-  `WTA_NOTIFY_SOUND=0` the sound (or point the latter at your own sound file).
+- **Notifies you — banner + sound, from a hook** — install the Claude Code hooks
+  (`wta install-hooks --global`) and every time an agent finishes a turn or asks a
+  question you get a real desktop notification naming it (`wta · <repo>` → `<task>
+  finished — ready for you`) plus a sound — **even while you're attached inside the
+  agent or have the dashboard closed**, because it's fired by the agent's Stop hook,
+  not the dashboard. Prefers `terminal-notifier` (a system-wide banner on any screen;
+  `brew install terminal-notifier`), else a terminal-native escape, else
+  `osascript`/`notify-send`. Off-screen agents are also marked `◆` in the dashboard
+  with a "N need you" count. `WTA_NOTIFY_DESKTOP=0` silences the banner,
+  `WTA_NOTIFY_SOUND=0` the sound (or point the latter at your own file).
 - **Cross-agent awareness** — isolated but not blind: each new agent is seeded with
   a snapshot of the others (and the files they're touching), agents can message each
   other (`wta send`, refuses to type into a dialog), and a shared `wta board` holds
@@ -86,7 +88,7 @@ wta init                             scaffold .wta/ convention stubs (verify.sh,
 wta attach | stop | resume | rm      attach · stop (keep worktree) · resume · destroy
 wta open <task>                      open the agent's worktree in your editor ($EDITOR / WTA_OPEN_CMD)
 wta push <task> [--pr]               commit + push the branch (--pr opens a PR via gh)
-wta install-hooks [--global]         wire Claude Code hooks for "needs input" status
+wta install-hooks [--global]         wire Claude Code hooks for desktop notifications + "needs input" status
 wta / wta dash [--here]              the live dashboard (all repos by default; --here = current repo)
 ```
 

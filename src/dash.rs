@@ -1,3 +1,4 @@
+use crate::notify;
 use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -188,7 +189,6 @@ struct App {
     scrollback: Option<String>,           // Some => Preview scroll mode: full (colored) history snapshot
     prev_status: HashMap<String, Status>, // last-seen status per task, for transition detection
     attention: HashSet<String>,           // agents that finished / need input and haven't been viewed
-    bell: bool,                           // ring the terminal bell after this refresh
 }
 
 impl App {
@@ -219,7 +219,6 @@ impl App {
             scrollback: None,
             prev_status: HashMap::new(),
             attention: HashSet::new(),
-            bell: false,
         }
     }
     fn selected(&self) -> Option<&Row> {
@@ -265,70 +264,62 @@ pub fn run(here: bool) -> Result<()> {
 }
 
 /// Ring the terminal bell (BEL is non-printing, safe to inject over the alt screen).
-fn ring_bell() {
+/// `wta notify-test` — fire one notification per method, each labeled, straight to
+/// your real terminal, so you can tell which one your terminal actually shows.
+pub fn notify_test() {
     use std::io::Write;
-    let mut o = std::io::stdout();
-    let _ = o.write_all(b"\x07"); // terminal bell (audible or visual, per your terminal)
-    let _ = o.flush();
-    play_notify_sound(); // an actual, always-audible system sound
-}
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "Firing test notifications in this terminal…\n");
 
-/// Play a system notification sound so alerts are audible even when the terminal
-/// bell is set to visual/off. Opt out with `WTA_NOTIFY_SOUND=0`; point
-/// `WTA_NOTIFY_SOUND=/path/to/sound` at your own. Fire-and-forget, non-blocking.
-fn play_notify_sound() {
-    let cfg = std::env::var("WTA_NOTIFY_SOUND").unwrap_or_default();
-    if cfg == "0" {
-        return;
-    }
-    let custom = (!cfg.is_empty() && cfg != "1").then_some(cfg);
-    let (player, file) = if cfg!(target_os = "macos") {
-        ("afplay", custom.unwrap_or_else(|| "/System/Library/Sounds/Glass.aiff".into()))
+    let prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let term = std::env::var("TERM").unwrap_or_default();
+    let _ = writeln!(out, "  TERM_PROGRAM={prog:?}  TERM={term:?}");
+
+    // #0 terminal-notifier (preferred): own app identity, shows regardless of focus.
+    if notify::which("terminal-notifier") {
+        let _ = std::process::Command::new("terminal-notifier")
+            .args(["-title", "wta · terminal-notifier", "-message", "wta test #0 (preferred)"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let _ = writeln!(out, "  #0 terminal-notifier → fired (installed — this is what wta will use)");
     } else {
-        ("paplay", custom.unwrap_or_else(|| "/usr/share/sounds/freedesktop/stereo/complete.oga".into()))
-    };
-    let _ = std::process::Command::new(player)
-        .arg(file)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
-
-/// Post a desktop notification banner naming *which* agent needs you (task + repo
-/// + why), so you see what happened without switching to the dashboard — like the
-/// GUI tools. macOS uses `osascript display notification`; other platforms use
-/// `notify-send`. Strings are passed as `argv`, so no shell/AppleScript escaping is
-/// needed. Opt out with `WTA_NOTIFY_DESKTOP=0`. Fire-and-forget, never blocks.
-fn notify_desktop(title: &str, body: &str) {
-    if std::env::var("WTA_NOTIFY_DESKTOP").unwrap_or_default() == "0" {
-        return;
+        let _ = writeln!(out, "  #0 terminal-notifier → not installed (brew install terminal-notifier for the most reliable banner)");
     }
-    let mut cmd;
+
+    // 1) osascript / notify-send
     #[cfg(target_os = "macos")]
     {
-        cmd = std::process::Command::new("osascript");
-        cmd.args([
-            "-e",
-            "on run argv",
-            "-e",
-            "display notification (item 1 of argv) with title (item 2 of argv)",
-            "-e",
-            "end run",
-            "--",
-        ]);
-        cmd.arg(body).arg(title);
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "on run argv", "-e", "display notification (item 1 of argv) with title (item 2 of argv)", "-e", "end run", "--", "wta test #1", "wta · osascript"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let _ = writeln!(out, "  #1 osascript      → fired (dropped silently if Script Editor lacks permission)");
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        cmd = std::process::Command::new("notify-send");
-        cmd.arg(title).arg(body);
+
+    // 2) OSC 9 (iTerm2 / VS Code)
+    if notify::write_to_tty(b"\x1b]9;wta test #2 (OSC 9)\x07") {
+        let _ = writeln!(out, "  #2 OSC 9          → fired (iTerm2 / VS Code)");
     }
-    let _ = cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    // 3) OSC 777 (WezTerm)
+    if notify::write_to_tty(b"\x1b]777;notify;wta \xc2\xb7 OSC 777;wta test #3\x07") {
+        let _ = writeln!(out, "  #3 OSC 777        → fired (WezTerm)");
+    }
+    // 4) OSC 99 (kitty)
+    if notify::write_to_tty(b"\x1b]99;;wta test #4 (OSC 99 / kitty)\x1b\\") {
+        let _ = writeln!(out, "  #4 OSC 99         → fired (kitty)");
+    }
+
+    let _ = writeln!(out, "\nWhich number(s) popped up as a desktop notification? That's the one wta will use.");
+    let picked = if notify::which("terminal-notifier") {
+        "#0 terminal-notifier".to_string()
+    } else if notify::term_notify_escape("wta", "test").is_some() {
+        "a terminal-native escape (#2/#3/#4)".to_string()
+    } else {
+        "osascript (#1)".to_string()
+    };
+    let _ = writeln!(out, "(wta will use: {picked})");
 }
 
 /// Suspend the TUI, run a terminal editor (nvim/…) in the worktree, resume on quit.
@@ -400,10 +391,6 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
         }
         poll_checks(&mut app);
         term.draw(|f| ui(f, &mut app))?;
-        if app.bell {
-            ring_bell(); // an agent finished / needs input while off-screen
-            app.bell = false;
-        }
 
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
@@ -1333,7 +1320,11 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
                 }
             }
             let h = hash_str(&text);
-            let changed = app.hashes.insert(session.clone(), h).map(|old| old != h).unwrap_or(true);
+            // First sight (no prior hash) counts as *unchanged* → Ready, not Running.
+            // Otherwise every already-idle agent would read Running on the first
+            // refresh and Ready on the next — a phantom "finished" edge that chimed
+            // for the whole fleet every time you opened the dashboard.
+            let changed = app.hashes.insert(session.clone(), h).map(|old| old != h).unwrap_or(false);
             match states.get(&task).map(|s| s.status.as_str()) {
                 Some("needs_input") => Status::NeedsInput,
                 _ if changed => Status::Running,
@@ -1397,28 +1388,21 @@ fn refresh(app: &mut App) {
     app.trust_seen.retain(|k, _| live.contains(k));
     app.trust_done.retain(|k| live.contains(k));
 
-    let mut ring = false;
     let sel_now = app.rows.get(app.sel).map(|r| r.session.clone());
     let mut to_check: Vec<(String, PathBuf, PathBuf)> = Vec::new(); // (session, root, worktree)
     let mut invalidate: Vec<String> = Vec::new();
     for r in &app.rows {
         let now = r.status;
         let prev = app.prev_status.get(&r.session).copied();
+
         let became_needs = prev.is_some() && now == Status::NeedsInput && prev != Some(Status::NeedsInput);
         let finished = prev == Some(Status::Running) && matches!(now, Status::Ready | Status::Exited);
-        if became_needs || finished {
-            // The ◆ "review me" marker is only for agents you're NOT looking at.
-            if sel_now.as_deref() != Some(r.session.as_str()) {
-                app.attention.insert(r.session.clone());
-            }
-            // The chime + banner fire on every finish/needs-input edge — even the
-            // selected agent. In a multi-tab setup the agent you walked away from is
-            // usually the selected one, and suppressing its alert is exactly wrong.
-            // The edge (prev==Running → now Ready) fires once per finish, so this
-            // can't nag.
-            ring = true;
-            let what = if became_needs { "needs input" } else { "finished" };
-            notify_desktop(&format!("wta · {}", r.repo_name), &format!("{} {}", r.task, what));
+        // Visual review marker only — the audible chime + desktop banner are fired
+        // by the Claude Stop/Notification hooks (see status::emit), so they reach you
+        // even while you're attached inside the agent or have the dashboard closed.
+        // The ◆ is for agents you're NOT currently looking at.
+        if (became_needs || finished) && sel_now.as_deref() != Some(r.session.as_str()) {
+            app.attention.insert(r.session.clone());
         }
         let has_verify = r.root.join(".wta/verify.sh").exists();
         if finished && has_verify && !matches!(app.checks.get(&r.session), Some(Check::Running { .. })) {
@@ -1447,9 +1431,6 @@ fn refresh(app: &mut App) {
     }
     for (session, root, wt) in to_check {
         spawn_check(app, &session, &root, &wt);
-    }
-    if ring {
-        app.bell = true;
     }
 }
 

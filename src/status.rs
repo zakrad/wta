@@ -140,8 +140,38 @@ pub fn emit(state: &str) -> Result<()> {
     if !task.is_empty() && !repo.is_empty() {
         let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         record(&repo, &task, state, &cwd)?;
+        // Fire the desktop banner + sound straight from the hook, so an agent
+        // finishing (Stop → "waiting") or asking a question (Notification →
+        // "needs_input") alerts you regardless of the dashboard — even while you're
+        // attached inside it. Gated on WTA_TASK/WTA_REPO so a plain `claude` session
+        // that merely inherits the global hooks never notifies.
+        notify_for_state(state, &task);
     }
     Ok(())
+}
+
+/// Banner text for the hook-driven states we alert on. Returns `None` for states
+/// (like "running") that shouldn't notify.
+fn notify_for_state(state: &str, task: &str) {
+    let label = if task.is_empty() { "agent".to_string() } else { task.to_string() };
+    let title = match notify_repo_name() {
+        Some(r) => format!("wta · {r}"),
+        None => "wta".to_string(),
+    };
+    let body = match state {
+        "waiting" => format!("{label} finished — ready for you"),
+        "needs_input" => format!("{label} needs your input"),
+        _ => return,
+    };
+    crate::notify::alert(&title, &body);
+}
+
+/// Best-effort repo name for the notification title, derived from the worktree cwd
+/// (`<repo-root>/<worktree-dir>/<task>` → the repo-root basename).
+fn notify_repo_name() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let root = cwd.parent()?.parent()?;
+    root.file_name().map(|s| s.to_string_lossy().into_owned())
 }
 
 /// Read all agent states for one repo.

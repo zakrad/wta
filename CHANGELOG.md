@@ -7,23 +7,23 @@ All notable changes to **wta** are documented here. The format is based on
 ## [0.1.23] — 2026-07-10
 
 ### Added
-- **Desktop notification banners.** When an agent finishes or needs input, wta now
-  posts a real OS notification naming *which* agent — title `wta · <repo>`, body
-  `<task> finished` / `<task> needs input` — so you know what happened without
-  switching to the dashboard, like the GUI tools. macOS uses `osascript`; Linux uses
-  `notify-send`. Fires alongside the existing sound. Opt out with
-  `WTA_NOTIFY_DESKTOP=0`.
-
-## [0.1.22] — 2026-07-10
+- **Hook-driven desktop notifications (banner + sound).** Notifications are now
+  fired by the Claude Code **Stop / Notification hooks** (`wta install-hooks`),
+  independent of the dashboard: when an agent finishes a turn or asks a question you
+  get a real OS banner naming it — title `wta · <repo>`, body `<task> finished —
+  ready for you` / `<task> needs your input` — plus a sound, **even while you're
+  attached inside the agent or have the dashboard closed**. Fires exactly once per
+  turn, never depends on pane polling. Prefers `terminal-notifier` (a real
+  system-wide banner on any screen, focused or not); falls back to a terminal-native
+  OSC escape, then `osascript`/`notify-send`. Only wta-managed agents notify (gated
+  on `WTA_TASK`), so plain `claude` sessions that share global hooks stay silent.
+  Opt out with `WTA_NOTIFY_DESKTOP=0` (banner) / `WTA_NOTIFY_SOUND=0` (sound).
 
 ### Fixed
-- **Finish/needs-input chime now fires for the agent you're watching too.** The
-  sound was suppressed for the currently-*selected* agent — but when you leave the
-  dashboard open in one terminal tab and work in another, the agent you walked away
-  from is usually the selected one, so its completion was silent. The chime now
-  plays on every finish/needs-input edge regardless of selection (the edge fires
-  once per transition, so it can't nag). The `◆` "review me" marker is still only
-  set for agents that are off-screen.
+- **Opening the dashboard no longer chimes for every idle agent.** On first sight an
+  agent was mis-read as `Running` then `Ready`, a phantom "finished" edge for the
+  whole fleet. First sight now reads `Ready`. (The dashboard now only sets the `◆`
+  review marker; the audible/visible alert comes from the hook, above.)
 
 ## [0.1.21] — 2026-07-06
 

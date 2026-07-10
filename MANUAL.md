@@ -182,33 +182,39 @@ Force either behavior with `WTA_OPEN_INLINE=1` (inline) or `0` (detached).
 
 ## Notifications
 
-When an agent finishes or needs input, wta:
-
-- posts a **desktop notification** (`osascript` on macOS, `notify-send` on Linux)
-  naming which agent — title `wta · <repo>`, body `<task> finished` /
-  `<task> needs input` — so you know what happened without opening the dashboard,
-- plays a **system sound** (`afplay` on macOS, `paplay` on Linux) — because the
-  terminal bell is muted in many terminals,
-- marks the agent `◆` (review / unseen) **if it's off-screen**,
-- shows a **"N need you"** count in the menu bar.
-
-The banner + sound fire for **every** agent — including the one currently selected —
-so a dashboard left open in one terminal tab still alerts you while you work in
-another. The `◆` review marker is the only part limited to off-screen agents;
-selecting/opening the agent clears it. Silence the banner with
-`WTA_NOTIFY_DESKTOP=0` and the sound with `WTA_NOTIFY_SOUND=0` (or set the latter to
-a sound-file path for your own alert).
-
-**Finish/ready** detection is pane-based and works for **any agent**. **"Needs
-input" (`▲`)** requires the Claude Code hooks (**Claude only**):
+The banner + sound are **fired by the Claude Code hooks**, so they reach you
+regardless of the dashboard — **even while you're attached inside an agent** or have
+the dashboard closed entirely. Install them once:
 
 ```sh
-wta install-hooks            # this repo (writes .claude/settings.json)
-wta install-hooks --global   # all repos (~/.claude/settings.json)
+wta install-hooks --global   # all repos (~/.claude/settings.json) — recommended
+wta install-hooks            # or just this repo (.claude/settings.json)
 ```
 
-Hooks are appended, never clobbered. Without them you still get running / ready /
-exited automatically.
+This wires `UserPromptSubmit`/`Notification`/`Stop` to `wta status`. Then, each time
+an agent **finishes a turn** (Stop) or **asks a question** (Notification), `wta`:
+
+- posts a **desktop notification** naming which agent — title `wta · <repo>`, body
+  `<task> finished — ready for you` / `<task> needs your input`,
+- plays a **system sound** (because the terminal bell is muted in many terminals).
+
+It fires **once per turn** (not by polling), for wta-managed agents only (gated on
+`WTA_TASK`, so plain `claude` sessions that share the global hooks stay silent).
+Hooks are appended, never clobbered — Superset's hooks (or your own) are left intact.
+
+**Banner delivery**, best first: `terminal-notifier` if installed (a real
+system-wide banner on any screen, focused or not — `brew install terminal-notifier`);
+else a terminal-native escape (kitty OSC 99 / WezTerm OSC 777 / iTerm2 OSC 9); else
+`osascript` (macOS, may be dropped without notification permission) / `notify-send`
+(Linux). Run `wta notify-test` in your terminal to see which your setup supports.
+
+Silence the banner with `WTA_NOTIFY_DESKTOP=0` and the sound with
+`WTA_NOTIFY_SOUND=0` (or set the latter to a sound-file path for your own alert).
+
+Separately, the **dashboard** marks a finished/needs-input agent `◆` (review /
+unseen) with a **"N need you"** count when it's off-screen; selecting it clears it.
+This is visual only — the audible/desktop alert is the hook, above. Running / ready /
+exited status is detected automatically for any agent, with or without hooks.
 
 ---
 
