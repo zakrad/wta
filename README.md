@@ -58,11 +58,12 @@ and feature, with examples.
   never merge on "the agent said it's done." Runs async; never blocks the UI.
 - **Live status, zero setup** — running / ready / needs-input / exited detected
   automatically; optional Claude Code hooks (`wta install-hooks`) add "needs input".
-- **Notifies you — with sound** — when an off-screen agent finishes (or needs
-  input, with Claude's hooks), wta plays a system sound (not just the terminal bell, which many
-  terminals mute) and marks it for review (`◆`), with a "N need you" count in the
-  menu bar. Viewing the agent clears it. Set `WTA_NOTIFY_SOUND=0` to silence, or
-  point it at your own sound file.
+- **Notifies you — with sound** — when an agent finishes (or needs input, with
+  Claude's hooks), wta plays a system sound (not just the terminal bell, which many
+  terminals mute) — even for the agent you're watching, so leaving the dashboard
+  open in one tab while you work in another still chimes. Off-screen agents are also
+  marked for review (`◆`) with a "N need you" count in the menu bar; viewing one
+  clears it. Set `WTA_NOTIFY_SOUND=0` to silence, or point it at your own sound file.
 - **Cross-agent awareness** — isolated but not blind: each new agent is seeded with
   a snapshot of the others (and the files they're touching), agents can message each
   other (`wta send`, refuses to type into a dialog), and a shared `wta board` holds

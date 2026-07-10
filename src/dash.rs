@@ -1370,7 +1370,15 @@ fn refresh(app: &mut App) {
         let prev = app.prev_status.get(&r.session).copied();
         let became_needs = prev.is_some() && now == Status::NeedsInput && prev != Some(Status::NeedsInput);
         let finished = prev == Some(Status::Running) && matches!(now, Status::Ready | Status::Exited);
-        if (became_needs || finished) && sel_now.as_deref() != Some(r.session.as_str()) && app.attention.insert(r.session.clone()) {
+        if became_needs || finished {
+            // The ◆ "review me" marker is only for agents you're NOT looking at.
+            if sel_now.as_deref() != Some(r.session.as_str()) {
+                app.attention.insert(r.session.clone());
+            }
+            // The chime fires on every finish/needs-input edge — even the selected
+            // agent. In a multi-tab setup the agent you walked away from is usually
+            // the selected one, and suppressing its sound is exactly wrong. The edge
+            // (prev==Running → now Ready) fires once per finish, so this can't nag.
             ring = true;
         }
         let has_verify = r.root.join(".wta/verify.sh").exists();

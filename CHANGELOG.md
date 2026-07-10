@@ -4,6 +4,17 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.22] — 2026-07-10
+
+### Fixed
+- **Finish/needs-input chime now fires for the agent you're watching too.** The
+  sound was suppressed for the currently-*selected* agent — but when you leave the
+  dashboard open in one terminal tab and work in another, the agent you walked away
+  from is usually the selected one, so its completion was silent. The chime now
+  plays on every finish/needs-input edge regardless of selection (the edge fires
+  once per transition, so it can't nag). The `◆` "review me" marker is still only
+  set for agents that are off-screen.
+
 ## [0.1.21] — 2026-07-06
 
 ### Added
