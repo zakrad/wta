@@ -138,14 +138,22 @@ pub fn emit(state: &str) -> Result<()> {
         emit_uservar("agent_task", &task).ok();
     }
     if !task.is_empty() && !repo.is_empty() {
+        // The status BEFORE this event, so we can notify only on the *transition*
+        // into idle (not repeatedly while it sits idle).
+        let prev = read_state(&repo, &task).map(|s| s.status).unwrap_or_default();
         let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         record(&repo, &task, state, &cwd)?;
-        // Fire the desktop banner + sound straight from the hook, so an agent
-        // finishing (Stop → "waiting") or asking a question (Notification →
-        // "needs_input") alerts you regardless of the dashboard — even while you're
-        // attached inside it. Gated on WTA_TASK/WTA_REPO so a plain `claude` session
-        // that merely inherits the global hooks never notifies.
-        notify_for_state(state, &task);
+        // Edge-triggered: an agent going idle (Stop → "waiting" / Notification →
+        // "needs_input") notifies exactly once. Claude fires both events — and re-fires
+        // the idle Notification — for the same idle moment, so a level-triggered notify
+        // would sound several times; here the second one sees an already-idle `prev` and
+        // stays quiet. Notifies again only after the agent goes active (a new prompt →
+        // "running") and finishes again. Gated on WTA_TASK/WTA_REPO so a plain `claude`
+        // session that merely inherits the global hooks never notifies.
+        let is_idle = |s: &str| matches!(s, "waiting" | "needs_input");
+        if is_idle(state) && !is_idle(&prev) {
+            notify_for_state(state, &task);
+        }
     }
     Ok(())
 }

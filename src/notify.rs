@@ -111,14 +111,16 @@ pub fn tmux_popup(title: &str, body: &str) {
         .unwrap_or(4);
     // Compact box sized to the longer line; anchored top-right (-x R -y 2).
     let w = (t.chars().count().max(b.chars().count()) + 5).clamp(22, 60);
-    // printf uses %s (never the message as a format string); `sleep` auto-closes with
-    // no keypress. \342\232\241 = ⚡ in UTF-8 octal, kept out of the Rust string.
-    let script = format!("printf '\\n  \\342\\232\\241 %s\\n  %s\\n' '{t}' '{b}'; sleep {secs}");
+    // Exactly two lines, no trailing newline (with -h 4 that fills the box, no blank
+    // bottom line). `stty -echo` on the popup's own pty means keystrokes the modal
+    // popup captures don't echo a stray newline into the box. printf uses %s so the
+    // message is never a format string. \342\232\241 = ⚡ in UTF-8 octal.
+    let script = format!("stty -echo 2>/dev/null; printf '  \\342\\232\\241 %s\\n  %s' '{t}' '{b}'; sleep {secs}");
     let _ = Command::new("tmux")
         .args([
             "-S", &socket, "display-popup",
             "-x", "R", "-y", "2",
-            "-w", &w.to_string(), "-h", "5",
+            "-w", &w.to_string(), "-h", "4",
             "-T", "", "-E", &script,
         ])
         .stdin(Stdio::null())
