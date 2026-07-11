@@ -61,14 +61,13 @@ and feature, with examples.
 - **Notifies you — sound + terminal toast, from a hook** — install the Claude Code
   hooks (`wta install-hooks --global`) and every time an agent finishes a turn or
   asks a question you get a **sound** plus a **compact top-right toast** (like
-  nvim-notify) naming it (`wta · <repo>` → `<task> finished — ready for you`) —
+  nvim-notify) naming it (`⚡ <task>` / `<repo> · done · +A -B`) —
   **even while you're attached inside the agent or have the dashboard closed**,
-  because it's fired by the agent's Stop hook, not the dashboard. The toast renders
-  *inside* the terminal (via tmux), so it works on macOS even where CLI desktop
-  banners are silently dropped; it auto-dismisses after a couple seconds. Off-screen
-  agents are also marked `◆` in the dashboard with a "N need you" count. Tune with
-  `WTA_NOTIFY_SOUND=0` / `WTA_TMUX_NOTIFY=0` / `WTA_TMUX_SECS=<n>`; opt into a real
-  desktop banner with `WTA_NOTIFY_DESKTOP=1`.
+  because it's fired by the agent's Stop hook, not the dashboard. The toast is drawn
+  *inside* the terminal (via `tmux display-popup`) and dismisses itself after a few
+  seconds — no macOS notification, no permissions. Off-screen agents are also marked
+  `◆` in the dashboard with a "N need you" count. Tune with `WTA_NOTIFY_SOUND=0` /
+  `WTA_TMUX_NOTIFY=0` / `WTA_TMUX_SECS=<n>`.
 - **Cross-agent awareness** — isolated but not blind: each new agent is seeded with
   a snapshot of the others (and the files they're touching), agents can message each
   other (`wta send`, refuses to type into a dialog), and a shared `wta board` holds
@@ -89,7 +88,7 @@ wta init                             scaffold .wta/ convention stubs (verify.sh,
 wta attach | stop | resume | rm      attach · stop (keep worktree) · resume · destroy
 wta open <task>                      open the agent's worktree in your editor ($EDITOR / WTA_OPEN_CMD)
 wta push <task> [--pr]               commit + push the branch (--pr opens a PR via gh)
-wta install-hooks [--global]         wire Claude Code hooks for desktop notifications + "needs input" status
+wta install-hooks [--global]         wire Claude Code hooks for finish/needs-input notifications
 wta / wta dash [--here]              the live dashboard (all repos by default; --here = current repo)
 ```
 
@@ -132,7 +131,6 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_NOTIFY_SOUND` | `1` | sound on finish/needs-input (`0` = silent, or a path to your own sound file) |
 | `WTA_TMUX_NOTIFY` | `1` | compact top-right terminal toast on finish/needs-input (`0` = off) |
 | `WTA_TMUX_SECS` | `4` | seconds the toast stays before auto-dismissing |
-| `WTA_NOTIFY_DESKTOP` | `0` | opt into a real desktop banner (`1` = on; `terminal-notifier` → OSC escape → `osascript`/`notify-send`) |
 
 More vars (`WTA_AGENT_RESUME_ARGS`, `WTA_OPEN_INLINE`, `WTA_TMUX_SOCKET`, Telegram)
 and the full per-feature guide are in **[MANUAL.md](MANUAL.md)**.

@@ -64,7 +64,6 @@ fn main() -> anyhow::Result<()> {
         Command::Open { task } => worktree::open(&task)?,
         Command::Review { builder, by } => worktree::review(&builder, by.as_deref())?,
         Command::Init => worktree::init()?,
-        Command::NotifyTest => dash::notify_test(),
         Command::Send { task, message } => worktree::send(&task, &message.join(" "))?,
         Command::Board { entry } => {
             let joined = entry.join(" ");

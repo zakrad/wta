@@ -71,8 +71,6 @@ pub enum Command {
     },
     /// Scaffold `.wta/` convention stubs (verify.sh, setup.sh, teardown.sh)
     Init,
-    /// Fire test desktop notifications (run in YOUR terminal) to see which method it supports
-    NotifyTest,
     /// Send a one-line note into another agent's pane (agents can call this too)
     Send {
         /// the agent to message

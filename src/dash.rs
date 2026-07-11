@@ -1,4 +1,3 @@
-use crate::notify;
 use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -261,65 +260,6 @@ pub fn run(here: bool) -> Result<()> {
     .ok();
     term.show_cursor().ok();
     res
-}
-
-/// Ring the terminal bell (BEL is non-printing, safe to inject over the alt screen).
-/// `wta notify-test` — fire one notification per method, each labeled, straight to
-/// your real terminal, so you can tell which one your terminal actually shows.
-pub fn notify_test() {
-    use std::io::Write;
-    let mut out = std::io::stdout();
-    let _ = writeln!(out, "Firing test notifications in this terminal…\n");
-
-    let prog = std::env::var("TERM_PROGRAM").unwrap_or_default();
-    let term = std::env::var("TERM").unwrap_or_default();
-    let _ = writeln!(out, "  TERM_PROGRAM={prog:?}  TERM={term:?}");
-
-    // #0 terminal-notifier (preferred): own app identity, shows regardless of focus.
-    if notify::which("terminal-notifier") {
-        let _ = std::process::Command::new("terminal-notifier")
-            .args(["-title", "wta · terminal-notifier", "-message", "wta test #0 (preferred)"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        let _ = writeln!(out, "  #0 terminal-notifier → fired (installed — this is what wta will use)");
-    } else {
-        let _ = writeln!(out, "  #0 terminal-notifier → not installed (brew install terminal-notifier for the most reliable banner)");
-    }
-
-    // 1) osascript / notify-send
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", "on run argv", "-e", "display notification (item 1 of argv) with title (item 2 of argv)", "-e", "end run", "--", "wta test #1", "wta · osascript"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        let _ = writeln!(out, "  #1 osascript      → fired (dropped silently if Script Editor lacks permission)");
-    }
-
-    // 2) OSC 9 (iTerm2 / VS Code)
-    if notify::write_to_tty(b"\x1b]9;wta test #2 (OSC 9)\x07") {
-        let _ = writeln!(out, "  #2 OSC 9          → fired (iTerm2 / VS Code)");
-    }
-    // 3) OSC 777 (WezTerm)
-    if notify::write_to_tty(b"\x1b]777;notify;wta \xc2\xb7 OSC 777;wta test #3\x07") {
-        let _ = writeln!(out, "  #3 OSC 777        → fired (WezTerm)");
-    }
-    // 4) OSC 99 (kitty)
-    if notify::write_to_tty(b"\x1b]99;;wta test #4 (OSC 99 / kitty)\x1b\\") {
-        let _ = writeln!(out, "  #4 OSC 99         → fired (kitty)");
-    }
-
-    let _ = writeln!(out, "\nWhich number(s) popped up as a desktop notification? That's the one wta will use.");
-    let picked = if notify::which("terminal-notifier") {
-        "#0 terminal-notifier".to_string()
-    } else if notify::term_notify_escape("wta", "test").is_some() {
-        "a terminal-native escape (#2/#3/#4)".to_string()
-    } else {
-        "osascript (#1)".to_string()
-    };
-    let _ = writeln!(out, "(wta will use: {picked})");
 }
 
 /// Suspend the TUI, run a terminal editor (nvim/…) in the worktree, resume on quit.

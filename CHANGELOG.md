@@ -12,19 +12,17 @@ All notable changes to **wta** are documented here. The format is based on
   agent finishes a turn or asks a question you're alerted **even while attached inside
   the agent or with the dashboard closed**, exactly once per turn (never by pane
   polling). Two surfaces:
-  - a **sound** (the reliable baseline), and
-  - a **compact, self-dismissing terminal toast** — a small box in the top-right of
-    your terminal (like nvim-notify) naming the agent (`wta · <repo>` → `<task>
-    finished — ready for you`), rendered *inside* the terminal via tmux so it works
-    on macOS even where CLI desktop banners don't. Auto-closes after `WTA_TMUX_SECS`
-    seconds (default 4); disable with `WTA_TMUX_NOTIFY=0`.
+  - a **sound** (`WTA_NOTIFY_SOUND=0` to silence, or a file path for your own), and
+  - a **compact, self-dismissing terminal toast** — a small nvim-style box in the
+    top-right of your terminal, line 1 `⚡ <task>` and line 2 `<repo> · done|needs
+    input · +A -B` (uncommitted diff stats). It's drawn *inside* the terminal via
+    `tmux display-popup` (no macOS notification, no permissions), so it shows
+    regardless of OS notification settings; auto-closes after `WTA_TMUX_SECS` seconds
+    (default 4), disable with `WTA_TMUX_NOTIFY=0`. Requires tmux; reaches your
+    terminal from an agent's hook via a bridge file (`~/.wta/tmux-client`).
 
   Only wta-managed agents notify (gated on `WTA_TASK`), so plain `claude` sessions
-  that share global hooks stay silent. A real macOS/Linux **desktop banner** is
-  available opt-in with `WTA_NOTIFY_DESKTOP=1` (`terminal-notifier` → OSC escape →
-  `osascript`/`notify-send`) — off by default because on recent macOS it often only
-  reaches Notification Center without a visible banner. Sound opt-out:
-  `WTA_NOTIFY_SOUND=0`.
+  that share global hooks stay silent.
 
 ### Fixed
 - **Opening the dashboard no longer chimes for every idle agent.** On first sight an
