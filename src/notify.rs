@@ -108,6 +108,16 @@ fn user_tmux_socket() -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// Does the tmux server on `socket` have a client attached right now? (Used to tell
+/// whether the user is currently attached inside an agent.)
+fn has_client(socket: &str) -> bool {
+    Command::new("tmux")
+        .args(["-S", socket, "list-clients", "-F", "x"])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 /// Pop a **compact, top-right, self-dismissing** toast onto the user's terminal via
 /// their tmux (recorded by [`record_user_tmux`]) — like nvim-notify. Purely
 /// terminal-native: it draws inside the terminal and bypasses macOS Notification
@@ -118,9 +128,19 @@ pub fn tmux_popup(title: &str, body: &str) {
     if std::env::var("WTA_TMUX_NOTIFY").unwrap_or_default() == "0" {
         return;
     }
-    let socket = match user_tmux_socket() {
-        Some(s) => s,
-        None => return,
+    // Where to pop it: if this hook's own tmux server (wta's) has an attached client,
+    // the user is *inside* an agent right now — pop there so it draws over their view.
+    // Otherwise pop on the outer tmux the dashboard/shell runs in (the bridge file).
+    let own = std::env::var("TMUX")
+        .ok()
+        .and_then(|t| t.split(',').next().map(str::to_string))
+        .filter(|s| !s.is_empty());
+    let socket = match own {
+        Some(s) if has_client(&s) => s,
+        _ => match user_tmux_socket() {
+            Some(s) => s,
+            None => return,
+        },
     };
     // Strip chars that would break the single-quoted shell args below.
     let clean = |s: &str| -> String {
@@ -131,7 +151,7 @@ pub fn tmux_popup(title: &str, body: &str) {
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(2);
+        .unwrap_or(4);
     // Compact box sized to the longer line; anchored top-right (-x R -y 2).
     let w = (t.chars().count().max(b.chars().count()) + 5).clamp(22, 60);
     // printf uses %s (never the message as a format string); `sleep` auto-closes with

@@ -17,7 +17,7 @@ All notable changes to **wta** are documented here. The format is based on
     your terminal (like nvim-notify) naming the agent (`wta · <repo>` → `<task>
     finished — ready for you`), rendered *inside* the terminal via tmux so it works
     on macOS even where CLI desktop banners don't. Auto-closes after `WTA_TMUX_SECS`
-    seconds (default 2); disable with `WTA_TMUX_NOTIFY=0`.
+    seconds (default 4); disable with `WTA_TMUX_NOTIFY=0`.
 
   Only wta-managed agents notify (gated on `WTA_TASK`), so plain `claude` sessions
   that share global hooks stay silent. A real macOS/Linux **desktop banner** is

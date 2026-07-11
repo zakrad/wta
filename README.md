@@ -131,7 +131,7 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_REVIEW_AGENT_CMD` | `$WTA_AGENT_CMD` | agent CLI used by `wta review` (point it at a cheaper/different model) |
 | `WTA_NOTIFY_SOUND` | `1` | sound on finish/needs-input (`0` = silent, or a path to your own sound file) |
 | `WTA_TMUX_NOTIFY` | `1` | compact top-right terminal toast on finish/needs-input (`0` = off) |
-| `WTA_TMUX_SECS` | `2` | seconds the toast stays before auto-dismissing |
+| `WTA_TMUX_SECS` | `4` | seconds the toast stays before auto-dismissing |
 | `WTA_NOTIFY_DESKTOP` | `0` | opt into a real desktop banner (`1` = on; `terminal-notifier` → OSC escape → `osascript`/`notify-send`) |
 
 More vars (`WTA_AGENT_RESUME_ARGS`, `WTA_OPEN_INLINE`, `WTA_TMUX_SOCKET`, Telegram)

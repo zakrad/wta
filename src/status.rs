@@ -150,28 +150,51 @@ pub fn emit(state: &str) -> Result<()> {
     Ok(())
 }
 
-/// Banner text for the hook-driven states we alert on. Returns `None` for states
-/// (like "running") that shouldn't notify.
+/// The toast for the hook-driven states we alert on. Line 1 = the agent (task),
+/// line 2 = `<repo> · <status>[· +A -B]`. Returns for states (like "running") that
+/// shouldn't notify.
 fn notify_for_state(state: &str, task: &str) {
-    let label = if task.is_empty() { "agent".to_string() } else { task.to_string() };
-    let title = match notify_repo_name() {
-        Some(r) => format!("wta · {r}"),
-        None => "wta".to_string(),
-    };
-    let body = match state {
-        "waiting" => format!("{label} finished — ready for you"),
-        "needs_input" => format!("{label} needs your input"),
+    let status = match state {
+        "waiting" => "done",
+        "needs_input" => "needs input",
         _ => return,
     };
-    crate::notify::alert(&title, &body);
+    let label = if task.is_empty() { "agent" } else { task };
+    let repo = notify_repo_name().unwrap_or_else(|| "wta".to_string());
+    let mut line2 = format!("{repo} · {status}");
+    if let Some(stats) = diff_stats() {
+        line2.push_str(" · ");
+        line2.push_str(&stats);
+    }
+    crate::notify::alert(label, &line2);
 }
 
-/// Best-effort repo name for the notification title, derived from the worktree cwd
+/// Best-effort repo name for the notification, derived from the worktree cwd
 /// (`<repo-root>/<worktree-dir>/<task>` → the repo-root basename).
 fn notify_repo_name() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let root = cwd.parent()?.parent()?;
     root.file_name().map(|s| s.to_string_lossy().into_owned())
+}
+
+/// `+A -B` of the agent's uncommitted work vs HEAD, or `None` if nothing/unavailable.
+fn diff_stats() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["diff", "--numstat", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let (mut add, mut del) = (0u64, 0u64);
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split('\t');
+        if let (Some(a), Some(d)) = (it.next(), it.next()) {
+            add += a.parse::<u64>().unwrap_or(0);
+            del += d.parse::<u64>().unwrap_or(0);
+        }
+    }
+    (add != 0 || del != 0).then(|| format!("+{add} -{del}"))
 }
 
 /// Read all agent states for one repo.

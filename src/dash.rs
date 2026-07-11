@@ -1000,18 +1000,27 @@ fn reorder(app: &mut App, delta: isize) {
 /// Open the "new agent" flow: a repo picker in the global dash (unless only one
 /// repo is known), else straight to the name modal for the current/selected repo.
 fn open_new(app: &mut App, prompt: bool) {
-    let repos = worktree::discover_repos();
-    if app.global && repos.len() > 1 {
-        let list: Vec<(String, PathBuf)> =
-            repos.iter().map(|(_, root)| (worktree::repo_name(root), root.clone())).collect();
-        app.modal = Modal::RepoPick { repos: list, filter: String::new(), sel: 0, prompt };
+    // All repos that currently have agents…
+    let mut list: Vec<(String, PathBuf)> = worktree::discover_repos()
+        .iter()
+        .map(|(_, root)| (worktree::repo_name(root), root.clone()))
+        .collect();
+    // …plus the repo the dashboard was launched from, even if it has no agents yet —
+    // that's how you add the *first* agent to a new repo from the dashboard. Put it
+    // first so it's the default selection.
+    if !app.root.as_os_str().is_empty() && !list.iter().any(|(_, r)| r == &app.root) {
+        list.insert(0, (worktree::repo_name(&app.root), app.root.clone()));
+    }
+
+    if app.global && list.len() > 1 {
+        // Default the highlight to the launch repo if it's in the list.
+        let sel = list.iter().position(|(_, r)| r == &app.root).unwrap_or(0);
+        app.modal = Modal::RepoPick { repos: list, filter: String::new(), sel, prompt };
     } else {
-        let root = app
-            .selected()
-            .map(|r| r.root.clone())
+        let root = list
+            .first()
+            .map(|(_, r)| r.clone())
             .filter(|p| !p.as_os_str().is_empty())
-            .or_else(|| (!app.root.as_os_str().is_empty()).then(|| app.root.clone()))
-            .or_else(|| repos.first().map(|(_, r)| r.clone()))
             .unwrap_or_default();
         if root.as_os_str().is_empty() {
             app.set_err("cd into a repo to create an agent");

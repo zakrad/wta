@@ -11,7 +11,7 @@ how to use each feature on its own.
 - [Verification gate](#verification-gate) · `.wta/verify.sh`
 - [Cross-agent review](#cross-agent-review) · `review`
 - [Open in your editor](#open-in-your-editor) · `open`, nvim/GUI
-- [Notifications](#notifications) · banner, sound, review glyph, hooks
+- [Notifications](#notifications) · sound, terminal toast, hooks
 - [Agent lifecycle](#agent-lifecycle) · stop/resume/kill, merged
 - [Per-repo setup](#per-repo-setup) · `init`, setup/teardown, isolation slots, run-log
 - [Cross-agent awareness](#cross-agent-awareness) · `send`, `board`, fleet digest
@@ -198,7 +198,7 @@ an agent **finishes a turn** (Stop) or **asks a question** (Notification), `wta`
   terminals; `WTA_NOTIFY_SOUND=0` to silence, or a file path for your own), and
 - pops a **compact top-right toast** inside your terminal — a small box naming the
   agent (`wta · <repo>` / `<task> finished — ready for you`) that dismisses itself
-  after `WTA_TMUX_SECS` seconds (default 2). Disable with `WTA_TMUX_NOTIFY=0`.
+  after `WTA_TMUX_SECS` seconds (default 4). Disable with `WTA_TMUX_NOTIFY=0`.
 
 It fires **once per turn** (not by polling), for wta-managed agents only (gated on
 `WTA_TASK`, so plain `claude` sessions that share the global hooks stay silent).
@@ -408,7 +408,7 @@ The defaults also lean Claude — `WTA_AGENT_CMD=claude`,
 | `WTA_OPEN_INLINE` | auto | force editor inline (`1`) or detached (`0`) |
 | `WTA_NOTIFY_SOUND` | `1` | notification sound (`0` = silent, or a sound-file path) |
 | `WTA_TMUX_NOTIFY` | `1` | compact top-right terminal toast (`0` = off) |
-| `WTA_TMUX_SECS` | `2` | seconds the toast stays before auto-dismissing |
+| `WTA_TMUX_SECS` | `4` | seconds the toast stays before auto-dismissing |
 | `WTA_NOTIFY_DESKTOP` | `0` | opt into a real desktop banner (`1` = on) |
 | `WTA_TMUX_SOCKET` | `wta` | tmux server socket (`default` = your own tmux; same as `--server`) |
 | `WTA_TELEGRAM_TOKEN` / `WTA_TELEGRAM_CHAT` | — | Telegram bridge bot token + chat id |
