@@ -194,22 +194,27 @@ wta install-hooks            # or just this repo (.claude/settings.json)
 This wires `UserPromptSubmit`/`Notification`/`Stop` to `wta status`. Then, each time
 an agent **finishes a turn** (Stop) or **asks a question** (Notification), `wta`:
 
-- posts a **desktop notification** naming which agent — title `wta · <repo>`, body
-  `<task> finished — ready for you` / `<task> needs your input`,
-- plays a **system sound** (because the terminal bell is muted in many terminals).
+- plays a **sound** (the reliable baseline — the terminal bell is muted in many
+  terminals; `WTA_NOTIFY_SOUND=0` to silence, or a file path for your own), and
+- pops a **compact top-right toast** inside your terminal — a small box naming the
+  agent (`wta · <repo>` / `<task> finished — ready for you`) that dismisses itself
+  after `WTA_TMUX_SECS` seconds (default 2). Disable with `WTA_TMUX_NOTIFY=0`.
 
 It fires **once per turn** (not by polling), for wta-managed agents only (gated on
 `WTA_TASK`, so plain `claude` sessions that share the global hooks stay silent).
 Hooks are appended, never clobbered — Superset's hooks (or your own) are left intact.
 
-**Banner delivery**, best first: `terminal-notifier` if installed (a real
-system-wide banner on any screen, focused or not — `brew install terminal-notifier`);
-else a terminal-native escape (kitty OSC 99 / WezTerm OSC 777 / iTerm2 OSC 9); else
-`osascript` (macOS, may be dropped without notification permission) / `notify-send`
-(Linux). Run `wta notify-test` in your terminal to see which your setup supports.
+The toast renders *inside* the terminal via `tmux display-popup`, so it works on
+macOS even where CLI **desktop banners** are silently dropped (recent macOS delivers
+`terminal-notifier`/`osascript` notifications to Notification Center without showing a
+banner). It reaches your terminal even from an agent's hook via a small bridge: any
+`wta` you run inside tmux records your tmux socket to `~/.wta/tmux-client`, and the
+hook pops the toast there. Requires running inside **tmux**.
 
-Silence the banner with `WTA_NOTIFY_DESKTOP=0` and the sound with
-`WTA_NOTIFY_SOUND=0` (or set the latter to a sound-file path for your own alert).
+Want a real desktop banner too? Set `WTA_NOTIFY_DESKTOP=1` — wta then also tries
+`terminal-notifier` (`brew install terminal-notifier`) → a terminal-native escape
+(kitty OSC 99 / WezTerm OSC 777 / iTerm2 OSC 9) → `osascript`/`notify-send`. Run
+`wta notify-test` to see which your setup actually shows.
 
 Separately, the **dashboard** marks a finished/needs-input agent `◆` (review /
 unseen) with a **"N need you"** count when it's off-screen; selecting it clears it.
@@ -401,8 +406,10 @@ The defaults also lean Claude — `WTA_AGENT_CMD=claude`,
 | `WTA_SKIP_PERMISSIONS` | `1` | agents run with `--dangerously-skip-permissions` (no prompts). `0` or `wta new --safe` re-enables prompts — **Claude only** |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` |
 | `WTA_OPEN_INLINE` | auto | force editor inline (`1`) or detached (`0`) |
-| `WTA_NOTIFY_DESKTOP` | `1` | desktop notification banner naming the task + repo (`0` = off) |
 | `WTA_NOTIFY_SOUND` | `1` | notification sound (`0` = silent, or a sound-file path) |
+| `WTA_TMUX_NOTIFY` | `1` | compact top-right terminal toast (`0` = off) |
+| `WTA_TMUX_SECS` | `2` | seconds the toast stays before auto-dismissing |
+| `WTA_NOTIFY_DESKTOP` | `0` | opt into a real desktop banner (`1` = on) |
 | `WTA_TMUX_SOCKET` | `wta` | tmux server socket (`default` = your own tmux; same as `--server`) |
 | `WTA_TELEGRAM_TOKEN` / `WTA_TELEGRAM_CHAT` | — | Telegram bridge bot token + chat id |
 

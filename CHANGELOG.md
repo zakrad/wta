@@ -7,17 +7,24 @@ All notable changes to **wta** are documented here. The format is based on
 ## [0.1.23] — 2026-07-10
 
 ### Added
-- **Hook-driven desktop notifications (banner + sound).** Notifications are now
-  fired by the Claude Code **Stop / Notification hooks** (`wta install-hooks`),
-  independent of the dashboard: when an agent finishes a turn or asks a question you
-  get a real OS banner naming it — title `wta · <repo>`, body `<task> finished —
-  ready for you` / `<task> needs your input` — plus a sound, **even while you're
-  attached inside the agent or have the dashboard closed**. Fires exactly once per
-  turn, never depends on pane polling. Prefers `terminal-notifier` (a real
-  system-wide banner on any screen, focused or not); falls back to a terminal-native
-  OSC escape, then `osascript`/`notify-send`. Only wta-managed agents notify (gated
-  on `WTA_TASK`), so plain `claude` sessions that share global hooks stay silent.
-  Opt out with `WTA_NOTIFY_DESKTOP=0` (banner) / `WTA_NOTIFY_SOUND=0` (sound).
+- **Hook-driven notifications.** Alerts are now fired by the Claude Code **Stop /
+  Notification hooks** (`wta install-hooks`), independent of the dashboard: when an
+  agent finishes a turn or asks a question you're alerted **even while attached inside
+  the agent or with the dashboard closed**, exactly once per turn (never by pane
+  polling). Two surfaces:
+  - a **sound** (the reliable baseline), and
+  - a **compact, self-dismissing terminal toast** — a small box in the top-right of
+    your terminal (like nvim-notify) naming the agent (`wta · <repo>` → `<task>
+    finished — ready for you`), rendered *inside* the terminal via tmux so it works
+    on macOS even where CLI desktop banners don't. Auto-closes after `WTA_TMUX_SECS`
+    seconds (default 2); disable with `WTA_TMUX_NOTIFY=0`.
+
+  Only wta-managed agents notify (gated on `WTA_TASK`), so plain `claude` sessions
+  that share global hooks stay silent. A real macOS/Linux **desktop banner** is
+  available opt-in with `WTA_NOTIFY_DESKTOP=1` (`terminal-notifier` → OSC escape →
+  `osascript`/`notify-send`) — off by default because on recent macOS it often only
+  reaches Notification Center without a visible banner. Sound opt-out:
+  `WTA_NOTIFY_SOUND=0`.
 
 ### Fixed
 - **Opening the dashboard no longer chimes for every idle agent.** On first sight an

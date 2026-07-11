@@ -1397,10 +1397,10 @@ fn refresh(app: &mut App) {
 
         let became_needs = prev.is_some() && now == Status::NeedsInput && prev != Some(Status::NeedsInput);
         let finished = prev == Some(Status::Running) && matches!(now, Status::Ready | Status::Exited);
-        // Visual review marker only — the audible chime + desktop banner are fired
-        // by the Claude Stop/Notification hooks (see status::emit), so they reach you
-        // even while you're attached inside the agent or have the dashboard closed.
-        // The ◆ is for agents you're NOT currently looking at.
+        // All alerts (sound + desktop banner + terminal-native tmux popup) are fired
+        // by the Claude Stop/Notification hooks (see status::emit) so they reach you
+        // even while attached or with the dashboard closed. The dashboard only sets
+        // the ◆ review marker, for agents you're NOT currently looking at.
         if (became_needs || finished) && sel_now.as_deref() != Some(r.session.as_str()) {
             app.attention.insert(r.session.clone());
         }

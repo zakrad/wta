@@ -58,16 +58,17 @@ and feature, with examples.
   never merge on "the agent said it's done." Runs async; never blocks the UI.
 - **Live status, zero setup** — running / ready / needs-input / exited detected
   automatically; optional Claude Code hooks (`wta install-hooks`) add "needs input".
-- **Notifies you — banner + sound, from a hook** — install the Claude Code hooks
-  (`wta install-hooks --global`) and every time an agent finishes a turn or asks a
-  question you get a real desktop notification naming it (`wta · <repo>` → `<task>
-  finished — ready for you`) plus a sound — **even while you're attached inside the
-  agent or have the dashboard closed**, because it's fired by the agent's Stop hook,
-  not the dashboard. Prefers `terminal-notifier` (a system-wide banner on any screen;
-  `brew install terminal-notifier`), else a terminal-native escape, else
-  `osascript`/`notify-send`. Off-screen agents are also marked `◆` in the dashboard
-  with a "N need you" count. `WTA_NOTIFY_DESKTOP=0` silences the banner,
-  `WTA_NOTIFY_SOUND=0` the sound (or point the latter at your own file).
+- **Notifies you — sound + terminal toast, from a hook** — install the Claude Code
+  hooks (`wta install-hooks --global`) and every time an agent finishes a turn or
+  asks a question you get a **sound** plus a **compact top-right toast** (like
+  nvim-notify) naming it (`wta · <repo>` → `<task> finished — ready for you`) —
+  **even while you're attached inside the agent or have the dashboard closed**,
+  because it's fired by the agent's Stop hook, not the dashboard. The toast renders
+  *inside* the terminal (via tmux), so it works on macOS even where CLI desktop
+  banners are silently dropped; it auto-dismisses after a couple seconds. Off-screen
+  agents are also marked `◆` in the dashboard with a "N need you" count. Tune with
+  `WTA_NOTIFY_SOUND=0` / `WTA_TMUX_NOTIFY=0` / `WTA_TMUX_SECS=<n>`; opt into a real
+  desktop banner with `WTA_NOTIFY_DESKTOP=1`.
 - **Cross-agent awareness** — isolated but not blind: each new agent is seeded with
   a snapshot of the others (and the files they're touching), agents can message each
   other (`wta send`, refuses to type into a dialog), and a shared `wta board` holds
@@ -128,8 +129,10 @@ wta bridge          # /agents · /use <task> then type to send · /send <task> <
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` (GUI editors like `code` open detached; terminal editors like `nvim` open inline and return to the dash on quit) |
 | `WTA_REVIEW_AGENT_CMD` | `$WTA_AGENT_CMD` | agent CLI used by `wta review` (point it at a cheaper/different model) |
-| `WTA_NOTIFY_DESKTOP` | `1` | desktop notification banner on finish/needs-input, naming the task + repo (`0` = off; macOS `osascript` / Linux `notify-send`) |
-| `WTA_NOTIFY_SOUND` | `1` | system sound on finish/needs-input (`0` = silent, or a path to your own sound file) |
+| `WTA_NOTIFY_SOUND` | `1` | sound on finish/needs-input (`0` = silent, or a path to your own sound file) |
+| `WTA_TMUX_NOTIFY` | `1` | compact top-right terminal toast on finish/needs-input (`0` = off) |
+| `WTA_TMUX_SECS` | `2` | seconds the toast stays before auto-dismissing |
+| `WTA_NOTIFY_DESKTOP` | `0` | opt into a real desktop banner (`1` = on; `terminal-notifier` → OSC escape → `osascript`/`notify-send`) |
 
 More vars (`WTA_AGENT_RESUME_ARGS`, `WTA_OPEN_INLINE`, `WTA_TMUX_SOCKET`, Telegram)
 and the full per-feature guide are in **[MANUAL.md](MANUAL.md)**.

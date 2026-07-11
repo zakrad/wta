@@ -16,6 +16,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(server) = &cli.server {
         std::env::set_var("WTA_TMUX_SOCKET", server);
     }
+    // Remember which tmux the user is driving so an agent's hook can pop a
+    // notification onto it later (no-op outside tmux / inside an agent).
+    notify::record_user_tmux();
     // bare `wta` opens the (global) dashboard
     let cmd = cli.cmd.unwrap_or(Command::Dash { here: false });
     match cmd {
