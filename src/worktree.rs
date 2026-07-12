@@ -756,6 +756,9 @@ Only its committed work is in your worktree. If you need those changes, commit t
 /// no-progress detector (`no_progress` = stop if the agent leaves its diff unchanged
 /// that many attempts running; 0 = off). Foreground; watch the agent in `wta dash`.
 pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, agent_args: &[String]) -> Result<()> {
+    if max == 0 {
+        bail!("--max must be at least 1 (it's the attempt cap, not 'unlimited')");
+    }
     let root = repo_root()?;
     let repo = repo_id_of(&root);
     let verify = root.join(".wta/verify.sh");
@@ -773,12 +776,17 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
 
     let start = std::time::Instant::now();
     let budget = (timeout_secs > 0).then(|| std::time::Duration::from_secs(timeout_secs));
+    let remaining = |now: &std::time::Instant| budget.map(|b| b.saturating_sub(now.elapsed()));
+    let over_budget = |now: &std::time::Instant| budget.map(|b| now.elapsed() >= b).unwrap_or(false);
 
     // Optional kickoff prompt before the first verify.
     let prompt = agent_args.join(" ");
     if !prompt.trim().is_empty() {
         println!("→ {task}: {}", prompt.chars().take(70).collect::<String>());
         drive(&session, &prompt)?;
+        if over_budget(&start) {
+            bail!("hit the {timeout_secs}s wall-clock budget during kickoff — verify not reached");
+        }
     }
 
     // no-progress guard baseline: the agent's diff before the loop starts.
@@ -786,15 +794,14 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
     let mut stalled = 0u32;
 
     for attempt in 1..=max {
-        // Budget guard: check before spending another expensive attempt.
-        if let Some(b) = budget {
-            if start.elapsed() >= b {
-                println!("⏱ stopping: hit the {timeout_secs}s budget after {} attempt(s)", attempt - 1);
-                return Ok(());
-            }
+        // Budget guard, before spending another expensive attempt.
+        if over_budget(&start) {
+            bail!("stopping: hit the {timeout_secs}s wall-clock budget after {} attempt(s); verify still failing", attempt - 1);
         }
         println!("[{attempt}/{max}] running .wta/verify.sh …");
-        let (code, out) = run_verify_sh(&wt, &verify);
+        // Cap verify at the remaining budget so a hung verify.sh can't wedge the loop
+        // past --timeout (unbounded only when no budget is set, to respect long suites).
+        let (code, out) = run_verify_sh(&wt, &verify, remaining(&start));
         if code == 0 {
             println!("✓ verify passed on attempt {attempt}");
             return Ok(());
@@ -806,16 +813,22 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
             tail.replace('\n', " ⏎ "),
         );
         drive(&session, &msg)?;
+        // Budget guard again — the drive above can take a while, so re-check before looping.
+        if over_budget(&start) {
+            bail!("stopping: hit the {timeout_secs}s wall-clock budget after {attempt} attempt(s); verify still failing");
+        }
 
         // No-progress guard: a stuck agent that stops changing anything would
-        // otherwise loop to `max` billing every round for no reason.
+        // otherwise loop to `max`, billing every round for no reason. (Note: this
+        // compares the whole worktree diff, so a verify.sh that writes
+        // *non-deterministic* tracked files into the worktree each run can defeat it —
+        // keep verify side-effect-free, or gitignore what it generates.)
         if no_progress > 0 {
             let now = worktree_diff_hash(&wt);
             if now == last_diff {
                 stalled += 1;
                 if stalled >= no_progress {
-                    println!("⚠ stopping: '{task}' left its diff unchanged for {stalled} attempt(s) — it looks stuck");
-                    return Ok(());
+                    bail!("stopping: '{task}' left its diff unchanged for {stalled} attempt(s) — it looks stuck; verify still failing");
                 }
             } else {
                 stalled = 0;
@@ -823,8 +836,7 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
             }
         }
     }
-    println!("stopping: still failing after the {max}-attempt cap — inspect '{task}' in `wta dash`");
-    Ok(())
+    bail!("stopping: still failing after the {max}-attempt cap — inspect '{task}' in `wta dash`");
 }
 
 /// Hash the agent's current changes (tracked diff vs HEAD + the untracked/staged
@@ -882,15 +894,65 @@ fn wait_idle(session: &str, timeout: std::time::Duration) -> Result<()> {
 }
 
 /// Run `.wta/verify.sh` in the agent's worktree; returns (exit code, combined output).
-fn run_verify_sh(wt: &Path, verify: &Path) -> (i32, String) {
-    match Command::new("bash").arg(verify).current_dir(wt).output() {
-        Ok(o) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-            s.push_str(&String::from_utf8_lossy(&o.stderr));
-            (o.status.code().unwrap_or(-1), s)
+/// With `deadline = Some(d)`, the process is killed if it runs longer than `d` (so a
+/// hung verify can't wedge the loop past `--timeout`) and its output is captured via a
+/// temp file to avoid pipe-buffer deadlock. With `None` it runs to completion.
+fn run_verify_sh(wt: &Path, verify: &Path, deadline: Option<std::time::Duration>) -> (i32, String) {
+    let d = match deadline {
+        None => {
+            return match Command::new("bash").arg(verify).current_dir(wt).output() {
+                Ok(o) => {
+                    let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                    s.push_str(&String::from_utf8_lossy(&o.stderr));
+                    (o.status.code().unwrap_or(-1), s)
+                }
+                Err(e) => (-1, format!("could not run verify.sh: {e}")),
+            };
         }
-        Err(e) => (-1, format!("could not run verify.sh: {e}")),
+        Some(d) => d,
+    };
+    let log = std::env::temp_dir().join(format!("wta-verify-{}.log", std::process::id()));
+    let file = match std::fs::File::create(&log) {
+        Ok(f) => f,
+        Err(e) => return (-1, format!("could not open verify log: {e}")),
+    };
+    let err = match file.try_clone() {
+        Ok(f) => f,
+        Err(e) => return (-1, format!("could not open verify log: {e}")),
+    };
+    let mut child = match Command::new("bash")
+        .arg(verify)
+        .current_dir(wt)
+        .stdout(std::process::Stdio::from(file))
+        .stderr(std::process::Stdio::from(err))
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return (-1, format!("could not run verify.sh: {e}")),
+    };
+    let start = std::time::Instant::now();
+    let mut timed_out = false;
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.code().unwrap_or(-1),
+            Ok(None) => {
+                if start.elapsed() >= d {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break -1;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(_) => break -1,
+        }
+    };
+    let mut s = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    if timed_out {
+        s.push_str("\n[wta: verify.sh killed — exceeded the loop's remaining wall-clock budget]");
     }
+    (code, s)
 }
 
 fn tail_lines(s: &str, n: usize) -> String {
