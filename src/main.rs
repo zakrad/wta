@@ -1,6 +1,7 @@
 #[cfg(feature = "telegram")]
 mod bridge;
 mod cli;
+mod cron;
 mod dash;
 mod notify;
 mod status;
@@ -8,7 +9,7 @@ mod tmux;
 mod worktree;
 
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{Cli, Command, CronAction};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -68,6 +69,17 @@ fn main() -> anyhow::Result<()> {
         Command::Loop { task, max, no_progress, timeout, prompt } => {
             worktree::loop_verify(&task, max, no_progress, timeout, &prompt)?
         }
+        Command::Cron { action } => match action {
+            CronAction::Add { name, every, repo, prompt } => cron::add(&name, &every, repo, &prompt)?,
+            CronAction::List => cron::list()?,
+            CronAction::Rm { name } => cron::rm(&name)?,
+            CronAction::Enable { name } => cron::set_enabled(&name, true)?,
+            CronAction::Disable { name } => cron::set_enabled(&name, false)?,
+            CronAction::Tick => {
+                cron::tick()?;
+            }
+            CronAction::Start { interval } => cron::start(interval)?,
+        },
         Command::Send { task, message } => worktree::send(&task, &message.join(" "))?,
         Command::Board { entry } => {
             let joined = entry.join(" ");

@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -98,6 +99,11 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         prompt: Vec<String>,
     },
+    /// Scheduled agent dispatch — routines that fire `wta new` on a cadence (work while you sleep)
+    Cron {
+        #[command(subcommand)]
+        action: CronAction,
+    },
     /// Send a one-line note into another agent's pane (agents can call this too)
     Send {
         /// the agent to message
@@ -148,5 +154,39 @@ pub enum Command {
         /// Send one test message to verify config, then exit
         #[arg(long)]
         test: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CronAction {
+    /// Add a routine: fire `wta new` in a repo on a cadence with a prompt
+    Add {
+        /// routine name (letters/digits/-/_)
+        name: String,
+        /// how often to fire, e.g. 30m, 2h, 1d
+        #[arg(long)]
+        every: String,
+        /// repo to run in (default: the current repo)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// prompt for each spawned agent (everything after the name)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        prompt: Vec<String>,
+    },
+    /// List routines and when each is next due
+    List,
+    /// Remove a routine
+    Rm { name: String },
+    /// Enable a disabled routine
+    Enable { name: String },
+    /// Disable a routine (keep it, but stop firing)
+    Disable { name: String },
+    /// Fire every due routine once, then exit (wire into system cron / launchd)
+    Tick,
+    /// Run the scheduler in the foreground until Ctrl-C (leave it running)
+    Start {
+        /// seconds between checks
+        #[arg(long, default_value_t = 60)]
+        interval: u64,
     },
 }

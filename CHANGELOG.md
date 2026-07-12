@@ -4,6 +4,19 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.25] — 2026-07-12
+
+### Added
+- **`wta cron` — scheduled agent dispatch ("work while you sleep").** Define
+  *routines* that fire `wta new` in a repo on a cadence, so a fleet works unattended:
+  `wta cron add <name> --every <30m|2h|1d> [--repo <path>] -- "<prompt>"`,
+  `wta cron list` (next-due + last-run), `rm`/`enable`/`disable`. Run the scheduler
+  with `wta cron start` (leave it in a tmux pane / nohup), or wire `wta cron tick`
+  (fire-all-due-once) into system cron / launchd. Each fire spawns a fresh agent
+  `<name>-<ts>` that runs the prompt autonomously; review the results in `wta dash`
+  the next morning. Routines live in `~/.wta/routines.json` (never clobbered if
+  corrupt); `--every` is floored at 60s so a routine can't flood the fleet.
+
 ## [0.1.24] — 2026-07-12
 
 ### Added
