@@ -84,6 +84,8 @@ wta fanout <name> -n N -- <prompt>   spawn N agents on one prompt → compare (m
 wta review <builder> [--by <cmd>]    spawn an independent reviewer agent on <builder>'s branch (maker/checker)
 wta handoff <from> <new> [-- <p>]    migrate <from>'s context into a new agent (branch off it + seed a handoff note)
 wta loop <task> [--max N] [--no-progress N] [--timeout S] [-- <p>]   re-prompt until .wta/verify.sh passes (guards: attempts, no-progress, wall-clock)
+wta lock <name> -- <command>         lock a failure into a regression check (.wta/checks/) every future agent must pass
+wta lock --list | wta unlock <name>  list / remove locked checks
 wta cron add <name> --every <dur> [--repo <p>] -- <prompt>   schedule a routine that fires `wta new` on a cadence (work while you sleep)
 wta cron list | rm | enable | disable | tick | start        manage routines · fire-due-once · run the scheduler
 wta send <task> "<msg>"              relay a note into another agent's pane (agents can call this too)

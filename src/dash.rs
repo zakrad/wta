@@ -1103,11 +1103,13 @@ fn read_tail(log: &Path) -> String {
 /// Spawn `.wta/verify.sh` for a task in its worktree, output to a temp log,
 /// tracked in `app.checks`. Non-blocking — polled by `poll_checks`.
 fn spawn_check(app: &mut App, session: &str, root: &Path, wt: &Path) {
-    let script = root.join(".wta/verify.sh");
-    if !script.exists() {
-        app.set_err("no .wta/verify.sh in this repo — add one that exits non-zero on failure");
-        return;
-    }
+    let suite = match worktree::verify_suite_script(root) {
+        Some(s) => s,
+        None => {
+            app.set_err("nothing to verify — add .wta/verify.sh or lock a check with `wta lock`");
+            return;
+        }
+    };
     // keep the log in wta's own per-user dir, not world-writable /tmp
     let log = match status::wta_dir() {
         Ok(d) => {
@@ -1126,7 +1128,8 @@ fn spawn_check(app: &mut App, session: &str, root: &Path, wt: &Path) {
         Err(e) => return app.set_err(e),
     };
     match std::process::Command::new("bash")
-        .arg(&script)
+        .arg("-c")
+        .arg(&suite)
         .current_dir(wt)
         .stdout(std::process::Stdio::from(f))
         .stderr(std::process::Stdio::from(f2))
@@ -1353,7 +1356,7 @@ fn refresh(app: &mut App) {
         if (became_needs || finished) && sel_now.as_deref() != Some(r.session.as_str()) {
             app.attention.insert(r.session.clone());
         }
-        let has_verify = r.root.join(".wta/verify.sh").exists();
+        let has_verify = worktree::has_verify_suite(&r.root);
         if finished && has_verify && !matches!(app.checks.get(&r.session), Some(Check::Running { .. })) {
             if let Some(p) = &r.path {
                 to_check.push((r.session.clone(), r.root.clone(), p.clone()));

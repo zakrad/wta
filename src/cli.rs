@@ -99,6 +99,25 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         prompt: Vec<String>,
     },
+    /// Lock a command into a permanent regression check every future agent must pass
+    Lock {
+        /// name of the check (letters/digits/-/_); omit together with --list
+        name: Option<String>,
+        /// list the repo's locked checks instead of adding one
+        #[arg(long)]
+        list: bool,
+        /// record which agent this check came from (in the check header)
+        #[arg(long)]
+        from: Option<String>,
+        /// a note recorded in the check header
+        #[arg(long)]
+        note: Option<String>,
+        /// the command that must pass (everything after --)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Remove a locked check added by `wta lock`
+    Unlock { name: String },
     /// Scheduled agent dispatch — routines that fire `wta new` on a cadence (work while you sleep)
     Cron {
         #[command(subcommand)]

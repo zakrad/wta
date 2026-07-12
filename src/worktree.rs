@@ -749,6 +749,119 @@ Only its committed work is in your worktree. If you need those changes, commit t
     s
 }
 
+/// Single-quote a string for safe embedding in a bash `-c` script.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The bash script that runs a repo's full verify suite (from the worktree cwd):
+/// `.wta/verify.sh` (if present) then every `.wta/checks/*.sh` added by `wta lock`,
+/// under `set -e` so the first failure fails the suite. Paths reference the MAIN repo
+/// `root` (the locked checks live with the repo, but run against each agent's
+/// worktree). `None` if there's nothing to run.
+pub fn verify_suite_script(root: &Path) -> Option<String> {
+    let mut parts: Vec<PathBuf> = Vec::new();
+    let verify = root.join(".wta/verify.sh");
+    if verify.exists() {
+        parts.push(verify);
+    }
+    if let Ok(rd) = std::fs::read_dir(root.join(".wta/checks")) {
+        let mut checks: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sh"))
+            .collect();
+        checks.sort();
+        parts.extend(checks);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut sh = String::from("set -e\n");
+    for p in parts {
+        sh.push_str("bash ");
+        sh.push_str(&sh_quote(&p.to_string_lossy()));
+        sh.push('\n');
+    }
+    Some(sh)
+}
+
+/// True if a repo has anything for the verify gate to run (a `verify.sh` or any
+/// locked checks) — a cheap check for the dashboard's per-agent auto-run.
+pub fn has_verify_suite(root: &Path) -> bool {
+    root.join(".wta/verify.sh").exists() || root.join(".wta/checks").is_dir()
+}
+
+/// Lock a command into a permanent regression check (`.wta/checks/<name>.sh`) that
+/// every future agent's verify suite must pass — so a bug you just found can't
+/// silently come back. `from`/`note` are recorded in the check's header.
+pub fn lock(name: &str, from: Option<&str>, note: Option<&str>, command_args: &[String]) -> Result<()> {
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        bail!("check name must be letters/digits/-/_ (≤64 chars)");
+    }
+    let command = command_args.join(" ");
+    if command.trim().is_empty() {
+        bail!("give the command that must pass after `--`, e.g. `wta lock no-empty-pw -- cargo test rejects_empty`");
+    }
+    let root = repo_root()?;
+    let dir = root.join(".wta/checks");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{name}.sh"));
+    let mut body = format!("#!/usr/bin/env bash\n# wta locked check '{name}'");
+    if let Some(f) = from {
+        body.push_str(&format!(" — from agent {f}"));
+    }
+    if let Some(n) = note {
+        body.push_str(&format!(" — {n}"));
+    }
+    body.push_str(&format!(
+        "\n# Every agent in this repo must pass this. `wta unlock {name}` to remove it.\nset -e\n{}\n",
+        command.trim()
+    ));
+    let existed = path.exists();
+    std::fs::write(&path, body)?;
+    println!("{} locked check '{name}' → {}", if existed { "updated" } else { "added" }, path.display());
+    println!("it now runs as part of every agent's verify gate (`wta loop`, `v` in the dashboard)");
+    Ok(())
+}
+
+/// Remove a locked check.
+pub fn unlock(name: &str) -> Result<()> {
+    let path = repo_root()?.join(".wta/checks").join(format!("{name}.sh"));
+    if !path.exists() {
+        bail!("no locked check '{name}'");
+    }
+    std::fs::remove_file(&path)?;
+    println!("removed locked check '{name}'");
+    Ok(())
+}
+
+/// List locked checks in the current repo.
+pub fn list_locks() -> Result<()> {
+    let dir = repo_root()?.join(".wta/checks");
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("sh") {
+                if let Some(stem) = p.file_stem() {
+                    names.push(stem.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        println!("no locked checks — `wta lock <name> -- <command>` to add one");
+        return Ok(());
+    }
+    names.sort();
+    println!("locked checks (every agent must pass these):");
+    for n in names {
+        println!("  {n}");
+    }
+    Ok(())
+}
+
 /// Re-prompt an agent with the output of `.wta/verify.sh` until it passes (exit 0)
 /// or a **termination guard** trips — an automated maker/checker fix loop that is
 /// safe to leave running. Three guards stop a loop that would otherwise bill
@@ -761,10 +874,10 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
     }
     let root = repo_root()?;
     let repo = repo_id_of(&root);
-    let verify = root.join(".wta/verify.sh");
-    if !verify.exists() {
-        bail!("no .wta/verify.sh in this repo — run `wta init` and put your tests/lint there");
-    }
+    let suite = match verify_suite_script(&root) {
+        Some(s) => s,
+        None => bail!("nothing to verify — add `.wta/verify.sh` (run `wta init`) or lock a check with `wta lock`"),
+    };
     let session = tmux::session_name(&repo, task);
     if !tmux::has_session(&session) {
         bail!("'{task}' isn't running — resume it first (`wta resume {task}`)");
@@ -798,10 +911,10 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
         if over_budget(&start) {
             bail!("stopping: hit the {timeout_secs}s wall-clock budget after {} attempt(s); verify still failing", attempt - 1);
         }
-        println!("[{attempt}/{max}] running .wta/verify.sh …");
-        // Cap verify at the remaining budget so a hung verify.sh can't wedge the loop
-        // past --timeout (unbounded only when no budget is set, to respect long suites).
-        let (code, out) = run_verify_sh(&wt, &verify, remaining(&start));
+        println!("[{attempt}/{max}] running the verify suite …");
+        // Cap verify at the remaining budget so a hung check can't wedge the loop past
+        // --timeout (unbounded only when no budget is set, to respect long suites).
+        let (code, out) = run_verify_sh(&wt, &suite, remaining(&start));
         if code == 0 {
             println!("✓ verify passed on attempt {attempt}");
             return Ok(());
@@ -893,20 +1006,21 @@ fn wait_idle(session: &str, timeout: std::time::Duration) -> Result<()> {
     }
 }
 
-/// Run `.wta/verify.sh` in the agent's worktree; returns (exit code, combined output).
-/// With `deadline = Some(d)`, the process is killed if it runs longer than `d` (so a
-/// hung verify can't wedge the loop past `--timeout`) and its output is captured via a
-/// temp file to avoid pipe-buffer deadlock. With `None` it runs to completion.
-fn run_verify_sh(wt: &Path, verify: &Path, deadline: Option<std::time::Duration>) -> (i32, String) {
+/// Run a bash `script` (the verify suite) in the agent's worktree; returns (exit
+/// code, combined output). With `deadline = Some(d)`, the process is killed if it runs
+/// longer than `d` (so a hung check can't wedge the loop past `--timeout`) and its
+/// output is captured via a temp file to avoid pipe-buffer deadlock. `None` runs to
+/// completion.
+fn run_verify_sh(wt: &Path, script: &str, deadline: Option<std::time::Duration>) -> (i32, String) {
     let d = match deadline {
         None => {
-            return match Command::new("bash").arg(verify).current_dir(wt).output() {
+            return match Command::new("bash").arg("-c").arg(script).current_dir(wt).output() {
                 Ok(o) => {
                     let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
                     s.push_str(&String::from_utf8_lossy(&o.stderr));
                     (o.status.code().unwrap_or(-1), s)
                 }
-                Err(e) => (-1, format!("could not run verify.sh: {e}")),
+                Err(e) => (-1, format!("could not run verify suite: {e}")),
             };
         }
         Some(d) => d,
@@ -921,7 +1035,8 @@ fn run_verify_sh(wt: &Path, verify: &Path, deadline: Option<std::time::Duration>
         Err(e) => return (-1, format!("could not open verify log: {e}")),
     };
     let mut child = match Command::new("bash")
-        .arg(verify)
+        .arg("-c")
+        .arg(script)
         .current_dir(wt)
         .stdout(std::process::Stdio::from(file))
         .stderr(std::process::Stdio::from(err))

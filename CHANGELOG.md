@@ -4,6 +4,18 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.26] — 2026-07-13
+
+### Added
+- **`wta lock` — self-hardening verify (turn a failure into a regression check).**
+  `wta lock <name> -- "<command>"` writes `.wta/checks/<name>.sh`; every agent's verify
+  gate now runs `.wta/verify.sh` **plus** every `.wta/checks/*.sh` (under `set -e`), so
+  a bug you just found can't silently come back — each future agent in the repo must
+  pass it. `wta lock --list` shows them, `wta unlock <name>` removes one. Checks run
+  against each agent's own worktree, exactly like `verify.sh`; a repo can have
+  checks-only (no `verify.sh`). Both `wta loop` and the dashboard's `v` run the full
+  suite. Optional `--from <agent>` / `--note <text>` are recorded in the check header.
+
 ## [0.1.25] — 2026-07-12
 
 ### Added

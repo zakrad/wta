@@ -8,6 +8,7 @@ mod status;
 mod tmux;
 mod worktree;
 
+use anyhow::Context;
 use clap::Parser;
 use cli::{Cli, Command, CronAction};
 
@@ -69,6 +70,15 @@ fn main() -> anyhow::Result<()> {
         Command::Loop { task, max, no_progress, timeout, prompt } => {
             worktree::loop_verify(&task, max, no_progress, timeout, &prompt)?
         }
+        Command::Lock { name, list, from, note, command } => {
+            if list {
+                worktree::list_locks()?;
+            } else {
+                let name = name.context("give a check name (or --list to list)")?;
+                worktree::lock(&name, from.as_deref(), note.as_deref(), &command)?;
+            }
+        }
+        Command::Unlock { name } => worktree::unlock(&name)?,
         Command::Cron { action } => match action {
             CronAction::Add { name, every, repo, prompt } => cron::add(&name, &every, repo, &prompt)?,
             CronAction::List => cron::list()?,
