@@ -15,7 +15,12 @@ All notable changes to **wta** are documented here. The format is based on
   (fire-all-due-once) into system cron / launchd. Each fire spawns a fresh agent
   `<name>-<ts>` that runs the prompt autonomously; review the results in `wta dash`
   the next morning. Routines live in `~/.wta/routines.json` (never clobbered if
-  corrupt); `--every` is floored at 60s so a routine can't flood the fleet.
+  corrupt); `--every` is floored at 60s. Hardened for unattended running (adversarial
+  review): the fire is persisted *before* the agent is spawned (at-most-once — a
+  crash/save-failure can't re-fire duplicates), and a **per-routine concurrency cap**
+  means a routine won't fire again while its previous agent is still around (remove
+  it to let it fire) — so a routine can't pile up a fleet. Run one scheduler (either
+  `cron start` OR `tick` from system cron, not both).
 
 ## [0.1.24] — 2026-07-12
 

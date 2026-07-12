@@ -51,6 +51,24 @@ pub fn has_session(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// All live session names on the wta server (empty if none / no server running).
+pub fn list_sessions() -> Vec<String> {
+    tmux()
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Make an agent session feel like a dedicated app, not raw tmux:
 /// hide the status bar, enable mouse, zero escape latency, bigger scrollback,
 /// and bind Ctrl-q to detach (root table, so no prefix needed).

@@ -2,6 +2,11 @@
 //! can work unattended ("work while you sleep"). Routines live in
 //! `~/.wta/routines.json`. Keep the scheduler alive with `wta cron start` (in a tmux
 //! pane / nohup), or wire `wta cron tick` into system cron / launchd.
+//!
+//! Run ONE scheduler — either `wta cron start` OR `tick` from system cron, not both:
+//! there's no cross-process lock, so two schedulers ticking at once could double-fire
+//! a routine in the same second (the per-routine concurrency cap below then prevents
+//! any further pile-up).
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -66,9 +71,13 @@ fn load() -> Result<Vec<Routine>> {
 
 fn save(rs: &[Routine]) -> Result<()> {
     let p = routines_path()?;
-    let tmp = p.with_extension("json.tmp");
+    // Per-process temp name so two concurrent writers never share the same tmp file.
+    let tmp = p.with_extension(format!("json.tmp.{}", std::process::id()));
     std::fs::write(&tmp, serde_json::to_vec_pretty(rs)?)?;
-    std::fs::rename(&tmp, &p)?; // atomic
+    if let Err(e) = std::fs::rename(&tmp, &p) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).context("saving routines.json");
+    }
     Ok(())
 }
 
@@ -207,22 +216,47 @@ pub fn set_enabled(name: &str, enabled: bool) -> Result<()> {
 pub fn tick() -> Result<usize> {
     let mut rs = load()?;
     let now = now_unix();
-    let mut fired = 0;
-    for r in rs.iter_mut() {
+    if now == 0 {
+        return Ok(0); // clock unreadable — skip rather than treat as "never run"
+    }
+    let live = crate::tmux::list_sessions();
+
+    // Pick the routines to fire: due, AND with no agent of their own still around
+    // (per-routine concurrency cap of 1 — so a routine can't pile up a fleet, and a
+    // long-running agent blocks the next fire until you've reviewed/removed it).
+    let mut to_fire = Vec::new();
+    for (i, r) in rs.iter().enumerate() {
         if !r.is_due(now) {
             continue;
         }
-        match dispatch(r) {
+        let prefix = format!("{}-", crate::tmux::session_name(&crate::worktree::repo_id_of(std::path::Path::new(&r.repo)), &r.name));
+        if live.iter().any(|s| s.starts_with(&prefix)) {
+            println!("[cron] skip '{}' — its previous agent is still around (remove it to let it fire again)", r.name);
+            continue;
+        }
+        to_fire.push(i);
+    }
+    if to_fire.is_empty() {
+        return Ok(0);
+    }
+
+    // Record the fire durably BEFORE spawning anything (at-most-once): if the save or
+    // the process dies now, this cycle is simply skipped — never re-fired as a
+    // duplicate autonomous agent next tick.
+    for &i in &to_fire {
+        rs[i].last_run_unix = now;
+    }
+    save(&rs)?;
+
+    let mut fired = 0;
+    for &i in &to_fire {
+        match dispatch(&rs[i]) {
             Ok(task) => {
-                println!("[cron] fired '{}' → agent '{}'", r.name, task);
-                r.last_run_unix = now;
+                println!("[cron] fired '{}' → agent '{}'", rs[i].name, task);
                 fired += 1;
             }
-            Err(e) => eprintln!("[cron] '{}' failed to dispatch: {e}", r.name),
+            Err(e) => eprintln!("[cron] '{}' failed to dispatch: {e}", rs[i].name),
         }
-    }
-    if fired > 0 {
-        save(&rs)?;
     }
     Ok(fired)
 }
@@ -237,7 +271,10 @@ fn dispatch(r: &Routine) -> Result<String> {
     let task = format!("{}-{}", r.name, now_unix());
     let exe = std::env::current_exe().context("cannot resolve wta binary path")?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.current_dir(&repo).arg("new").arg(&task);
+    // Null stdin so a setup.sh that reads stdin gets EOF instead of blocking when the
+    // scheduler runs in a terminal. (The spawned agent gets its own pty from tmux, so
+    // this doesn't affect it — verified the session still persists.)
+    cmd.current_dir(&repo).stdin(std::process::Stdio::null()).arg("new").arg(&task);
     if !r.prompt.trim().is_empty() {
         cmd.arg("--").arg(&r.prompt);
     }
