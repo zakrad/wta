@@ -4,6 +4,19 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.24] — 2026-07-12
+
+### Added
+- **`wta handoff <from> <new> [-- <prompt>]`** — migrate an agent's context into a
+  new agent: branches the new agent off `<from>`'s branch (carrying its committed
+  work) and seeds the new agent's `CLAUDE.local.md` with a factual handoff note —
+  files changed vs base, its commits, an explicit warning listing any *uncommitted*
+  work that did **not** come along, and your prompt.
+- **`wta loop <task> [--max N] [-- <prompt>]`** — automated maker/checker fix loop:
+  runs `.wta/verify.sh` in the agent's worktree; on failure, relays the output tail
+  to the agent, waits for it to go idle, and re-verifies — until it passes or `--max`
+  attempts (default 6).
+
 ## [0.1.23] — 2026-07-10
 
 ### Added
