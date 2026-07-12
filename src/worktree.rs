@@ -594,7 +594,7 @@ pub fn init() -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     ensure_wta_gitignore(&dir);
     let files = [
-        ("verify.sh", "#!/usr/bin/env bash\n# wta runs this per agent to gate merges — exit non-zero on failure.\nset -e\n# e.g.: cargo test   |   npm test   |   pytest -q   |   make check\n"),
+        ("verify.sh", "#!/usr/bin/env bash\n# wta runs this per agent to gate merges — exit non-zero on failure.\nset -eo pipefail\n# e.g.: cargo test   |   npm test   |   pytest -q   |   make check\n"),
         ("setup.sh", "#!/usr/bin/env bash\n# Runs in each fresh worktree on `wta new`.\n# Isolation slots are available as $WTA_INDEX (0-99) and $WTA_PORT_BASE.\n# e.g.: ln -s ../../node_modules node_modules\n"),
         ("teardown.sh", "#!/usr/bin/env bash\n# Runs on `wta rm`, before the worktree is removed.\n# e.g.: docker compose -p \"$WTA_TASK\" down\n"),
     ];
@@ -760,62 +760,96 @@ fn sh_quote(s: &str) -> String {
 /// `root` (the locked checks live with the repo, but run against each agent's
 /// worktree). `None` if there's nothing to run.
 pub fn verify_suite_script(root: &Path) -> Option<String> {
-    let mut parts: Vec<PathBuf> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
     let verify = root.join(".wta/verify.sh");
     if verify.exists() {
-        parts.push(verify);
+        lines.push(format!("bash {}", sh_quote(&verify.to_string_lossy())));
     }
-    if let Ok(rd) = std::fs::read_dir(root.join(".wta/checks")) {
-        let mut checks: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sh"))
-            .collect();
-        checks.sort();
-        parts.extend(checks);
+    let checks_dir = root.join(".wta/checks");
+    if checks_dir.exists() {
+        match std::fs::read_dir(&checks_dir) {
+            Ok(rd) => {
+                // Only regular files ending in `.sh`. `is_file()` follows symlinks (so a
+                // symlink to a real script still runs) but excludes directories and
+                // dangling symlinks named `*.sh` that would otherwise abort the whole
+                // suite under `set -e`.
+                let mut checks: Vec<PathBuf> = rd
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("sh"))
+                    .collect();
+                checks.sort();
+                for c in checks {
+                    lines.push(format!("bash {}", sh_quote(&c.to_string_lossy())));
+                }
+            }
+            // The dir exists but can't be read — FAIL CLOSED. A locked regression check
+            // silently vanishing is the one thing a merge gate must never allow.
+            Err(_) => lines.push("echo 'wta: .wta/checks/ is unreadable — failing the gate' >&2; exit 1".to_string()),
+        }
     }
-    if parts.is_empty() {
+    if lines.is_empty() {
         return None;
     }
-    let mut sh = String::from("set -e\n");
-    for p in parts {
-        sh.push_str("bash ");
-        sh.push_str(&sh_quote(&p.to_string_lossy()));
+    // `pipefail` so a failure anywhere in a pipeline (`cargo test | tee`) still fails.
+    let mut sh = String::from("set -eo pipefail\n");
+    for l in lines {
+        sh.push_str(&l);
         sh.push('\n');
     }
     Some(sh)
 }
 
-/// True if a repo has anything for the verify gate to run (a `verify.sh` or any
-/// locked checks) — a cheap check for the dashboard's per-agent auto-run.
+/// True if a repo has anything for the verify gate to run (a `verify.sh` or ≥1 locked
+/// check) — a cheap check for the dashboard's per-agent auto-run. Kept in sync with
+/// `verify_suite_script` (an empty `.wta/checks/` dir is NOT a suite).
 pub fn has_verify_suite(root: &Path) -> bool {
-    root.join(".wta/verify.sh").exists() || root.join(".wta/checks").is_dir()
+    if root.join(".wta/verify.sh").exists() {
+        return true;
+    }
+    std::fs::read_dir(root.join(".wta/checks"))
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                let p = e.path();
+                p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("sh")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Valid name for a locked check / used by lock+unlock (also blocks path traversal).
+fn valid_check_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Lock a command into a permanent regression check (`.wta/checks/<name>.sh`) that
 /// every future agent's verify suite must pass — so a bug you just found can't
 /// silently come back. `from`/`note` are recorded in the check's header.
 pub fn lock(name: &str, from: Option<&str>, note: Option<&str>, command_args: &[String]) -> Result<()> {
-    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !valid_check_name(name) {
         bail!("check name must be letters/digits/-/_ (≤64 chars)");
     }
     let command = command_args.join(" ");
     if command.trim().is_empty() {
         bail!("give the command that must pass after `--`, e.g. `wta lock no-empty-pw -- cargo test rejects_empty`");
     }
-    let root = repo_root()?;
-    let dir = root.join(".wta/checks");
+    // Act on the MAIN repo's .wta/checks (where the gate reads), even if run from an
+    // agent worktree.
+    let dir = main_root()?.join(".wta/checks");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{name}.sh"));
+    // Strip newlines so a --from/--note can't break out of the `#` comment line and
+    // inject shell into a check that runs, unattended, in every agent's worktree.
+    let clean = |s: &str| s.replace(['\n', '\r'], " ");
     let mut body = format!("#!/usr/bin/env bash\n# wta locked check '{name}'");
     if let Some(f) = from {
-        body.push_str(&format!(" — from agent {f}"));
+        body.push_str(&format!(" — from agent {}", clean(f)));
     }
     if let Some(n) = note {
-        body.push_str(&format!(" — {n}"));
+        body.push_str(&format!(" — {}", clean(n)));
     }
     body.push_str(&format!(
-        "\n# Every agent in this repo must pass this. `wta unlock {name}` to remove it.\nset -e\n{}\n",
+        "\n# Every agent in this repo must pass this. `wta unlock {name}` to remove it.\nset -eo pipefail\n{}\n",
         command.trim()
     ));
     let existed = path.exists();
@@ -827,7 +861,10 @@ pub fn lock(name: &str, from: Option<&str>, note: Option<&str>, command_args: &[
 
 /// Remove a locked check.
 pub fn unlock(name: &str) -> Result<()> {
-    let path = repo_root()?.join(".wta/checks").join(format!("{name}.sh"));
+    if !valid_check_name(name) {
+        bail!("invalid check name (letters/digits/-/_ only)");
+    }
+    let path = main_root()?.join(".wta/checks").join(format!("{name}.sh"));
     if !path.exists() {
         bail!("no locked check '{name}'");
     }
@@ -838,12 +875,12 @@ pub fn unlock(name: &str) -> Result<()> {
 
 /// List locked checks in the current repo.
 pub fn list_locks() -> Result<()> {
-    let dir = repo_root()?.join(".wta/checks");
+    let dir = main_root()?.join(".wta/checks");
     let mut names: Vec<String> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("sh") {
+            if p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("sh") {
                 if let Some(stem) = p.file_stem() {
                     names.push(stem.to_string_lossy().into_owned());
                 }
