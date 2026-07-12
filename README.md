@@ -83,7 +83,7 @@ wta ls | matrix                      list agents · preview pairwise branch conf
 wta fanout <name> -n N -- <prompt>   spawn N agents on one prompt → compare (matrix) → merge the winner
 wta review <builder> [--by <cmd>]    spawn an independent reviewer agent on <builder>'s branch (maker/checker)
 wta handoff <from> <new> [-- <p>]    migrate <from>'s context into a new agent (branch off it + seed a handoff note)
-wta loop <task> [--max N] [-- <p>]   re-prompt an agent with .wta/verify.sh output until it passes (or --max attempts)
+wta loop <task> [--max N] [--no-progress N] [--timeout S] [-- <p>]   re-prompt until .wta/verify.sh passes (guards: attempts, no-progress, wall-clock)
 wta send <task> "<msg>"              relay a note into another agent's pane (agents can call this too)
 wta board ["<claim>"]                shared coordination board (print, or append a claim)
 wta init                             scaffold .wta/ convention stubs (verify.sh, setup.sh, teardown.sh)

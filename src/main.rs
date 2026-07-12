@@ -65,7 +65,9 @@ fn main() -> anyhow::Result<()> {
         Command::Review { builder, by } => worktree::review(&builder, by.as_deref())?,
         Command::Init => worktree::init()?,
         Command::Handoff { from, new, prompt } => worktree::handoff(&from, &new, &prompt)?,
-        Command::Loop { task, max, prompt } => worktree::loop_verify(&task, max, &prompt)?,
+        Command::Loop { task, max, no_progress, timeout, prompt } => {
+            worktree::loop_verify(&task, max, no_progress, timeout, &prompt)?
+        }
         Command::Send { task, message } => worktree::send(&task, &message.join(" "))?,
         Command::Board { entry } => {
             let joined = entry.join(" ");

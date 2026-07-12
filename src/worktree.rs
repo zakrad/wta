@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -750,9 +750,12 @@ Only its committed work is in your worktree. If you need those changes, commit t
 }
 
 /// Re-prompt an agent with the output of `.wta/verify.sh` until it passes (exit 0)
-/// or `max` attempts are spent — an automated maker/checker fix loop. Runs in the
-/// foreground, printing each attempt; drive it and watch the agent in `wta dash`.
-pub fn loop_verify(task: &str, max: u32, agent_args: &[String]) -> Result<()> {
+/// or a **termination guard** trips — an automated maker/checker fix loop that is
+/// safe to leave running. Three guards stop a loop that would otherwise bill
+/// forever: `max` attempts, a wall-clock `timeout_secs` budget (0 = off), and a
+/// no-progress detector (`no_progress` = stop if the agent leaves its diff unchanged
+/// that many attempts running; 0 = off). Foreground; watch the agent in `wta dash`.
+pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, agent_args: &[String]) -> Result<()> {
     let root = repo_root()?;
     let repo = repo_id_of(&root);
     let verify = root.join(".wta/verify.sh");
@@ -768,6 +771,9 @@ pub fn loop_verify(task: &str, max: u32, agent_args: &[String]) -> Result<()> {
         bail!("no worktree for '{task}' at {}", wt.display());
     }
 
+    let start = std::time::Instant::now();
+    let budget = (timeout_secs > 0).then(|| std::time::Duration::from_secs(timeout_secs));
+
     // Optional kickoff prompt before the first verify.
     let prompt = agent_args.join(" ");
     if !prompt.trim().is_empty() {
@@ -775,7 +781,18 @@ pub fn loop_verify(task: &str, max: u32, agent_args: &[String]) -> Result<()> {
         drive(&session, &prompt)?;
     }
 
+    // no-progress guard baseline: the agent's diff before the loop starts.
+    let mut last_diff = worktree_diff_hash(&wt);
+    let mut stalled = 0u32;
+
     for attempt in 1..=max {
+        // Budget guard: check before spending another expensive attempt.
+        if let Some(b) = budget {
+            if start.elapsed() >= b {
+                println!("⏱ stopping: hit the {timeout_secs}s budget after {} attempt(s)", attempt - 1);
+                return Ok(());
+            }
+        }
         println!("[{attempt}/{max}] running .wta/verify.sh …");
         let (code, out) = run_verify_sh(&wt, &verify);
         if code == 0 {
@@ -789,9 +806,36 @@ pub fn loop_verify(task: &str, max: u32, agent_args: &[String]) -> Result<()> {
             tail.replace('\n', " ⏎ "),
         );
         drive(&session, &msg)?;
+
+        // No-progress guard: a stuck agent that stops changing anything would
+        // otherwise loop to `max` billing every round for no reason.
+        if no_progress > 0 {
+            let now = worktree_diff_hash(&wt);
+            if now == last_diff {
+                stalled += 1;
+                if stalled >= no_progress {
+                    println!("⚠ stopping: '{task}' left its diff unchanged for {stalled} attempt(s) — it looks stuck");
+                    return Ok(());
+                }
+            } else {
+                stalled = 0;
+                last_diff = now;
+            }
+        }
     }
-    println!("still failing after {max} attempts — inspect '{task}' in `wta dash`");
+    println!("stopping: still failing after the {max}-attempt cap — inspect '{task}' in `wta dash`");
     Ok(())
+}
+
+/// Hash the agent's current changes (tracked diff vs HEAD + the untracked/staged
+/// file list) so the loop can tell whether an attempt actually changed anything.
+fn worktree_diff_hash(wt: &Path) -> u64 {
+    let diff = run_git(&["diff", "HEAD"], Some(wt)).unwrap_or_default();
+    let status = run_git(&["status", "--porcelain"], Some(wt)).unwrap_or_default();
+    let mut h = DefaultHasher::new();
+    diff.hash(&mut h);
+    status.hash(&mut h);
+    h.finish()
 }
 
 /// Send a message to an agent and block until it has (very likely) finished

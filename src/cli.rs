@@ -81,13 +81,19 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         prompt: Vec<String>,
     },
-    /// Re-prompt an agent with `.wta/verify.sh` output until it passes (or --max attempts)
+    /// Re-prompt an agent with `.wta/verify.sh` output until it passes (or a guard trips)
     Loop {
         /// the agent to drive
         task: String,
-        /// give up after this many fix attempts
+        /// guard: give up after this many fix attempts
         #[arg(long, default_value_t = 6)]
         max: u32,
+        /// guard: stop if the agent's diff is unchanged this many attempts running (0 = off)
+        #[arg(long = "no-progress", default_value_t = 2)]
+        no_progress: u32,
+        /// guard: overall wall-clock budget in seconds (0 = no limit)
+        #[arg(long, default_value_t = 0)]
+        timeout: u64,
         /// optional kickoff prompt sent before the first verify (everything after the task)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         prompt: Vec<String>,

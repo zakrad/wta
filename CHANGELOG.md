@@ -12,10 +12,15 @@ All notable changes to **wta** are documented here. The format is based on
   work) and seeds the new agent's `CLAUDE.local.md` with a factual handoff note —
   files changed vs base, its commits, an explicit warning listing any *uncommitted*
   work that did **not** come along, and your prompt.
-- **`wta loop <task> [--max N] [-- <prompt>]`** — automated maker/checker fix loop:
-  runs `.wta/verify.sh` in the agent's worktree; on failure, relays the output tail
-  to the agent, waits for it to go idle, and re-verifies — until it passes or `--max`
-  attempts (default 6).
+- **`wta loop <task> [--max N] [--no-progress N] [--timeout SECS] [-- <prompt>]`** —
+  automated maker/checker fix loop: runs `.wta/verify.sh` in the agent's worktree;
+  on failure, relays the output tail to the agent, waits for it to go idle, and
+  re-verifies — until it passes or a **termination guard** trips. Three guards make
+  it safe to leave running unattended: an iteration cap (`--max`, default 6), a
+  wall-clock budget (`--timeout` seconds, 0 = off), and a **no-progress detector**
+  (`--no-progress`, default 2 — stop if the agent leaves its worktree diff unchanged
+  that many attempts running). Without these a verify that never passes would loop
+  and bill forever.
 
 ## [0.1.23] — 2026-07-10
 
