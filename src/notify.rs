@@ -113,9 +113,11 @@ pub fn tmux_popup(title: &str, body: &str) {
     let w = (t.chars().count().max(b.chars().count()) + 5).clamp(22, 60);
     // Exactly two lines, no trailing newline (with -h 4 that fills the box, no blank
     // bottom line). `stty -echo` on the popup's own pty means keystrokes the modal
-    // popup captures don't echo a stray newline into the box. printf uses %s so the
+    // popup captures don't echo a stray newline into the box. `read -t N -s -n 1`
+    // closes the popup on the FIRST keypress (silently) or after N seconds — so it
+    // gets out of your way the moment you touch the keyboard. printf uses %s so the
     // message is never a format string. \342\232\241 = ⚡ in UTF-8 octal.
-    let script = format!("stty -echo 2>/dev/null; printf '  \\342\\232\\241 %s\\n  %s' '{t}' '{b}'; sleep {secs}");
+    let script = format!("stty -echo 2>/dev/null; printf '  \\342\\232\\241 %s\\n  %s' '{t}' '{b}'; read -t {secs} -s -n 1 2>/dev/null");
     let _ = Command::new("tmux")
         .args([
             "-S", &socket, "display-popup",
