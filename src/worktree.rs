@@ -426,12 +426,22 @@ fn preseed_claude_trust(wt: &Path) {
 }
 
 pub fn new(task: &str, agent_args: &[String]) -> Result<()> {
-    new_impl(task, agent_args, None)
+    new_impl(task, agent_args, None, None)
 }
 
 /// Like `new`, but base the agent's branch on an existing branch.
 pub fn new_with_base(task: &str, agent_args: &[String], base: &str) -> Result<()> {
-    new_impl(task, agent_args, Some(base))
+    new_impl(task, agent_args, Some(base), None)
+}
+
+/// Append `content` to the worktree's `CLAUDE.local.md` (create if absent).
+/// Returns whether it was written (so the caller can mark it injected).
+fn append_local_md(wt: &Path, content: &str) -> bool {
+    use std::io::Write;
+    match std::fs::OpenOptions::new().create(true).append(true).open(wt.join("CLAUDE.local.md")) {
+        Ok(mut f) => f.write_all(content.as_bytes()).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// A short "other agents active now" snapshot for turn-zero awareness, derived
@@ -479,11 +489,17 @@ fn write_fleet_digest(root: &Path, wt: &Path, task: &str) -> Option<String> {
     Some("CLAUDE.local.md".to_string())
 }
 
-fn new_impl(task: &str, agent_args: &[String], base: Option<&str>) -> Result<()> {
+fn new_impl(task: &str, agent_args: &[String], base: Option<&str>, seed: Option<&str>) -> Result<()> {
     validate_task(task)?;
     let repo = repo_id()?;
     let idx = assign_slot(&repo); // pick the slot before creating, so setup.sh sees it
     let (root, wt, mut injected) = make_worktree(task, base, idx)?;
+    // handoff / caller-supplied context, seeded into CLAUDE.local.md before the agent starts
+    if let Some(note) = seed {
+        if append_local_md(&wt, note) && !injected.iter().any(|f| f == "CLAUDE.local.md") {
+            injected.push("CLAUDE.local.md".to_string());
+        }
+    }
     // turn-zero awareness: tell the new agent who else is active + how to coordinate
     if let Some(f) = write_fleet_digest(&root, &wt, task) {
         if !injected.contains(&f) {
@@ -672,6 +688,170 @@ pub fn send(task: &str, message: &str) -> Result<()> {
     tmux::send_text(&session, &framed)?;
     println!("→ {task}: {}", msg.chars().take(70).collect::<String>());
     Ok(())
+}
+
+/// Migrate one agent's context into a NEW agent: branch the new agent off `from`'s
+/// branch (so its committed work is carried over) and seed the new agent's
+/// `CLAUDE.local.md` with a factual handoff note (what `from` changed, its commits,
+/// and any uncommitted work that did NOT come along), plus the caller's prompt.
+pub fn handoff(from: &str, new: &str, agent_args: &[String]) -> Result<()> {
+    validate_task(new)?;
+    let root = repo_root()?;
+    let from_branch = branch_name(from);
+    if run_git(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{from_branch}")], Some(&root)).is_err() {
+        bail!("no agent '{from}' here to hand off from (branch '{from_branch}' not found)");
+    }
+    let prompt = agent_args.join(" ");
+    let note = handoff_note(&root, from, &from_branch, prompt.trim());
+    // Pass the prompt as the new agent's initial instruction too, so it starts working.
+    new_impl(new, agent_args, Some(&from_branch), Some(&note))?;
+    println!("handed off '{from}' → '{new}' (branched from {from_branch}; context in CLAUDE.local.md)");
+    if let Some(hint) = instructions_hint() {
+        eprintln!("{hint}");
+    }
+    Ok(())
+}
+
+/// The handoff note seeded into the new agent's CLAUDE.local.md.
+fn handoff_note(root: &Path, from: &str, from_branch: &str, prompt: &str) -> String {
+    let base = base_branch(root);
+    let stat = run_git(&["diff", "--stat", &format!("{base}...{from_branch}")], Some(root)).unwrap_or_default();
+    let commits = run_git(
+        &["log", "--oneline", "--no-decorate", "-n", "20", &format!("{base}..{from_branch}")],
+        Some(root),
+    )
+    .unwrap_or_default();
+    let from_wt = worktrees_dir(root).join(from);
+    let dirty = run_git(&["status", "--porcelain"], Some(&from_wt)).unwrap_or_default();
+    let dirty_lines: Vec<&str> = dirty.lines().filter(|l| !l.trim().is_empty()).collect();
+
+    let mut s = format!(
+        "\n# Handoff from agent `{from}`\n\nYou are continuing the work of agent `{from}` (branch `{from_branch}`). \
+Your worktree is branched from its latest commit, so its **committed** changes are already here.\n\n"
+    );
+    if !stat.trim().is_empty() {
+        s.push_str(&format!("## Files it changed (vs `{base}`)\n```\n{}\n```\n\n", stat.trim()));
+    }
+    if !commits.trim().is_empty() {
+        s.push_str(&format!("## Its commits\n```\n{}\n```\n\n", commits.trim()));
+    }
+    if !dirty_lines.is_empty() {
+        s.push_str(&format!(
+            "## ⚠ Uncommitted work in `{from}` was NOT carried over\n`{from}` has {} uncommitted path(s) below. \
+Only its committed work is in your worktree. If you need those changes, commit them in `{from}` first, then re-run the handoff.\n```\n{}\n```\n\n",
+            dirty_lines.len(),
+            dirty_lines.join("\n"),
+        ));
+    }
+    s.push_str("## Your task\n");
+    s.push_str(if prompt.is_empty() { "Continue where the previous agent left off." } else { prompt });
+    s.push('\n');
+    s
+}
+
+/// Re-prompt an agent with the output of `.wta/verify.sh` until it passes (exit 0)
+/// or `max` attempts are spent — an automated maker/checker fix loop. Runs in the
+/// foreground, printing each attempt; drive it and watch the agent in `wta dash`.
+pub fn loop_verify(task: &str, max: u32, agent_args: &[String]) -> Result<()> {
+    let root = repo_root()?;
+    let repo = repo_id_of(&root);
+    let verify = root.join(".wta/verify.sh");
+    if !verify.exists() {
+        bail!("no .wta/verify.sh in this repo — run `wta init` and put your tests/lint there");
+    }
+    let session = tmux::session_name(&repo, task);
+    if !tmux::has_session(&session) {
+        bail!("'{task}' isn't running — resume it first (`wta resume {task}`)");
+    }
+    let wt = worktrees_dir(&root).join(task);
+    if !wt.exists() {
+        bail!("no worktree for '{task}' at {}", wt.display());
+    }
+
+    // Optional kickoff prompt before the first verify.
+    let prompt = agent_args.join(" ");
+    if !prompt.trim().is_empty() {
+        println!("→ {task}: {}", prompt.chars().take(70).collect::<String>());
+        drive(&session, &prompt)?;
+    }
+
+    for attempt in 1..=max {
+        println!("[{attempt}/{max}] running .wta/verify.sh …");
+        let (code, out) = run_verify_sh(&wt, &verify);
+        if code == 0 {
+            println!("✓ verify passed on attempt {attempt}");
+            return Ok(());
+        }
+        let tail = tail_lines(&out, 40);
+        println!("✗ verify failed (exit {code}) — asking '{task}' to fix");
+        let msg = format!(
+            "`.wta/verify.sh` failed (exit {code}). Fix the underlying cause and finish. Last output: {}",
+            tail.replace('\n', " ⏎ "),
+        );
+        drive(&session, &msg)?;
+    }
+    println!("still failing after {max} attempts — inspect '{task}' in `wta dash`");
+    Ok(())
+}
+
+/// Send a message to an agent and block until it has (very likely) finished
+/// responding — used by the verify loop. Waits for idle before AND after sending.
+fn drive(session: &str, message: &str) -> Result<()> {
+    let ready = std::time::Duration::from_secs(20 * 60);
+    let done = std::time::Duration::from_secs(30 * 60);
+    wait_idle(session, ready)?;
+    let pane = tmux::capture(session).unwrap_or_default();
+    if tmux::looks_interactive_dialog(&pane) {
+        bail!("'{session}' is at a prompt/dialog — refusing to drive it");
+    }
+    let framed = format!("[wta:loop] {}", message.replace('\n', " "));
+    tmux::send_text(session, &framed)?;
+    // Give it a beat to echo the prompt and start working, so the idle-wait below
+    // doesn't immediately return on the pre-work stable screen.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    wait_idle(session, done)?;
+    Ok(())
+}
+
+/// Block until the agent's pane has been unchanged for a few consecutive samples
+/// (a good-enough "it stopped working" signal), or `timeout` elapses.
+fn wait_idle(session: &str, timeout: std::time::Duration) -> Result<()> {
+    let start = std::time::Instant::now();
+    let mut last = String::new();
+    let mut stable = 0;
+    loop {
+        if start.elapsed() > timeout {
+            bail!("timed out waiting for '{session}' to go idle");
+        }
+        let now = tmux::capture(session).unwrap_or_default();
+        if !now.is_empty() && now == last {
+            stable += 1;
+            if stable >= 3 {
+                return Ok(());
+            }
+        } else {
+            stable = 0;
+            last = now;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(800));
+    }
+}
+
+/// Run `.wta/verify.sh` in the agent's worktree; returns (exit code, combined output).
+fn run_verify_sh(wt: &Path, verify: &Path) -> (i32, String) {
+    match Command::new("bash").arg(verify).current_dir(wt).output() {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            (o.status.code().unwrap_or(-1), s)
+        }
+        Err(e) => (-1, format!("could not run verify.sh: {e}")),
+    }
+}
+
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
 /// Local branches a new agent could be based on (excludes wta's own `agent/*`).

@@ -71,6 +71,27 @@ pub enum Command {
     },
     /// Scaffold `.wta/` convention stubs (verify.sh, setup.sh, teardown.sh)
     Init,
+    /// Migrate <from>'s context into a NEW agent: branch off it + seed a handoff note
+    Handoff {
+        /// the agent to hand off FROM (its committed work is carried over)
+        from: String,
+        /// the new agent's task name
+        new: String,
+        /// initial prompt for the new agent (everything after the names)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        prompt: Vec<String>,
+    },
+    /// Re-prompt an agent with `.wta/verify.sh` output until it passes (or --max attempts)
+    Loop {
+        /// the agent to drive
+        task: String,
+        /// give up after this many fix attempts
+        #[arg(long, default_value_t = 6)]
+        max: u32,
+        /// optional kickoff prompt sent before the first verify (everything after the task)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        prompt: Vec<String>,
+    },
     /// Send a one-line note into another agent's pane (agents can call this too)
     Send {
         /// the agent to message
