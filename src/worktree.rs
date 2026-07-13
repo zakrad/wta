@@ -910,7 +910,7 @@ pub fn list_locks() -> Result<()> {
 
 /// `wta cost [<task>]` — token usage + estimated $ per agent, from Claude's
 /// transcripts. Tokens are exact; the dollar figure is a list-price estimate.
-pub fn show_cost(task: Option<&str>) -> Result<()> {
+pub fn show_cost(task: Option<&str>, chart: bool, json: bool) -> Result<()> {
     let all = list_managed()?;
     let agents: Vec<Worktree> = match task {
         Some(t) => all.into_iter().filter(|a| a.task == t).collect(),
@@ -925,6 +925,48 @@ pub fn show_cost(task: Option<&str>) -> Result<()> {
             }
         }
     }
+
+    if json {
+        // Per-agent per-message time series, for external analysis / charting / diffing.
+        let mut map = serde_json::Map::new();
+        for a in &agents {
+            map.insert(a.task.clone(), serde_json::to_value(crate::cost::timeline(&a.path))?);
+        }
+        println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(map))?);
+        return Ok(());
+    }
+
+    if chart {
+        let short_model = |m: &str| m.strip_prefix("claude-").unwrap_or(m).to_string();
+        let short_ts = |t: &str| t.chars().take(16).collect::<String>().replace('T', " ");
+        for a in &agents {
+            let tl = crate::cost::timeline(&a.path);
+            if tl.is_empty() {
+                println!("▸ {:<24} (no claude usage recorded)", a.task);
+                continue;
+            }
+            let last = tl.last().unwrap();
+            let deltas: Vec<f64> = tl.iter().map(|s| s.delta_usd).collect();
+            let models = crate::cost::model_runs(&tl)
+                .iter()
+                .map(|(m, _, n)| format!("{} ×{n}", short_model(m)))
+                .collect::<Vec<_>>()
+                .join(" → ");
+            println!(
+                "▸ {}   ~${:.2} · {} tok · {} msgs",
+                a.task,
+                last.cum_usd,
+                crate::cost::human_tokens(last.cum_tokens),
+                tl.len()
+            );
+            println!("   burn  {}", crate::cost::sparkline(&deltas, 44));
+            println!("   span  {} → {}", short_ts(&tl.first().unwrap().ts), short_ts(&last.ts));
+            println!("   model {models}");
+        }
+        println!("\n(burn = spend per time-bucket, oldest→newest; ~$ estimated. From Claude transcripts — no tracking overhead.)");
+        return Ok(());
+    }
+
     let mut total = crate::cost::Usage::default();
     println!("{:<26} {:>9}  {:>9}  in/out/cache", "AGENT", "~USD", "TOKENS");
     for a in &agents {

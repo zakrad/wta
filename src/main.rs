@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Ls => worktree::ls()?,
-        Command::Cost { task } => worktree::show_cost(task.as_deref())?,
+        Command::Cost { task, chart, json } => worktree::show_cost(task.as_deref(), chart, json)?,
         Command::Matrix => worktree::matrix()?,
         Command::Fanout {
             name,

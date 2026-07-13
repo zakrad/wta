@@ -46,6 +46,12 @@ pub enum Command {
     Cost {
         /// a single agent (default: all agents in this repo, with a total)
         task: Option<String>,
+        /// spend-over-time: a burn sparkline + model timeline per agent (compare side by side)
+        #[arg(long)]
+        chart: bool,
+        /// dump the per-message time series (ts, tokens, $, model) as JSON for analysis
+        #[arg(long)]
+        json: bool,
     },
     /// Preview which agent branches merge cleanly vs each other + base (no files touched)
     Matrix,

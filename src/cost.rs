@@ -53,6 +53,8 @@ struct Line {
     #[serde(default, rename = "type")]
     kind: String,
     #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
     message: Option<Msg>,
 }
 #[derive(Deserialize)]
@@ -146,4 +148,109 @@ pub fn human_tokens(n: u64) -> String {
 /// Compact render, e.g. `~$0.42 · 1.3M tok`.
 pub fn short(u: &Usage) -> String {
     format!("~${:.2} · {} tok", u.est_usd, human_tokens(u.tokens()))
+}
+
+/// One assistant message's usage in time order — the raw material for a per-agent
+/// spend-over-time chart, model-change tracking, and cross-agent comparison. All from
+/// the transcript Claude Code already writes (no polling / background tracking).
+#[derive(serde::Serialize, Clone)]
+pub struct Sample {
+    pub ts: String,
+    pub model: String,
+    pub delta_tokens: u64,
+    pub delta_usd: f64,
+    pub cum_tokens: u64,
+    pub cum_usd: f64,
+}
+
+/// The agent's full spend timeline, one entry per assistant message, sorted by time
+/// (merged across resumed sessions), with running cumulative totals.
+pub fn timeline(wt: &Path) -> Vec<Sample> {
+    let dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude/projects").join(encode(wt)),
+        None => return Vec::new(),
+    };
+    let mut raw: Vec<(String, String, u64, f64)> = Vec::new();
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&p) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        for line in content.lines() {
+            let l: Line = match serde_json::from_str(line) {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            if l.kind != "assistant" {
+                continue;
+            }
+            let ts = l.timestamp.unwrap_or_default();
+            let (model, u) = match l.message.and_then(|m| m.usage.map(|u| (m.model.unwrap_or_default(), u))) {
+                Some(v) => v,
+                None => continue,
+            };
+            let tok = u.input_tokens + u.output_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;
+            if tok == 0 {
+                continue;
+            }
+            let (pin, pout) = price(&model);
+            let usd = (u.input_tokens as f64 * pin
+                + u.cache_creation_input_tokens as f64 * pin * 1.25
+                + u.cache_read_input_tokens as f64 * pin * 0.10
+                + u.output_tokens as f64 * pout)
+                / 1_000_000.0;
+            raw.push((ts, model, tok, usd));
+        }
+    }
+    raw.sort_by(|a, b| a.0.cmp(&b.0)); // ISO timestamps sort lexically = chronological
+    let (mut ct, mut cu) = (0u64, 0.0);
+    raw.into_iter()
+        .map(|(ts, model, tok, usd)| {
+            ct += tok;
+            cu += usd;
+            Sample { ts, model, delta_tokens: tok, delta_usd: usd, cum_tokens: ct, cum_usd: cu }
+        })
+        .collect()
+}
+
+/// A unicode sparkline of `vals`, bucketed to at most `width` columns (each column is
+/// the SUM of its bucket — so it shows *where* spend happened, not a monotone ramp).
+pub fn sparkline(vals: &[f64], width: usize) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if vals.is_empty() || width == 0 {
+        return String::new();
+    }
+    let cols = width.min(vals.len()).max(1);
+    let mut buckets = vec![0.0f64; cols];
+    for (i, v) in vals.iter().enumerate() {
+        buckets[i * cols / vals.len()] += *v;
+    }
+    let max = buckets.iter().cloned().fold(0.0, f64::max).max(1e-12);
+    buckets
+        .iter()
+        .map(|b| {
+            let lvl = ((b / max) * 7.0).round() as usize;
+            BARS[lvl.min(7)]
+        })
+        .collect()
+}
+
+/// The model changes across a timeline, as `(model, first_ts, message_count)` runs.
+pub fn model_runs(tl: &[Sample]) -> Vec<(String, String, u64)> {
+    let mut runs: Vec<(String, String, u64)> = Vec::new();
+    for s in tl {
+        match runs.last_mut() {
+            Some(r) if r.0 == s.model => r.2 += 1,
+            _ => runs.push((s.model.clone(), s.ts.clone(), 1)),
+        }
+    }
+    runs
 }
