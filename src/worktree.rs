@@ -910,7 +910,7 @@ pub fn list_locks() -> Result<()> {
 
 /// `wta cost [<task>]` — token usage + estimated $ per agent, from Claude's
 /// transcripts. Tokens are exact; the dollar figure is a list-price estimate.
-pub fn show_cost(task: Option<&str>, chart: bool, json: bool) -> Result<()> {
+pub fn show_cost(task: Option<&str>, chart: bool, json: bool, usd: bool, cumulative: bool) -> Result<()> {
     let all = list_managed()?;
     let agents: Vec<Worktree> = match task {
         Some(t) => all.into_iter().filter(|a| a.task == t).collect(),
@@ -947,7 +947,22 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool) -> Result<()> {
                 .join(" → ")
         };
 
-        // A single agent gets a tall "tokens × time" chart you can actually read.
+        // Y-axis label formatter: dollars (adaptive precision) or human tokens.
+        let fmt_y = |v: f64| {
+            if usd {
+                if v >= 100.0 {
+                    format!("${v:.0}")
+                } else if v >= 1.0 {
+                    format!("${v:.1}")
+                } else {
+                    format!("${v:.2}")
+                }
+            } else {
+                crate::cost::human_tokens(v as u64)
+            }
+        };
+
+        // A single agent gets a tall chart you can actually read.
         if agents.len() == 1 {
             let a = &agents[0];
             let tl = crate::cost::timeline(&a.path);
@@ -957,15 +972,26 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool) -> Result<()> {
             }
             let last = tl.last().unwrap();
             let (w, h) = (56usize, 12usize);
-            let toks: Vec<f64> = tl.iter().map(|s| s.delta_tokens as f64).collect();
-            let (rows, max) = crate::cost::barchart(&toks, w, h);
+            // Y = $ or tokens; cumulative running-total level, or per-bucket rate.
+            let values: Vec<f64> = tl
+                .iter()
+                .map(|s| match (usd, cumulative) {
+                    (true, true) => s.cum_usd,
+                    (true, false) => s.delta_usd,
+                    (false, true) => s.cum_tokens as f64,
+                    (false, false) => s.delta_tokens as f64,
+                })
+                .collect();
+            let (rows, max) = crate::cost::barchart(&values, w, h, cumulative);
             let cols = rows.first().map(|r| r.chars().count()).unwrap_or(0);
-            println!("{} — tokens per time-bucket (oldest → newest)\n", a.task);
+            let unit = if usd { "$" } else { "tokens" };
+            let shape = if cumulative { "cumulative" } else { "per time-bucket" };
+            println!("{} — {unit} {shape} (oldest → newest)\n", a.task);
             for (i, row) in rows.iter().enumerate() {
                 let ylab = if i == 0 {
-                    crate::cost::human_tokens(max as u64)
+                    fmt_y(max)
                 } else if i + 1 == rows.len() {
-                    "0".to_string()
+                    if usd { "$0".to_string() } else { "0".to_string() }
                 } else {
                     String::new()
                 };
@@ -996,7 +1022,10 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool) -> Result<()> {
                 continue;
             }
             let last = tl.last().unwrap();
-            let deltas: Vec<f64> = tl.iter().map(|s| s.delta_usd).collect();
+            let deltas: Vec<f64> = tl
+                .iter()
+                .map(|s| if usd { s.delta_usd } else { s.delta_tokens as f64 })
+                .collect();
             let models = crate::cost::model_runs(&tl)
                 .iter()
                 .map(|(m, _, n)| format!("{} ×{n}", short_model(m)))
@@ -1013,7 +1042,8 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool) -> Result<()> {
             println!("   span  {} → {}", short_ts(&tl.first().unwrap().ts), short_ts(&last.ts));
             println!("   model {models}");
         }
-        println!("\n(burn = spend per time-bucket, oldest→newest; ~$ estimated. From Claude transcripts — no tracking overhead.)");
+        let unit = if usd { "spend" } else { "tokens" };
+        println!("\n(burn = {unit} per time-bucket, oldest→newest; ~$ estimated. From Claude transcripts — no tracking overhead.)");
         return Ok(());
     }
 

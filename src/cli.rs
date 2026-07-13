@@ -49,6 +49,12 @@ pub enum Command {
         /// spend-over-time: a burn sparkline + model timeline per agent (compare side by side)
         #[arg(long)]
         chart: bool,
+        /// chart dollars instead of tokens (Y-axis in estimated $)
+        #[arg(long)]
+        usd: bool,
+        /// chart the cumulative running total instead of the per-bucket rate
+        #[arg(long)]
+        cumulative: bool,
         /// dump the per-message time series (ts, tokens, $, model) as JSON for analysis
         #[arg(long)]
         json: bool,

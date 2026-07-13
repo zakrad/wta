@@ -247,7 +247,7 @@ pub fn sparkline(vals: &[f64], width: usize) -> String {
 /// column = the SUM of its bucket), `height` rows tall. Uses eighth-block glyphs for
 /// sub-row resolution. Returns `height` strings, top row first. `max` (returned) is
 /// the value of a full-height column, for the Y-axis label.
-pub fn barchart(values: &[f64], width: usize, height: usize) -> (Vec<String>, f64) {
+pub fn barchart(values: &[f64], width: usize, height: usize, cumulative: bool) -> (Vec<String>, f64) {
     const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     if values.is_empty() || width == 0 || height == 0 {
         return (Vec::new(), 0.0);
@@ -255,7 +255,14 @@ pub fn barchart(values: &[f64], width: usize, height: usize) -> (Vec<String>, f6
     let cols = width.min(values.len()).max(1);
     let mut buckets = vec![0.0f64; cols];
     for (i, v) in values.iter().enumerate() {
-        buckets[i * cols / values.len()] += *v;
+        let b = i * cols / values.len();
+        // rate = SUM the bucket's deltas; cumulative = the running total's LEVEL (max,
+        // since the input is monotonic) so the bars rise instead of double-counting.
+        if cumulative {
+            buckets[b] = buckets[b].max(*v);
+        } else {
+            buckets[b] += *v;
+        }
     }
     let max = buckets.iter().cloned().fold(0.0, f64::max).max(1e-12);
     let mut rows = Vec::with_capacity(height);
