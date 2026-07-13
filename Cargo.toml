@@ -1,9 +1,9 @@
 [package]
 name = "wta"
-version = "0.1.32"
+version = "0.1.33"
 edition = "2021"
 rust-version = "1.75"
-description = "A terminal harness for parallel AI coding agents — drive each to green in its own git worktree, switch between them, and track cost"
+description = "A harness for parallel AI coding agents — drive each to green in its own git worktree, switch between them, and track cost"
 license = "MIT"
 repository = "https://github.com/zakrad/wta"
 keywords = ["tmux", "git-worktree", "ai", "agents", "tui"]

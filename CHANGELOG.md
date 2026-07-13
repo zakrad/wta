@@ -4,6 +4,12 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.33] — 2026-07-13
+
+### Changed
+- Description wording: **“a harness for parallel AI coding agents”** (dropped “terminal”
+  as a noun-modifier — wta runs *in* a terminal, it isn’t one).
+
 ## [0.1.32] — 2026-07-13
 
 ### Changed
