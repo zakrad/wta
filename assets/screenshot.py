@@ -78,7 +78,7 @@ GLYPH = {
 
 # tree: (repo, [ (n, task, status, base, tokens, adds, dels) ... ])
 tree = [
-    ("sooth-core (3)", [
+    ("ledger-core (3)", [
         (1, "certora-solvency", "running", "main",        "49.9M", 2548, 14),
         (2, "api-refactor",     "ready",   "develop",     "1.3M",   214,  9),
         (3, "flaky-test",       "input",   "main",        "88k",     12,  3),
