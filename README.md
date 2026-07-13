@@ -92,17 +92,13 @@ run — not just launching them.
 
 | Capability | wta | Claude Squad | Superset |
 |---|:---:|:---:|:---:|
-| Loop-until-tests-pass, unattended | ✅ | ❌ | ❌ |
-| Lock a regression check every future agent must pass | ✅ | ❌ | ❌ |
+| Loop an agent to green until the tests pass, unattended | ✅ | ❌ | ❌ |
 | Hand off one agent’s context into another | ✅ | ❌ | ❌ |
 | Per-agent tokens + estimated cost, usage charts | ✅ | ❌ | ❌ |
 | Fan-out N agents on one prompt, compare, keep winner | ✅ | ❌ | ~ |
-| Independent reviewer agent (maker/checker) | ✅ | ❌ | ❌ |
-| Scheduled dispatch · remote control from your phone | ✅ | ❌ | ❌ |
+| Terminal-native — any terminal / over SSH, one binary | ✅ | ✅ | ❌ |
 | Parallel agents in isolated git worktrees | ✅ | ✅ | ✅ |
-| Runs in any terminal / over SSH, single small binary | ✅ | ✅ | ❌ |
-| Visual side-by-side diff review / open in any IDE | ❌ | ~ | ✅ |
-| Native Windows · maturity | WSL · new | ✅ · high | macOS · high |
+| Visual side-by-side diff / open in any IDE | ❌ | ~ | ✅ |
 
 > Competitors move fast — verify current capabilities before relying on any ❌.
 

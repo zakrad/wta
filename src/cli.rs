@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[command(
     name = "wta",
     version,
-    about = "worktree task agents — parallel AI agents in git worktrees + tmux sessions"
+    about = "worktree task agents — a terminal harness for parallel AI coding agents"
 )]
 pub struct Cli {
     /// tmux server: "wta" (default, isolated socket) or "default" (your own tmux)
