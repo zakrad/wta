@@ -42,6 +42,11 @@ pub enum Command {
     },
     /// List wta-managed agents (worktrees) with diffstat vs the base branch
     Ls,
+    /// Token usage + estimated $ per agent (from Claude Code transcripts)
+    Cost {
+        /// a single agent (default: all agents in this repo, with a total)
+        task: Option<String>,
+    },
     /// Preview which agent branches merge cleanly vs each other + base (no files touched)
     Matrix,
     /// Spawn N agents on the SAME prompt (names <name>-1..N); compare with `matrix`, merge the winner

@@ -1,6 +1,7 @@
 #[cfg(feature = "telegram")]
 mod bridge;
 mod cli;
+mod cost;
 mod cron;
 mod dash;
 mod notify;
@@ -51,6 +52,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Ls => worktree::ls()?,
+        Command::Cost { task } => worktree::show_cost(task.as_deref())?,
         Command::Matrix => worktree::matrix()?,
         Command::Fanout {
             name,

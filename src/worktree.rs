@@ -908,6 +908,57 @@ pub fn list_locks() -> Result<()> {
     Ok(())
 }
 
+/// `wta cost [<task>]` — token usage + estimated $ per agent, from Claude's
+/// transcripts. Tokens are exact; the dollar figure is a list-price estimate.
+pub fn show_cost(task: Option<&str>) -> Result<()> {
+    let all = list_managed()?;
+    let agents: Vec<Worktree> = match task {
+        Some(t) => all.into_iter().filter(|a| a.task == t).collect(),
+        None => all,
+    };
+    if agents.is_empty() {
+        match task {
+            Some(t) => bail!("no agent '{t}' in this repo"),
+            None => {
+                println!("no agents in this repo");
+                return Ok(());
+            }
+        }
+    }
+    let mut total = crate::cost::Usage::default();
+    println!("{:<26} {:>9}  {:>9}  in/out/cache", "AGENT", "~USD", "TOKENS");
+    for a in &agents {
+        let u = crate::cost::for_worktree(&a.path);
+        total.add(&u);
+        let detail = if u.is_zero() {
+            "—".to_string()
+        } else {
+            format!(
+                "{}/{}/{}",
+                crate::cost::human_tokens(u.input),
+                crate::cost::human_tokens(u.output),
+                crate::cost::human_tokens(u.cache_write + u.cache_read)
+            )
+        };
+        println!(
+            "{:<26} {:>9}  {:>9}  {detail}",
+            a.task,
+            format!("${:.2}", u.est_usd),
+            crate::cost::human_tokens(u.tokens())
+        );
+    }
+    if agents.len() > 1 {
+        println!(
+            "{:<26} {:>9}  {:>9}",
+            "TOTAL",
+            format!("${:.2}", total.est_usd),
+            crate::cost::human_tokens(total.tokens())
+        );
+    }
+    println!("($ = list-price estimate; tokens are exact. cache-read billed at 10% of input.)");
+    Ok(())
+}
+
 /// Re-prompt an agent with the output of `.wta/verify.sh` until it passes (exit 0)
 /// or a **termination guard** trips — an automated maker/checker fix loop that is
 /// safe to leave running. Three guards stop a loop that would otherwise bill
@@ -962,7 +1013,7 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
         // --timeout (unbounded only when no budget is set, to respect long suites).
         let (code, out) = run_verify_sh(&wt, &suite, remaining(&start));
         if code == 0 {
-            println!("✓ verify passed on attempt {attempt}");
+            println!("✓ verify passed on attempt {attempt} — {}", crate::cost::short(&crate::cost::for_worktree(&wt)));
             return Ok(());
         }
         let tail = tail_lines(&out, 40);
@@ -995,7 +1046,7 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
             }
         }
     }
-    bail!("stopping: still failing after the {max}-attempt cap — inspect '{task}' in `wta dash`");
+    bail!("stopping: still failing after the {max}-attempt cap ({}) — inspect '{task}' in `wta dash`", crate::cost::short(&crate::cost::for_worktree(&wt)));
 }
 
 /// Hash the agent's current changes (tracked diff vs HEAD + the untracked/staged
