@@ -1,10 +1,10 @@
 # wta — worktree task agents
 
-**Run a fleet of AI coding agents in parallel — and merge only what passes.**
-Each agent gets its own **git worktree + tmux session**; wta previews which branches
-conflict *before* you merge, gates every merge on your test suite, and re-prompts an
-agent until its tests pass — all from one keyboard-first terminal dashboard. A single
-~1 MB Rust binary that runs in any terminal (or over SSH).
+**Stop being the human in the inner loop.** wta runs a fleet of AI coding agents in
+parallel — each in its own **git worktree + tmux session** — and gives you the harness
+to drive them: define a goal and a machine-checkable “done,” and wta re-prompts an
+agent until it passes. Switch between agents and hand off context from one dashboard,
+and see what each run costs. A single ~1 MB Rust binary that runs in any terminal.
 
 ![wta dashboard — an Instances sidebar of parallel AI agents beside a live, full-color agent Preview](assets/wta.png)
 
@@ -12,13 +12,15 @@ agent until its tests pass — all from one keyboard-first terminal dashboard. A
 
 ## Why wta
 
-Most agent runners stop at “spin up N agents in isolation.” wta is the **harness
-around the loop** — it decides what’s safe to merge and drives agents to done:
+Most tools stop at “spin up N agents in isolation.” wta is the **harness around the
+loop** — it drives agents to done, lets you move between them, and shows what they cost:
 
-- **Preview conflicts before you merge** — a pairwise mergeability matrix, read-only.
-- **Gate the merge on your tests** — a `.wta/verify.sh` grays out failing branches.
-- **Close the loop** — re-prompt an agent until its tests pass, then lock the fix in.
-- **Race a prompt, keep the winner** — fan out N agents on one prompt and compare.
+- **Close the loop** — give it a goal and a `verify.sh`; wta re-prompts the agent until
+  the tests pass, then locks the fix in as a check every future agent must clear.
+- **Work across a fleet** — run many agents at once, switch between them from one
+  dashboard, and hand off one agent’s context into a fresh one.
+- **Analyze the run** — per-agent tokens and estimated cost, with usage-over-time
+  charts so you can see where the budget went and compare agents.
 
 ## Install
 
@@ -41,38 +43,38 @@ wta                  # the dashboard — a live tree of EVERY repo's agents
 
 Bare `wta` opens a **global dashboard** across every repo you have agents in;
 `wta dash --here` scopes to the current one. In it: `j`/`k` move · `Enter` attach ·
-`Tab` Preview/Diff · `i` send a line without attaching · `m` conflict matrix · `?`
-help. Try it free with `WTA_AGENT_CMD=bash wta new scratch`.
+`Tab` Preview/Diff · `i` send a line without attaching · `?` help. Try it free with
+`WTA_AGENT_CMD=bash wta new scratch`.
 
-Each agent runs in its own worktree (`agent/<task>` under `.agents/`) and its own
-tmux session on a dedicated server (`tmux -L wta`), namespaced per repo, with a
-stable `WTA_INDEX`/`WTA_PORT_BASE` so parallel dev servers don’t collide.
+Each agent runs in its own worktree (`agent/<task>` under `.agents/`) and its own tmux
+session on a dedicated server (`tmux -L wta`), namespaced per repo, with a stable
+`WTA_INDEX`/`WTA_PORT_BASE` so parallel dev servers don’t collide.
 
 📖 **[Full per-feature manual → MANUAL.md](MANUAL.md).**
 
 ## Features
 
-**Create & scale** — `wta new` (with `--base`, `--model`, `--effort`) starts an agent;
-`wta fanout <name> -n N` runs N agents on the **same** prompt to compare and keep the
-winner; `wta cron add … --every <dur>` fires `wta new` on a schedule.
+**Close the loop** — the harness: a goal plus a machine-checkable “done,” and wta drives
+the agent there. `wta loop <task>` re-prompts the agent with your `.wta/verify.sh`
+output until it passes, with guards (`--max`, `--no-progress`, `--timeout`). `wta lock
+<name> -- <cmd>` freezes a past failure into a check every future agent must pass, and
+`wta cron add … --every <dur>` fires the loop on a schedule — work while you sleep.
 
-**Verify before you merge** — the **Diff tab** shows a colorized diff vs the agent’s
-base branch; `wta matrix` previews which branches merge cleanly with each other **and**
-the base (`git merge-tree`, read-only); a `.wta/verify.sh` runs per agent (async) and
-**grays failing branches red in the matrix**; `wta review <builder>` spawns an
-independent maker/checker agent.
+**Work across a fleet** — `wta new` (with `--base`, `--model`, `--effort`) and `wta
+fanout <name> -n N` (run N agents on one prompt, compare, keep the winner) scale you
+out; the **global dashboard** and `wta attach` / `i` quick-send move you between agents;
+`wta handoff <from> <new>` migrates one agent’s context into a fresh one, and `wta send`
+/ `wta board` let agents coordinate.
 
-**Close the loop** — this is the harness: give it a goal and a machine-checkable
-“done,” and wta drives the agent there. `wta loop <task>` re-prompts the agent with
-your `verify.sh` output until it passes, with guards (`--max`, `--no-progress`,
-`--timeout`); `wta lock <name> -- <cmd>` freezes a past failure into a check every
-future agent must pass.
+**Analyze the run** — `wta cost [<task>] --chart` shows per-agent tokens and an
+estimated spend with a usage-over-time chart (rate or cumulative, tokens or `$`) and a
+model timeline, straight from the agent’s transcripts — no tracking overhead. `wta
+supervise` watches the fleet and escalates stuck / needs-input / crashed agents.
 
-**Observe & coordinate** — `wta cost` shows per-agent tokens + an estimated spend with
-usage-over-time charts; `wta supervise` escalates stuck / needs-input / crashed agents
-(read-only); `wta install-hooks` adds a sound + in-terminal toast on finish/needs-input
-(even while attached); and `wta send` / `wta board` / `wta handoff` coordinate across
-agents.
+**Review & merge** — the Diff tab shows a colorized diff vs the agent’s base branch;
+`wta review <builder>` spawns an independent maker/checker agent; `wta push --pr` opens
+a PR against the agent’s base. (`wta matrix` also previews which branches conflict via
+`git merge-tree`, read-only, if you want it before merging.)
 
 ## Dashboard
 
@@ -82,21 +84,21 @@ Keys: `n`/`N` new · `b` new from a branch · `s` stop · `D` kill · `p` push/P
 
 Status glyphs: `⠋ running · ● ready · ▲ needs input · ◆ review (finished, unseen) · ✓ merged · ✗ exited`.
 
-## What wta does that the others don’t
+## How it compares
 
 wta shares the parallel-worktree substrate with tools like Claude Squad and Superset,
-but it’s built around a different question: not “how do I run many agents” but “how do
-I know what’s safe to merge.”
+but it’s built around driving the agent loop, moving between agents, and measuring the
+run — not just launching them.
 
 | Capability | wta | Claude Squad | Superset |
 |---|:---:|:---:|:---:|
-| Pre-merge conflict preview across branches (`git merge-tree`) | ✅ | ❌ | ❌ |
-| Test/lint gate that blocks the merge decision | ✅ | ❌ | ❌ |
-| Fan-out N agents on one prompt, compare, keep winner | ✅ | ❌ | ~ |
 | Loop-until-tests-pass, unattended | ✅ | ❌ | ❌ |
+| Lock a regression check every future agent must pass | ✅ | ❌ | ❌ |
+| Hand off one agent’s context into another | ✅ | ❌ | ❌ |
+| Per-agent tokens + estimated cost, usage charts | ✅ | ❌ | ❌ |
+| Fan-out N agents on one prompt, compare, keep winner | ✅ | ❌ | ~ |
 | Independent reviewer agent (maker/checker) | ✅ | ❌ | ❌ |
-| Per-agent tokens + estimated cost, burn charts | ✅ | ❌ | ❌ |
-| Scheduled agent dispatch · remote control from your phone | ✅ | ❌ | ❌ |
+| Scheduled dispatch · remote control from your phone | ✅ | ❌ | ❌ |
 | Parallel agents in isolated git worktrees | ✅ | ✅ | ✅ |
 | Runs in any terminal / over SSH, single small binary | ✅ | ✅ | ❌ |
 | Visual side-by-side diff review / open in any IDE | ❌ | ~ | ✅ |
