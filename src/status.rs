@@ -61,11 +61,22 @@ fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// Atomically replace `path` with `bytes` via a **per-process** temp file — so two
+/// wta processes writing the same file (e.g. concurrent hooks, or `install-hooks`
+/// racing another) never share a temp path and clobber each other's half-write.
+pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn save(st: &AgentState) -> Result<()> {
     let final_path = state_path(&st.repo, &st.task)?;
-    let tmp = final_path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(st)?)?;
-    std::fs::rename(&tmp, &final_path)?; // atomic
+    atomic_write(&final_path, &serde_json::to_vec_pretty(st)?)?;
     Ok(())
 }
 
@@ -278,9 +289,7 @@ pub fn write_order(repo: &str, map: &HashMap<String, u32>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(map)?)?;
-    std::fs::rename(&tmp, &path)?;
+    atomic_write(&path, &serde_json::to_vec_pretty(map)?)?;
     Ok(())
 }
 
@@ -327,9 +336,7 @@ pub fn install_hooks(global: bool) -> Result<()> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let tmp = target.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
-    std::fs::rename(&tmp, &target)?;
+    atomic_write(&target, &serde_json::to_vec_pretty(&root)?)?;
     println!("wrote wta hooks into {}", target.display());
     Ok(())
 }

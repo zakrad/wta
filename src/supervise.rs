@@ -145,10 +145,17 @@ fn classify(
     let quiet_secs = w.nodiff_ticks as u64 * interval;
     if idle_secs >= stuck_secs && quiet_secs >= stuck_secs {
         let dur = human(idle_secs);
+        // Distinguish "done" from "stuck" without running verify: an idle agent that
+        // PRODUCED changes has finished with work to review (the finish hook already
+        // pinged you) — don't re-nag it. Only an agent idle a long time having
+        // produced NOTHING is genuinely suspicious.
+        if has_uncommitted(wt) {
+            return ("●", format!("idle {dur}, changes ready"), None);
+        }
         return (
             "⚠",
-            format!("idle {dur}, no changes"),
-            Some(("stuck", format!("'{task}' has been idle {dur} with no new changes — done, or stuck? take a look"))),
+            format!("idle {dur}, no output"),
+            Some(("stuck", format!("'{task}' has been idle {dur} and produced no changes — likely stuck; take a look"))),
         );
     }
     ("●", format!("idle {}", human(idle_secs)), None)
