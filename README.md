@@ -25,7 +25,7 @@ loop** — it drives agents to done, lets you move between them, and shows what 
 ## Install
 
 ```sh
-brew install zakrad/wta/wta                                                       # macOS / Linux
+brew tap zakrad/wta && brew install wta                                           # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/zakrad/wta/main/install.sh | bash    # prebuilt binary
 cargo install --git https://github.com/zakrad/wta                                 # from source
 ```
