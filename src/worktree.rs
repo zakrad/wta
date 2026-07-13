@@ -439,7 +439,7 @@ pub fn new_with_base(task: &str, agent_args: &[String], base: &str) -> Result<()
 pub fn apply_worker_role(cli_model: Option<&str>, cli_effort: Option<&str>) {
     let root = repo_root().ok();
     let base = agent_cmd();
-    let (cmd, _) = crate::roles::resolve("worker", cli_model, cli_effort, &base, root.as_deref());
+    let (cmd, _) = crate::roles::resolve("worker", None, cli_model, cli_effort, &base, root.as_deref());
     std::env::set_var("WTA_AGENT_CMD", cmd);
 }
 
@@ -585,11 +585,10 @@ pub fn review(builder: &str, by: Option<&str>, model: Option<&str>, effort: Opti
     );
     // reviewer runs an (optionally cheaper / different) agent CLI. This is a
     // one-shot CLI process, so overriding its own WTA_AGENT_CMD env is safe.
-    let rev_base = by
-        .map(String::from)
-        .or_else(|| std::env::var("WTA_REVIEW_AGENT_CMD").ok().filter(|s| !s.trim().is_empty()))
-        .unwrap_or_else(agent_cmd);
-    let (cmd, _) = crate::roles::resolve("reviewer", model, effort, &rev_base, Some(&root));
+    // `--by` is an explicit command override (top precedence); otherwise the reviewer
+    // base is WTA_REVIEW_AGENT_CMD, falling back to the worker command.
+    let rev_base = std::env::var("WTA_REVIEW_AGENT_CMD").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(agent_cmd);
+    let (cmd, _) = crate::roles::resolve("reviewer", by, model, effort, &rev_base, Some(&root));
     std::env::set_var("WTA_AGENT_CMD", &cmd);
     new_with_base(&reviewer, &[prompt], &builder_branch)?;
     println!("started reviewer '{reviewer}' on {builder}'s branch — watch it in `wta dash`");
