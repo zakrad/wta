@@ -4,6 +4,18 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.32] — 2026-07-13
+
+### Changed
+- **Repositioned around the loop-engineering harness.** The README and the crate/CLI
+  description now lead with driving agents to green (loop + verify + lock), switching
+  context across a fleet (handoff + the global dashboard), and cost analysis — instead
+  of the tmux/TUI plumbing. New description: *“A terminal harness for parallel AI
+  coding agents — drive each to green in its own git worktree, switch between them, and
+  track cost.”* Trimmed the README and the comparison table (wta is terminal-native,
+  not framed against Windows), and refreshed the dashboard screenshot for the
+  base-branch + tokens sidebar. No code behavior change.
+
 ## [0.1.31] — 2026-07-13
 
 ### Added
