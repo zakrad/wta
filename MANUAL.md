@@ -10,6 +10,12 @@ how to use each feature on its own.
 - [Reviewing & merging](#reviewing--merging) · diff, matrix, push/PR
 - [Verification gate](#verification-gate) · `.wta/verify.sh`
 - [Cross-agent review](#cross-agent-review) · `review`
+- [Loop until green](#loop-until-green) · `loop`
+- [Locked regression checks](#locked-regression-checks) · `lock`
+- [Roles — model & effort](#roles--model--effort) · `roles`
+- [Cost & spend](#cost--spend) · `cost`, charts
+- [Supervising the fleet](#supervising-the-fleet) · `supervise`
+- [Scheduled routines](#scheduled-routines) · `cron`
 - [Open in your editor](#open-in-your-editor) · `open`, nvim/GUI
 - [Notifications](#notifications) · sound, terminal toast, hooks
 - [Agent lifecycle](#agent-lifecycle) · stop/resume/kill, merged
@@ -57,6 +63,17 @@ wta rm refactor-1 --force # drop the rest
 wta rm refactor-3 --force
 ```
 
+**Handoff** — migrate one agent's work into a fresh one:
+
+```sh
+wta handoff old-attempt new-attempt -- "carry on, but start from a clean design"
+```
+
+The new agent branches off `old-attempt`'s branch (carrying its **committed** work)
+and is seeded with a handoff note — the files changed, the commits, and a warning
+listing `old-attempt`'s *uncommitted* paths (which are **not** carried). Useful when
+a session has drifted and you want a clean context with the work so far.
+
 ---
 
 ## The dashboard
@@ -73,7 +90,8 @@ relaunch per repo. Every action (attach, kill, push, verify…) runs in the sele
 agent's own repo. Pressing `n` asks which repo to create the new agent in.
 
 Left: the sidebar — in the global view, repo headers (`▸ name (N)`) with agents
-indented under them; each agent shows task, branch, `+adds/-dels`, status.
+indented under them; each agent shows task, its base branch, tokens used,
+`+adds/-dels`, and status.
 Right: **Preview** (live, full-color capture of the agent's pane) and **Diff**
 (colorized diff vs the base branch, including untracked files) — `Tab` switches.
 
@@ -162,6 +180,124 @@ Default reviewer CLI: `WTA_REVIEW_AGENT_CMD`, else `WTA_AGENT_CMD`.
 
 ---
 
+## Loop until green
+
+`wta loop <task>` re-prompts the agent with your `.wta/verify.sh` output until it
+passes — automated fix-until-green, with guards so it can't run away:
+
+```sh
+wta loop fix-auth                     # re-prompt until verify.sh exits 0
+wta loop fix-auth --max 10            # give up after 10 attempts (default 6)
+wta loop fix-auth --no-progress 2     # stop if the diff is unchanged 2 rounds running
+wta loop fix-auth --timeout 1800      # overall wall-clock budget, seconds (0 = off)
+wta loop fix-auth -- "start with a failing test"   # optional kickoff prompt
+```
+
+It runs in the foreground and exits **non-zero if a guard trips**, so
+`wta loop fix-auth && wta push fix-auth --pr` won't push a failing branch.
+
+---
+
+## Locked regression checks
+
+`wta lock` freezes a command into a permanent check that every future agent must
+pass — turn a bug you just fixed into a regression gate:
+
+```sh
+wta lock no-todo -- '! grep -rn TODO src/'   # writes .wta/checks/no-todo.sh
+wta lock --list                              # list the repo's locked checks
+wta unlock no-todo                           # remove one
+```
+
+Locked checks run as part of the verify suite (alongside `.wta/verify.sh`) — on the
+dashboard's `v`, on `wta loop`, and on the finish edge — so a failing check grays the
+branch in the matrix like any other verify failure.
+
+---
+
+## Roles — model & effort
+
+Choose which model and reasoning effort each role uses, so a strong model builds and
+a cheap one reviews. Precedence: CLI flags > env (`WTA_<ROLE>_MODEL`/`_EFFORT`) >
+`<repo>/.wta/roles.json` > `~/.wta/roles.json`.
+
+```sh
+wta new fix-auth --model opus-4.8 --effort high      # per-agent, one-off
+wta review fix-auth --by "claude --model haiku-4.5"  # a cheaper reviewer
+wta roles                                            # print the resolved model/effort per role
+```
+
+Set defaults in `~/.wta/roles.json` (global) or `<repo>/.wta/roles.json` (per-repo):
+
+```json
+{ "worker":   { "model": "opus-4.8", "effort": "high" },
+  "reviewer": { "model": "haiku-4.5" } }
+```
+
+`--model`/`--effort` are only appended for the `claude` CLI. A repo's `roles.json`
+may set model/effort but **not** the base command — a supply-chain guard, since repos
+you clone shouldn't be able to change what binary runs.
+
+---
+
+## Cost & spend
+
+`wta cost` reads each agent's Claude Code transcripts for token usage and estimates a
+dollar cost from a built-in price table — **tokens are exact, `$` is a labeled
+estimate**. No polling, no background tracker.
+
+```sh
+wta cost                       # every agent: tokens + ~$ + in/out/cache breakdown + total
+wta cost fix-auth              # one agent
+wta cost fix-auth --chart      # a tall tokens-over-time chart (Y = tokens/bucket, X = time)
+wta cost fix-auth --chart --usd         # dollars instead of tokens
+wta cost fix-auth --chart --cumulative  # running-total curve instead of the per-bucket rate
+wta cost --chart               # a one-row burn sparkline per agent, for side-by-side comparison
+wta cost --json                # the per-message series (ts, tokens, $, model) for external analysis
+```
+
+The dashboard shows each agent's token count on its second line, and model changes
+appear in the chart's timeline. (The `$` estimate is Claude-only; token counts work
+for any agent that writes compatible transcripts.)
+
+---
+
+## Supervising the fleet
+
+`wta supervise` watches every agent and escalates the ones that need you — a
+foreground, **read-only** watcher (it never sends, kills, or changes an agent):
+
+```sh
+wta supervise                    # watch every repo you have agents in
+wta supervise --here             # just this repo
+wta supervise --stuck-secs 600   # flag "stuck" after 10 min idle with no new changes (default 5m)
+```
+
+It alerts (sound + toast + a printed line) when an agent goes `needs-input`, looks
+stuck (idle with no new changes for `--stuck-secs`), or crashed with uncommitted
+work, and prints a live status table grouped by repo. Accept or dismiss its
+escalations to judge whether the signal is trustworthy.
+
+---
+
+## Scheduled routines
+
+`wta cron` fires `wta new` on a cadence — work while you sleep:
+
+```sh
+wta cron add nightly-deps --every 1d -- "update dependencies and run the tests"
+wta cron list                    # routines + when each is next due
+wta cron disable nightly-deps    # keep it, stop firing
+wta cron rm nightly-deps
+```
+
+Run the scheduler in the foreground with `wta cron start`, or wire `wta cron tick`
+(fire all due routines once) into system cron / launchd. Each routine has a
+concurrency cap of one — it won't fire again until you've removed its previous
+agent — so it can't pile up a fleet unattended.
+
+---
+
 ## Open in your editor
 
 ```sh
@@ -203,7 +339,7 @@ an agent **finishes a turn** (Stop) or **asks a question** (Notification), `wta`
 
 It fires **once per turn** (not by polling), for wta-managed agents only (gated on
 `WTA_TASK`, so plain `claude` sessions that share the global hooks stay silent).
-Hooks are appended, never clobbered — Superset's hooks (or your own) are left intact.
+Hooks are appended, never clobbered — your existing hooks are left intact.
 
 The toast is drawn *inside* the terminal via `tmux display-popup` — no macOS
 notification, no permissions — so it shows regardless of your OS notification
