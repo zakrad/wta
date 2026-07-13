@@ -6,6 +6,7 @@ mod dash;
 mod notify;
 mod roles;
 mod status;
+mod supervise;
 mod tmux;
 mod worktree;
 
@@ -76,6 +77,9 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Init => worktree::init()?,
         Command::Roles => roles::print_roles(worktree::repo_root().ok().as_deref()),
+        Command::Supervise { here, interval, stuck_secs } => {
+            supervise::supervise(!here, interval, stuck_secs)?
+        }
         Command::Handoff { from, new, prompt } => worktree::handoff(&from, &new, &prompt)?,
         Command::Loop { task, max, no_progress, timeout, prompt } => {
             worktree::loop_verify(&task, max, no_progress, timeout, &prompt)?

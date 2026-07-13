@@ -92,6 +92,18 @@ pub enum Command {
     Init,
     /// Show the resolved agent command per role (model/effort from config + flags)
     Roles,
+    /// Watch the fleet and escalate stuck / needs-input / crashed agents (read-only, no actions)
+    Supervise {
+        /// only this repo (default: watch every repo you have agents in)
+        #[arg(long)]
+        here: bool,
+        /// seconds between checks
+        #[arg(long, default_value_t = 15)]
+        interval: u64,
+        /// flag an agent that's been idle with no new changes this long (seconds) as stuck
+        #[arg(long, default_value_t = 300)]
+        stuck_secs: u64,
+    },
     /// Migrate <from>'s context into a NEW agent: branch off it + seed a handoff note
     Handoff {
         /// the agent to hand off FROM (its committed work is carried over)

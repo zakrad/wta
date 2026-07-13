@@ -1001,7 +1001,7 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
 
 /// Hash the agent's current changes (tracked diff vs HEAD + the untracked/staged
 /// file list) so the loop can tell whether an attempt actually changed anything.
-fn worktree_diff_hash(wt: &Path) -> u64 {
+pub fn worktree_diff_hash(wt: &Path) -> u64 {
     let diff = run_git(&["diff", "HEAD"], Some(wt)).unwrap_or_default();
     let status = run_git(&["status", "--porcelain"], Some(wt)).unwrap_or_default();
     let mut h = DefaultHasher::new();

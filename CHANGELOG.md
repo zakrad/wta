@@ -4,6 +4,19 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.28] — 2026-07-13
+
+### Added
+- **`wta supervise` — a fleet watcher (escalate-only).** A foreground process that
+  classifies every agent and **alerts you** (sound + toast + a printed line) when one
+  needs input, looks stuck (idle with no new changes for `--stuck-secs`, default 5m),
+  or **crashed with uncommitted work** — plus a live status table grouped by repo. It
+  is strictly **read-only**: it never sends, kills, or changes an agent. `--here` for
+  the current repo (default: all), `--interval`/`--stuck-secs` to tune. (This is v1 of
+  the supervisor; the autonomous decide/act layer is deliberately deferred until these
+  escalations are validated in practice — you can accept/dismiss and see if the signal
+  is trustworthy first.)
+
 ## [0.1.27] — 2026-07-13
 
 ### Added
