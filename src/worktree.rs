@@ -968,7 +968,7 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
         let tail = tail_lines(&out, 40);
         println!("✗ verify failed (exit {code}) — asking '{task}' to fix");
         let msg = format!(
-            "`.wta/verify.sh` failed (exit {code}). Fix the underlying cause and finish. Last output: {}",
+            "the verify suite failed (exit {code}) — that's `.wta/verify.sh` and/or a locked check in `.wta/checks/`. Fix the underlying cause and finish. Last output: {}",
             tail.replace('\n', " ⏎ "),
         );
         drive(&session, &msg)?;
