@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -302,13 +302,21 @@ pub fn install_hooks(global: bool) -> Result<()> {
         crate::worktree::repo_root()?.join(".claude/settings.json")
     };
 
+    // Fail CLOSED: never clobber an existing settings.json we can't parse — it may
+    // hold permissions.deny / env / model / non-wta hooks we'd silently destroy.
     let mut root: serde_json::Value = if target.exists() {
-        serde_json::from_slice(&std::fs::read(&target)?).unwrap_or_else(|_| serde_json::json!({}))
+        let bytes = std::fs::read(&target)?;
+        serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "{} exists but is not valid JSON — refusing to overwrite it. Fix or move it, then re-run.",
+                target.display()
+            )
+        })?
     } else {
         serde_json::json!({})
     };
     if !root.is_object() {
-        root = serde_json::json!({});
+        bail!("{} is valid JSON but not an object — refusing to overwrite it.", target.display());
     }
     let hooks = root.as_object_mut().unwrap().entry("hooks").or_insert_with(|| serde_json::json!({}));
     if !hooks.is_object() {

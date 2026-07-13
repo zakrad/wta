@@ -35,11 +35,22 @@ fn cfg() -> Result<Cfg> {
     Ok(Cfg { token, chat })
 }
 
+/// ureq embeds the full request URL — including the `bot<TOKEN>` path segment — in
+/// its error Display, which would leak the bot token to stderr/logs on any HTTP
+/// error or rate-limit. Scrub the token out of any message before it's shown.
+fn redact(token: &str, msg: String) -> String {
+    if token.is_empty() {
+        msg
+    } else {
+        msg.replace(token, "<redacted>")
+    }
+}
+
 fn send(c: &Cfg, text: &str) -> Result<()> {
     let url = format!("https://api.telegram.org/bot{}/sendMessage", c.token);
     ureq::post(&url)
         .send_form(&[("chat_id", c.chat.as_str()), ("text", text)])
-        .map_err(|e| anyhow::anyhow!("telegram send failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("telegram send failed: {}", redact(&c.token, e.to_string())))?;
     Ok(())
 }
 
@@ -52,7 +63,7 @@ fn get_updates(c: &Cfg, offset: i64) -> Result<(i64, Vec<String>)> {
         .query("offset", &offset.to_string())
         .query("timeout", "3")
         .call()
-        .map_err(|e| anyhow::anyhow!("getUpdates: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("getUpdates: {}", redact(&c.token, e.to_string())))?;
     let body: serde_json::Value = serde_json::from_str(&resp.into_string()?)?;
 
     let mut next = offset;

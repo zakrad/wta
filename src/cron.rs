@@ -229,8 +229,17 @@ pub fn tick() -> Result<usize> {
         if !r.is_due(now) {
             continue;
         }
+        // This routine's own agents are named "<name>-<unix_ts>", so their session is
+        // exactly `prefix + <digits>`. Requiring the suffix to be all-numeric stops a
+        // routine whose name is a dash-prefix of another (e.g. "deploy" vs
+        // "deploy-nightly") from being starved by the longer routine's live agent.
         let prefix = format!("{}-", crate::tmux::session_name(&crate::worktree::repo_id_of(std::path::Path::new(&r.repo)), &r.name));
-        if live.iter().any(|s| s.starts_with(&prefix)) {
+        let own_agent_live = live.iter().any(|s| {
+            s.strip_prefix(&prefix)
+                .map(|suf| !suf.is_empty() && suf.bytes().all(|b| b.is_ascii_digit()))
+                .unwrap_or(false)
+        });
+        if own_agent_live {
             println!("[cron] skip '{}' — its previous agent is still around (remove it to let it fire again)", r.name);
             continue;
         }

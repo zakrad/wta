@@ -174,7 +174,7 @@ mod tests {
         for ok in ["good_1", "feature-x", "a1"] {
             assert!(validate_task(ok).is_ok(), "{ok} should be valid");
         }
-        for bad in ["a/b", "v1.2", "../evil", "-flag", "", "has space", "a\\b"] {
+        for bad in ["a/b", "v1.2", "../evil", "-flag", "", "has space", "a\\b", "order"] {
             assert!(validate_task(bad).is_err(), "{bad:?} should be rejected");
         }
         assert!(validate_task(&"x".repeat(65)).is_err());
@@ -214,6 +214,11 @@ fn validate_task(task: &str) -> Result<()> {
     }
     if !task.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         bail!("invalid task name '{task}' — use letters, digits, '-' and '_' only");
+    }
+    // "order" would share <repo>/order.json with the dashboard's reorder map, so the
+    // agent's state file and the ordering sidecar would clobber each other.
+    if task == "order" {
+        bail!("'order' is reserved (it collides with the dashboard's ordering file) — pick another name");
     }
     Ok(())
 }

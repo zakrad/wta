@@ -4,6 +4,37 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.30] — 2026-07-13
+
+### Added
+- **Cost charts — token/spend over time.** `wta cost <task> --chart` now renders a
+  tall terminal bar chart of **token usage × time** for one agent (Y = tokens/bucket,
+  X = the session span), so you can *see* where an agent's budget went. Toggles:
+  `--usd` charts estimated dollars instead of tokens, and `--cumulative` shows the
+  running-total curve instead of the per-bucket rate. `wta cost --chart` (all agents)
+  keeps a compact one-row burn sparkline per agent for side-by-side comparison, and
+  `wta cost --json` dumps the per-message series (ts, tokens, $, model) for external
+  analysis. All parsed from transcripts Claude Code already writes — no tracking
+  overhead, no background daemon. Model changes are shown in the timeline.
+
+### Fixed
+- **`install-hooks` now fails closed.** It previously replaced an existing but
+  unparseable `~/.claude/settings.json` with `{}` and silently overwrote it, dropping
+  `permissions.deny`/`env`/`model` and any non-wta hooks. It now refuses and errors
+  instead of clobbering config it can't parse.
+- **Telegram bot token no longer leaks to stderr.** ureq embeds the full request URL
+  (with the `bot<token>` segment) in its error text; on any HTTP error/rate-limit that
+  token was printed verbatim (and repeatedly, in the poll loop). The token is now
+  redacted from all bridge error messages.
+- **cron no longer starves dash-prefixed routines.** The per-routine concurrency cap
+  used a prefix match, so a routine whose name is a dash-prefix of another (e.g.
+  `deploy` vs `deploy-nightly`) was permanently skipped while the longer routine's
+  agent was alive. The cap now matches only the routine's own `<name>-<timestamp>`
+  agent sessions.
+- **`order` is now a reserved task name.** An agent named `order` shared its state file
+  with the dashboard's ordering sidecar (`order.json`), making it invisible and
+  colliding on isolation slots. It's now rejected at creation.
+
 ## [0.1.29] — 2026-07-13
 
 ### Added
