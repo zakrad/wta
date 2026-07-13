@@ -281,8 +281,8 @@ fn dispatch(r: &Routine) -> Result<String> {
     let exe = std::env::current_exe().context("cannot resolve wta binary path")?;
     let mut cmd = std::process::Command::new(exe);
     // Null stdin so a setup.sh that reads stdin gets EOF instead of blocking when the
-    // scheduler runs in a terminal. (The spawned agent gets its own pty from tmux, so
-    // this doesn't affect it — verified the session still persists.)
+    // scheduler runs in a terminal. The spawned agent gets its own pty from tmux, so
+    // this doesn't affect it.
     cmd.current_dir(&repo).stdin(std::process::Stdio::null()).arg("new").arg(&task);
     if !r.prompt.trim().is_empty() {
         cmd.arg("--").arg(&r.prompt);

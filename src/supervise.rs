@@ -2,8 +2,7 @@
 //! every agent and alerts you (sound + toast + a printed line) when one goes
 //! `needs-input`, looks stuck (idle with no new changes for a while), or crashes with
 //! uncommitted work. It is strictly READ-ONLY — it never sends, kills, or changes an
-//! agent. (The autonomous decide/act layer is deliberately deferred; this v1 exists to
-//! let its escalations be validated by your accept/dismiss before anything acts.)
+//! agent.
 
 use crate::{notify, status, tmux, worktree};
 use anyhow::Result;

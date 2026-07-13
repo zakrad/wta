@@ -14,7 +14,7 @@ pub fn alert(title: &str, body: &str) {
 
 /// Play a notification sound (audible even when the terminal bell is muted). Opt out
 /// with `WTA_NOTIFY_SOUND=0`; point it at a path to use your own file.
-pub fn sound() {
+fn sound() {
     let cfg = std::env::var("WTA_NOTIFY_SOUND").unwrap_or_default();
     if cfg == "0" {
         return;

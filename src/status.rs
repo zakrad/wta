@@ -17,7 +17,7 @@ pub struct AgentState {
     pub repo: String, // repo id (hash of the repo root) this agent belongs to
     pub status: String, // running | needs_input | waiting | exited | ...
     pub cwd: String,
-    pub updated_unix: u64,
+    pub updated_unix: u64, // last write time — persisted for inspection / external tooling
     #[serde(default)]
     pub index: u32, // stable isolation slot (WTA_INDEX / WTA_PORT_BASE), assigned at creation
     #[serde(default)]
@@ -43,13 +43,9 @@ pub fn repo_dir(repo: &str) -> Result<PathBuf> {
 }
 
 pub fn state_path(repo: &str, task: &str) -> Result<PathBuf> {
-    // sanitize like tmux::session_name so the state filename never diverges from
-    // the session name or escapes the repo's state dir (belt-and-suspenders on top
-    // of worktree::validate_task)
-    let safe: String = task
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
+    // Same sanitizer as the tmux session name, so the state filename can't diverge
+    // from it or escape the repo's state dir (a guard on top of validate_task).
+    let safe = crate::tmux::sanitize_task(task);
     Ok(repo_dir(repo)?.join(format!("{safe}.json")))
 }
 
@@ -274,9 +270,9 @@ pub fn read_states(repo: &str) -> Result<Vec<AgentState>> {
     Ok(out)
 }
 
-/// Read every agent's state across all repos (used by the Telegram bridge). Each
-/// `AgentState.repo` is filled so callers can compute the tmux session name.
-#[cfg_attr(not(feature = "telegram"), allow(dead_code))]
+/// Read every agent's state across all repos (drives the global dashboard, `supervise`,
+/// and the Telegram bridge). Each `AgentState.repo` is filled so callers can compute
+/// the tmux session name.
 pub fn read_all_states() -> Result<Vec<AgentState>> {
     let root = state_root()?;
     let mut out = Vec::new();

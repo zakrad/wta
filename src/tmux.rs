@@ -30,15 +30,19 @@ fn tmux() -> Command {
     c
 }
 
+/// Map a name to the safe character class shared by tmux session names, state
+/// filenames, and worktree dirs — every non-`[A-Za-z0-9_-]` char becomes `_` — so
+/// those three representations of a task can never diverge or escape their directory.
+pub(crate) fn sanitize_task(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
 /// tmux session name, namespaced by repo id so the same task name in two repos
 /// never collides on the (global) tmux server: `wta-<repo>-<task>`.
 pub fn session_name(repo: &str, task: &str) -> String {
-    let sanitize = |s: &str| -> String {
-        s.chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .collect()
-    };
-    format!("wta-{}-{}", sanitize(repo), sanitize(task))
+    format!("wta-{}-{}", sanitize_task(repo), sanitize_task(task))
 }
 
 pub fn has_session(name: &str) -> bool {
@@ -215,8 +219,7 @@ pub fn pane_is_idle(name: &str) -> bool {
 /// agent TUI: literal → settle → echo-confirm → Enter → submit-confirm. Only
 /// presses Enter once the typed text is confirmed on screen, so a dropped burst
 /// becomes a clean error instead of a half-submitted line. Used by the dashboard
-/// quick-send and the Telegram bridge.
-#[cfg_attr(not(feature = "telegram"), allow(dead_code))]
+/// quick-send, the peer relay (`wta send`), and the Telegram bridge.
 pub fn send_text(name: &str, text: &str) -> Result<()> {
     let before = capture(name).map(|p| norm(&p)).unwrap_or_default();
 
@@ -327,7 +330,7 @@ mod tests {
         assert!(looks_interactive_dialog("Is this a directory you created or one you trust?"));
         assert!(looks_interactive_dialog("Overwrite file? (y/n)"));
         assert!(looks_interactive_dialog("❯ 1. Accept  2. Reject"));
-        // case-insensitive + broadened cues (audit round 2)
+        // case-insensitive + broadened cues
         assert!(looks_interactive_dialog("Continue? [Y/n]"));
         assert!(looks_interactive_dialog("Proceed (Yes/No)"));
         assert!(looks_interactive_dialog("Press ENTER to continue"));

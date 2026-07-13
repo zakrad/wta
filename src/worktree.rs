@@ -173,43 +173,6 @@ fn branch_name(task: &str) -> String {
     format!("agent/{task}")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn task_validation_rejects_unsafe_names() {
-        for ok in ["good_1", "feature-x", "a1"] {
-            assert!(validate_task(ok).is_ok(), "{ok} should be valid");
-        }
-        for bad in ["a/b", "v1.2", "../evil", "-flag", "", "has space", "a\\b", "order"] {
-            assert!(validate_task(bad).is_err(), "{bad:?} should be rejected");
-        }
-        assert!(validate_task(&"x".repeat(65)).is_err());
-    }
-
-    #[test]
-    fn agent_argv_tokenizes_multiword_command() {
-        std::env::set_var("WTA_AGENT_CMD", "claude --model haiku");
-        std::env::remove_var("WTA_SKIP_PERMISSIONS"); // default
-        let (prog, extra) = agent_argv("repo", "task", 0, &[]);
-        assert_eq!(prog, "env");
-        // the command must be split into separate argv elements, not one string
-        assert!(extra.contains(&"claude".to_string()));
-        assert!(extra.contains(&"--model".to_string()));
-        assert!(extra.contains(&"haiku".to_string()));
-        assert!(!extra.iter().any(|s| s == "claude --model haiku"));
-        // permission bypass is ON BY DEFAULT for claude
-        assert!(extra.contains(&"--dangerously-skip-permissions".to_string()));
-        // ...and OFF with WTA_SKIP_PERMISSIONS=0 (`--safe`)
-        std::env::set_var("WTA_SKIP_PERMISSIONS", "0");
-        let (_, safe) = agent_argv("repo", "task", 0, &[]);
-        std::env::remove_var("WTA_SKIP_PERMISSIONS");
-        std::env::remove_var("WTA_AGENT_CMD");
-        assert!(!safe.contains(&"--dangerously-skip-permissions".to_string()));
-    }
-}
-
 /// Reject task names that aren't safe as a tmux session name, a filesystem path,
 /// and a git branch all at once — keeping those three representations identical
 /// (no `/`, `.`, `..`, spaces, etc. that would diverge or escape `.agents`).
@@ -343,7 +306,7 @@ fn agent_argv(repo: &str, task: &str, idx: u32, tail: &[String]) -> (String, Vec
     // tmux execs program+args directly (no shell), so a multi-word agent command
     // (`claude --model haiku`, `npx foo`) must be tokenized, not one argv element.
     let cmd = agent_cmd();
-    let is_claude = cmd.split_whitespace().next().map(|c| c.ends_with("claude")).unwrap_or(false);
+    let is_claude = cmd.split_whitespace().next().map(crate::roles::is_claude).unwrap_or(false);
     extra.extend(cmd.split_whitespace().map(String::from));
     // Permission bypass is ON BY DEFAULT for the claude CLI (Claude's flag is
     // `--dangerously-skip-permissions`) — agents run in isolated worktrees. Opt out
@@ -380,7 +343,7 @@ fn preseed_claude_trust(wt: &Path) {
     if std::env::var("WTA_AUTO_TRUST").map(|v| v == "0").unwrap_or(false) {
         return;
     }
-    let is_claude = agent_cmd().split_whitespace().next().map(|c| c.ends_with("claude")).unwrap_or(false);
+    let is_claude = agent_cmd().split_whitespace().next().map(crate::roles::is_claude).unwrap_or(false);
     if !is_claude {
         return; // only meaningful for the claude CLI
     }
@@ -1735,6 +1698,7 @@ pub fn matrix() -> Result<()> {
         print!("{:<w$}", short(l), w = w);
     }
     println!();
+    #[allow(clippy::needless_range_loop)] // i and j index the correlated grid + labels
     for i in 0..n {
         print!("{:<pad$}", short(&m.labels[i]), pad = w + 2);
         for j in 0..n {
@@ -1763,4 +1727,41 @@ pub fn matrix() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_validation_rejects_unsafe_names() {
+        for ok in ["good_1", "feature-x", "a1"] {
+            assert!(validate_task(ok).is_ok(), "{ok} should be valid");
+        }
+        for bad in ["a/b", "v1.2", "../evil", "-flag", "", "has space", "a\\b", "order"] {
+            assert!(validate_task(bad).is_err(), "{bad:?} should be rejected");
+        }
+        assert!(validate_task(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn agent_argv_tokenizes_multiword_command() {
+        std::env::set_var("WTA_AGENT_CMD", "claude --model haiku");
+        std::env::remove_var("WTA_SKIP_PERMISSIONS"); // default
+        let (prog, extra) = agent_argv("repo", "task", 0, &[]);
+        assert_eq!(prog, "env");
+        // the command must be split into separate argv elements, not one string
+        assert!(extra.contains(&"claude".to_string()));
+        assert!(extra.contains(&"--model".to_string()));
+        assert!(extra.contains(&"haiku".to_string()));
+        assert!(!extra.iter().any(|s| s == "claude --model haiku"));
+        // permission bypass is ON BY DEFAULT for claude
+        assert!(extra.contains(&"--dangerously-skip-permissions".to_string()));
+        // ...and OFF with WTA_SKIP_PERMISSIONS=0 (`--safe`)
+        std::env::set_var("WTA_SKIP_PERMISSIONS", "0");
+        let (_, safe) = agent_argv("repo", "task", 0, &[]);
+        std::env::remove_var("WTA_SKIP_PERMISSIONS");
+        std::env::remove_var("WTA_AGENT_CMD");
+        assert!(!safe.contains(&"--dangerously-skip-permissions".to_string()));
+    }
 }

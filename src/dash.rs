@@ -113,19 +113,6 @@ enum Modal {
     Help,
 }
 
-/// Sanitize a branch name into a task/dir name (e.g. `feature/login` -> `feature_login`).
-fn sanitize_task(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 /// Branches matching the filter (case-insensitive substring).
 fn branch_matches<'a>(branches: &'a [String], filter: &str) -> Vec<&'a String> {
     let f = filter.to_lowercase();
@@ -523,7 +510,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                         .map(|s| (*s).clone());
                     app.modal = Modal::None;
                     if let Some(base) = picked {
-                        let task = sanitize_task(&base);
+                        let task = crate::tmux::sanitize_task(&base);
                         let root = app.op_root.clone();
                         if let Err(e) = in_repo(&root, || worktree::new_with_base(&task, &[], &base)) {
                             app.set_err(e);
@@ -867,6 +854,7 @@ fn matrix_lines(failing: &HashSet<String>) -> anyhow::Result<Vec<Line<'static>>>
         header.push(Span::styled(format!("{:<w$}", short(l), w = w), Style::default().fg(label_color(l))));
     }
     out.push(Line::from(header));
+    #[allow(clippy::needless_range_loop)] // i and j index the correlated grid + labels
     for i in 0..n {
         let mut spans = vec![Span::styled(
             format!("{:<pad$}", short(&m.labels[i]), pad = w + 2),
@@ -984,24 +972,6 @@ fn git_in(path: &Path, args: &[&str]) -> Option<String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
 }
-fn base_of(path: &Path) -> String {
-    for b in ["main", "master"] {
-        if git_in(
-            path,
-            &[
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{b}"),
-            ],
-        )
-        .is_some()
-        {
-            return b.to_string();
-        }
-    }
-    "HEAD".to_string()
-}
 fn merge_base(path: &Path, base: &str) -> Option<String> {
     git_in(path, &["merge-base", "HEAD", base]).filter(|s| !s.is_empty())
 }
@@ -1011,11 +981,11 @@ fn is_merged(path: &Path, base: &str, branch: &str) -> bool {
     if base == branch || branch.is_empty() {
         return false;
     }
-    if git_in(path, &["merge-base", "--is-ancestor", branch, &base]).is_none() {
+    if git_in(path, &["merge-base", "--is-ancestor", branch, base]).is_none() {
         return false; // has commits not in base → not merged
     }
     let bt = git_in(path, &["rev-parse", branch]);
-    let base_t = git_in(path, &["rev-parse", &base]);
+    let base_t = git_in(path, &["rev-parse", base]);
     bt.is_some() && bt != base_t // exclude the un-worked branch sitting exactly at base
 }
 /// Like `git_in` but returns stdout even on a non-zero exit (needed for
@@ -1238,7 +1208,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
         // or the branch it was forked off), else a best-effort main/master lookup. Used
         // for the sidebar label AND every diff below, so they stay consistent.
         let base = crate::status::base_of(repo, &task)
-            .or_else(|| path.as_deref().map(base_of))
+            .or_else(|| path.as_deref().map(crate::worktree::base_branch))
             .unwrap_or_else(|| "HEAD".to_string());
 
         // Token/$ usage, cadence-refreshed like the diffstat (parsing transcripts is

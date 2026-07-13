@@ -48,6 +48,17 @@ fn price(model: &str) -> (f64, f64) {
     }
 }
 
+/// Estimated USD for one message's usage: input + output at the model's rates, with
+/// standard Anthropic cache pricing (write = 1.25× input, read = 0.10× input).
+fn usd(u: &Use, model: &str) -> f64 {
+    let (pin, pout) = price(model);
+    (u.input_tokens as f64 * pin
+        + u.cache_creation_input_tokens as f64 * pin * 1.25
+        + u.cache_read_input_tokens as f64 * pin * 0.10
+        + u.output_tokens as f64 * pout)
+        / 1_000_000.0
+}
+
 #[derive(Deserialize)]
 struct Line {
     #[serde(default, rename = "type")]
@@ -119,12 +130,7 @@ pub fn for_worktree(wt: &Path) -> Usage {
             if u.input_tokens == 0 && u.output_tokens == 0 && u.cache_creation_input_tokens == 0 && u.cache_read_input_tokens == 0 {
                 continue; // synthetic / empty
             }
-            let (pin, pout) = price(model.as_deref().unwrap_or(""));
-            total.est_usd += (u.input_tokens as f64 * pin
-                + u.cache_creation_input_tokens as f64 * pin * 1.25
-                + u.cache_read_input_tokens as f64 * pin * 0.10
-                + u.output_tokens as f64 * pout)
-                / 1_000_000.0;
+            total.est_usd += usd(&u, model.as_deref().unwrap_or(""));
             total.input += u.input_tokens;
             total.output += u.output_tokens;
             total.cache_write += u.cache_creation_input_tokens;
@@ -201,13 +207,8 @@ pub fn timeline(wt: &Path) -> Vec<Sample> {
             if tok == 0 {
                 continue;
             }
-            let (pin, pout) = price(&model);
-            let usd = (u.input_tokens as f64 * pin
-                + u.cache_creation_input_tokens as f64 * pin * 1.25
-                + u.cache_read_input_tokens as f64 * pin * 0.10
-                + u.output_tokens as f64 * pout)
-                / 1_000_000.0;
-            raw.push((ts, model, tok, usd));
+            let d = usd(&u, &model);
+            raw.push((ts, model, tok, d));
         }
     }
     raw.sort_by(|a, b| a.0.cmp(&b.0)); // ISO timestamps sort lexically = chronological

@@ -54,8 +54,10 @@ fn safe_token(v: Option<String>) -> Option<String> {
 }
 
 /// Program is the `claude` CLI (by basename, tolerating wrappers like `claude.sh` /
-/// `claude-1.2` / an absolute path) — only then do `--model`/`--effort` apply.
-fn is_claude(prog: &str) -> bool {
+/// `claude-1.2` / an absolute path). The single source of truth for "is this claude"
+/// across the crate — gates `--model`/`--effort`, `--dangerously-skip-permissions`,
+/// and the folder-trust pre-seed, which must all agree on the same command.
+pub(crate) fn is_claude(prog: &str) -> bool {
     let base = prog.rsplit('/').next().unwrap_or(prog);
     base == "claude" || base.starts_with("claude-") || base.starts_with("claude.")
 }

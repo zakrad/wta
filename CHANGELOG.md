@@ -23,6 +23,18 @@ All notable changes to **wta** are documented here. The format is based on
   used (e.g. `1.3M`) instead of the `~$` estimate. Dollar estimates are still available
   via `wta cost` and its charts (`--usd`).
 
+### Fixed
+- **Wrapper `claude` commands are recognized consistently.** A `claude.sh`,
+  `claude-1.2`, or absolute-path claude now gets `--dangerously-skip-permissions` and
+  the folder-trust pre-seed on every launch path (previously only the `--model`/
+  `--effort` path recognized them, so such agents could get stuck on the trust dialog).
+
+### Internal
+- Unified drifted duplicates (the `is_claude` check, base-branch detection,
+  cost-in-dollars formula, task-name sanitization), removed stale `dead_code`
+  attributes and dev-artifact comments, and moved the misplaced test module — the
+  codebase is now `clippy`-clean.
+
 ## [0.1.30] — 2026-07-13
 
 ### Added
