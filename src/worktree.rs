@@ -939,6 +939,56 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool) -> Result<()> {
     if chart {
         let short_model = |m: &str| m.strip_prefix("claude-").unwrap_or(m).to_string();
         let short_ts = |t: &str| t.chars().take(16).collect::<String>().replace('T', " ");
+        let model_line = |tl: &[crate::cost::Sample]| {
+            crate::cost::model_runs(tl)
+                .iter()
+                .map(|(m, _, n)| format!("{} ×{n}", short_model(m)))
+                .collect::<Vec<_>>()
+                .join(" → ")
+        };
+
+        // A single agent gets a tall "tokens × time" chart you can actually read.
+        if agents.len() == 1 {
+            let a = &agents[0];
+            let tl = crate::cost::timeline(&a.path);
+            if tl.is_empty() {
+                println!("▸ {} — no claude usage recorded", a.task);
+                return Ok(());
+            }
+            let last = tl.last().unwrap();
+            let (w, h) = (56usize, 12usize);
+            let toks: Vec<f64> = tl.iter().map(|s| s.delta_tokens as f64).collect();
+            let (rows, max) = crate::cost::barchart(&toks, w, h);
+            let cols = rows.first().map(|r| r.chars().count()).unwrap_or(0);
+            println!("{} — tokens per time-bucket (oldest → newest)\n", a.task);
+            for (i, row) in rows.iter().enumerate() {
+                let ylab = if i == 0 {
+                    crate::cost::human_tokens(max as u64)
+                } else if i + 1 == rows.len() {
+                    "0".to_string()
+                } else {
+                    String::new()
+                };
+                println!("{ylab:>8} │{row}");
+            }
+            println!("{:>8} └{}", "", "─".repeat(cols));
+            println!(
+                "{:>8}  {} → {}",
+                "",
+                short_ts(&tl.first().unwrap().ts),
+                short_ts(&last.ts)
+            );
+            println!(
+                "\ntotal ~${:.2} · {} tok · {} msgs · model {}",
+                last.cum_usd,
+                crate::cost::human_tokens(last.cum_tokens),
+                tl.len(),
+                model_line(&tl)
+            );
+            println!("(~$ estimated; from Claude transcripts — no tracking overhead.)");
+            return Ok(());
+        }
+
         for a in &agents {
             let tl = crate::cost::timeline(&a.path);
             if tl.is_empty() {

@@ -243,6 +243,43 @@ pub fn sparkline(vals: &[f64], width: usize) -> String {
         .collect()
 }
 
+/// A multi-row vertical bar chart of `values` bucketed into `width` columns (each
+/// column = the SUM of its bucket), `height` rows tall. Uses eighth-block glyphs for
+/// sub-row resolution. Returns `height` strings, top row first. `max` (returned) is
+/// the value of a full-height column, for the Y-axis label.
+pub fn barchart(values: &[f64], width: usize, height: usize) -> (Vec<String>, f64) {
+    const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if values.is_empty() || width == 0 || height == 0 {
+        return (Vec::new(), 0.0);
+    }
+    let cols = width.min(values.len()).max(1);
+    let mut buckets = vec![0.0f64; cols];
+    for (i, v) in values.iter().enumerate() {
+        buckets[i * cols / values.len()] += *v;
+    }
+    let max = buckets.iter().cloned().fold(0.0, f64::max).max(1e-12);
+    let mut rows = Vec::with_capacity(height);
+    for r in 0..height {
+        let row_from_bottom = (height - 1 - r) as i64; // 0 = bottom row
+        let line: String = buckets
+            .iter()
+            .map(|b| {
+                let filled8 = ((b / max) * height as f64 * 8.0).round() as i64;
+                let in_cell = filled8 - row_from_bottom * 8; // eighths filled in this cell
+                if in_cell >= 8 {
+                    '█'
+                } else if in_cell <= 0 {
+                    ' '
+                } else {
+                    BARS[in_cell as usize]
+                }
+            })
+            .collect();
+        rows.push(line);
+    }
+    (rows, max)
+}
+
 /// The model changes across a timeline, as `(model, first_ts, message_count)` runs.
 pub fn model_runs(tl: &[Sample]) -> Vec<(String, String, u64)> {
     let mut runs: Vec<(String, String, u64)> = Vec::new();
