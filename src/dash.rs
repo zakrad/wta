@@ -147,6 +147,7 @@ struct Row {
     session: String,
     alive: bool,
     path: Option<PathBuf>,
+    cost: crate::cost::Usage,
 }
 
 /// A `.wta/verify.sh` run for one agent. Runs async (spawn + poll) so the repo's
@@ -176,6 +177,7 @@ struct App {
     diff_text: String,
     hashes: HashMap<String, u64>,
     diffcache: HashMap<String, (u32, u32)>, // task -> (added, removed), cadence-refreshed
+    costcache: HashMap<String, crate::cost::Usage>, // session -> token/$ usage, cadence-refreshed
     mergedcache: HashMap<String, bool>,     // task -> branch merged into base, cadence-refreshed
     tick: u64,                              // refresh counter driving the diffstat cadence
     trust_seen: HashMap<String, Instant>,   // session -> first time we saw it (trust grace)
@@ -206,6 +208,7 @@ impl App {
             diff_text: String::new(),
             hashes: HashMap::new(),
             diffcache: HashMap::new(),
+            costcache: HashMap::new(),
             mergedcache: HashMap::new(),
             tick: 0,
             trust_seen: HashMap::new(),
@@ -1232,6 +1235,21 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
         let session = tmux::session_name(repo, &task);
         let is_sel = sel_session.as_deref() == Some(session.as_str());
 
+        // Token/$ usage, cadence-refreshed like the diffstat (parsing transcripts is
+        // heavy, so only on the periodic full sweep or for the selected agent).
+        let cost = match path.as_deref() {
+            Some(p) => {
+                if full_sweep || is_sel || !app.costcache.contains_key(&session) {
+                    let u = crate::cost::for_worktree(p);
+                    app.costcache.insert(session.clone(), u);
+                    u
+                } else {
+                    app.costcache.get(&session).copied().unwrap_or_default()
+                }
+            }
+            None => crate::cost::Usage::default(),
+        };
+
         let (added, removed) = match path.as_deref() {
             Some(p) => {
                 if full_sweep || is_sel || !app.diffcache.contains_key(&session) {
@@ -1305,6 +1323,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             session,
             alive,
             path,
+            cost,
         });
     }
 }
@@ -1336,6 +1355,7 @@ fn refresh(app: &mut App) {
     let live: HashSet<String> = app.rows.iter().map(|r| r.session.clone()).collect();
     app.hashes.retain(|k, _| live.contains(k));
     app.diffcache.retain(|k, _| live.contains(k));
+    app.costcache.retain(|k, _| live.contains(k));
     app.mergedcache.retain(|k, _| live.contains(k));
     app.trust_seen.retain(|k, _| live.contains(k));
     app.trust_done.retain(|k| live.contains(k));
@@ -1530,13 +1550,20 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         spans1.push(glyph);
         let line1 = Line::from(spans1);
 
-        let counts_len = format!("+{},-{} ", r.added, r.removed).width();
+        // compact cost, right of the diffstat: "~$0.42" (blank under a half-cent)
+        let cost_str = if r.cost.est_usd >= 0.005 {
+            format!("~${:.2}  ", r.cost.est_usd)
+        } else {
+            String::new()
+        };
+        let counts_len = format!("{cost_str}+{},-{} ", r.added, r.removed).width();
         let indent = if app.global { "     Ꮧ-" } else { "   Ꮧ-" };
         let bhead = truncate_cols(&format!("{indent}{}", r.branch), inner_w.saturating_sub(counts_len));
         let pad2 = inner_w.saturating_sub(bhead.width() + counts_len);
         let line2 = Line::from(vec![
             Span::styled(bhead, Style::default().fg(Color::DarkGray)),
             Span::raw(" ".repeat(pad2)),
+            Span::styled(cost_str, Style::default().fg(Color::Yellow)),
             Span::styled(format!("+{}", r.added), Style::default().fg(GREEN)),
             Span::styled(",", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("-{} ", r.removed), Style::default().fg(RED)),
@@ -2070,6 +2097,7 @@ mod tests {
             session: tmux::session_name("t", task),
             alive,
             path: Some(PathBuf::from("/tmp/x")),
+            cost: crate::cost::Usage::default(),
         }
     }
 

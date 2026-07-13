@@ -79,6 +79,7 @@ and feature, with examples.
 
 ```
 wta new <task> [--base <branch>] [--safe] [--model <m>] [--effort <e>]   start an agent (skips permission prompts by default; --safe keeps them)
+wta cost [<task>]                    per-agent tokens + estimated $ (from Claude transcripts)
 wta roles                            show the resolved model/effort per role (config: ~/.wta/roles.json + <repo>/.wta/roles.json)
 wta supervise [--here] [--stuck-secs N]   watch the fleet; escalate stuck / needs-input / crashed agents (read-only)
 wta ls | matrix                      list agents · preview pairwise branch conflicts

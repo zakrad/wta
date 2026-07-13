@@ -4,6 +4,17 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.29] — 2026-07-13
+
+### Added
+- **Cost meter — per-agent tokens + estimated $.** Parses each agent's Claude Code
+  transcripts (`~/.claude/projects/…/*.jsonl`) for token usage and estimates the
+  dollar cost from a built-in price table (tokens are exact; `$` is a labeled
+  estimate). Surfaced three ways: **`wta cost [<task>]`** (per-agent tokens + ~$ with
+  in/out/cache breakdown + total), a `~$` figure per agent **in the dashboard**
+  (cadence-cached), and on **`wta loop`**'s pass/give-up line. This is the guardrail
+  the three spend-multipliers (fanout/loop/cron) were missing.
+
 ## [0.1.28] — 2026-07-13
 
 ### Added
