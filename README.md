@@ -78,7 +78,8 @@ and feature, with examples.
 ## Commands & keys
 
 ```
-wta new <task> [--base <branch>] [--safe]   start an agent (agents skip permission prompts by default; --safe keeps them)
+wta new <task> [--base <branch>] [--safe] [--model <m>] [--effort <e>]   start an agent (skips permission prompts by default; --safe keeps them)
+wta roles                            show the resolved model/effort per role (config: ~/.wta/roles.json + <repo>/.wta/roles.json)
 wta ls | matrix                      list agents · preview pairwise branch conflicts
 wta fanout <name> -n N -- <prompt>   spawn N agents on one prompt → compare (matrix) → merge the winner
 wta review <builder> [--by <cmd>]    spawn an independent reviewer agent on <builder>'s branch (maker/checker)

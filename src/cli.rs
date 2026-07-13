@@ -30,6 +30,12 @@ pub enum Command {
         /// Keep permission prompts ON for this agent (opt out of the default skip)
         #[arg(long)]
         safe: bool,
+        /// Model for this agent (claude --model), e.g. opus-4.8, sonnet-5, haiku-4.5
+        #[arg(long)]
+        model: Option<String>,
+        /// Reasoning effort (claude --effort): low | medium | high | xhigh | max
+        #[arg(long)]
+        effort: Option<String>,
         /// Everything after `--` is passed to the agent command (default: claude)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,
@@ -54,6 +60,12 @@ pub enum Command {
         /// keep permission prompts ON (opt out of the default skip)
         #[arg(long)]
         safe: bool,
+        /// model for every agent (claude --model), e.g. opus-4.8, sonnet-5
+        #[arg(long)]
+        model: Option<String>,
+        /// reasoning effort (claude --effort): low | medium | high | xhigh | max
+        #[arg(long)]
+        effort: Option<String>,
         /// everything after `--` is passed to each agent (e.g. the prompt)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,
@@ -69,9 +81,17 @@ pub enum Command {
         /// agent CLI for the reviewer (default: $WTA_REVIEW_AGENT_CMD or $WTA_AGENT_CMD)
         #[arg(long)]
         by: Option<String>,
+        /// model for the reviewer (claude --model), e.g. sonnet-5, haiku-4.5
+        #[arg(long)]
+        model: Option<String>,
+        /// reasoning effort (claude --effort): low | medium | high | xhigh | max
+        #[arg(long)]
+        effort: Option<String>,
     },
     /// Scaffold `.wta/` convention stubs (verify.sh, setup.sh, teardown.sh)
     Init,
+    /// Show the resolved agent command per role (model/effort from config + flags)
+    Roles,
     /// Migrate <from>'s context into a NEW agent: branch off it + seed a handoff note
     Handoff {
         /// the agent to hand off FROM (its committed work is carried over)

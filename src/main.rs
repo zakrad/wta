@@ -4,6 +4,7 @@ mod cli;
 mod cron;
 mod dash;
 mod notify;
+mod roles;
 mod status;
 mod tmux;
 mod worktree;
@@ -29,6 +30,8 @@ fn main() -> anyhow::Result<()> {
             base,
             yolo,
             safe,
+            model,
+            effort,
             agent_args,
         } => {
             if safe {
@@ -36,6 +39,7 @@ fn main() -> anyhow::Result<()> {
             } else if yolo {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
+            worktree::apply_worker_role(model.as_deref(), effort.as_deref());
             match base {
                 Some(b) => worktree::new_with_base(&task, &agent_args, &b)?,
                 None => worktree::new(&task, &agent_args)?,
@@ -53,6 +57,8 @@ fn main() -> anyhow::Result<()> {
             base,
             yolo,
             safe,
+            model,
+            effort,
             agent_args,
         } => {
             if safe {
@@ -60,12 +66,16 @@ fn main() -> anyhow::Result<()> {
             } else if yolo {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
+            worktree::apply_worker_role(model.as_deref(), effort.as_deref());
             worktree::fanout(&name, count, base.as_deref(), &agent_args)?
         }
         Command::Attach { task } => worktree::attach(&task)?,
         Command::Open { task } => worktree::open(&task)?,
-        Command::Review { builder, by } => worktree::review(&builder, by.as_deref())?,
+        Command::Review { builder, by, model, effort } => {
+            worktree::review(&builder, by.as_deref(), model.as_deref(), effort.as_deref())?
+        }
         Command::Init => worktree::init()?,
+        Command::Roles => roles::print_roles(worktree::repo_root().ok().as_deref()),
         Command::Handoff { from, new, prompt } => worktree::handoff(&from, &new, &prompt)?,
         Command::Loop { task, max, no_progress, timeout, prompt } => {
             worktree::loop_verify(&task, max, no_progress, timeout, &prompt)?

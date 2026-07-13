@@ -4,6 +4,20 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.27] — 2026-07-13
+
+### Added
+- **Per-role model + effort.** Choose the model and reasoning effort per role.
+  `wta new`/`fanout`/`review` take `--model <m>` and `--effort <low|medium|high|xhigh|max>`
+  (Claude Code launch flags), and roles have config defaults in `~/.wta/roles.json`
+  (global) + `<repo>/.wta/roles.json` (repo). Precedence: **CLI flag > env
+  (`WTA_<ROLE>_MODEL`/`_EFFORT`) > repo config > global config > base command**, merged
+  per-key (a repo can set the model and inherit the global effort). `wta roles` prints
+  the resolved command per role (a dry-run + cost view). `--model`/`--effort` are added
+  only when the agent is `claude`; other agents ignore them with a warning. Safety: a
+  **repo config cannot set `cmd`** (a pulled repo can't choose which binary runs) — only
+  the global config / env may. With no config, behavior is identical to before.
+
 ## [0.1.26] — 2026-07-13
 
 ### Added

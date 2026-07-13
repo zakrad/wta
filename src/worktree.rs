@@ -434,6 +434,15 @@ pub fn new_with_base(task: &str, agent_args: &[String], base: &str) -> Result<()
     new_impl(task, agent_args, Some(base), None)
 }
 
+/// Resolve the worker role (config + `--model`/`--effort`) and set `WTA_AGENT_CMD` so
+/// the spawned agent uses the chosen model/effort. Call before `new` / `fanout`.
+pub fn apply_worker_role(cli_model: Option<&str>, cli_effort: Option<&str>) {
+    let root = repo_root().ok();
+    let base = agent_cmd();
+    let (cmd, _) = crate::roles::resolve("worker", cli_model, cli_effort, &base, root.as_deref());
+    std::env::set_var("WTA_AGENT_CMD", cmd);
+}
+
 /// Append `content` to the worktree's `CLAUDE.local.md` (create if absent).
 /// Returns whether it was written (so the caller can mark it injected).
 fn append_local_md(wt: &Path, content: &str) -> bool {
@@ -552,7 +561,7 @@ pub fn fanout(name: &str, count: u32, base: Option<&str>, agent_args: &[String])
 /// agents can't self-grade). Names it `review-<builder>`, based on the builder's
 /// branch so it can see + test the changes. Optionally uses a different/cheaper
 /// agent CLI (`--by` / `WTA_REVIEW_AGENT_CMD`).
-pub fn review(builder: &str, by: Option<&str>) -> Result<()> {
+pub fn review(builder: &str, by: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Result<()> {
     let root = repo_root()?;
     let builder_branch = branch_name(builder);
     let exists = run_git(
@@ -576,10 +585,11 @@ pub fn review(builder: &str, by: Option<&str>) -> Result<()> {
     );
     // reviewer runs an (optionally cheaper / different) agent CLI. This is a
     // one-shot CLI process, so overriding its own WTA_AGENT_CMD env is safe.
-    let cmd = by
+    let rev_base = by
         .map(String::from)
         .or_else(|| std::env::var("WTA_REVIEW_AGENT_CMD").ok().filter(|s| !s.trim().is_empty()))
         .unwrap_or_else(agent_cmd);
+    let (cmd, _) = crate::roles::resolve("reviewer", model, effort, &rev_base, Some(&root));
     std::env::set_var("WTA_AGENT_CMD", &cmd);
     new_with_base(&reviewer, &[prompt], &builder_branch)?;
     println!("started reviewer '{reviewer}' on {builder}'s branch — watch it in `wta dash`");
