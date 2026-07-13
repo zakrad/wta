@@ -139,6 +139,14 @@ pub fn repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(out.trim()))
 }
 
+/// The checked-out branch at `root`, or `None` if detached (returns "HEAD").
+fn current_branch(root: &Path) -> Option<String> {
+    run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(root))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|b| !b.is_empty() && b != "HEAD")
+}
+
 pub fn base_branch(root: &Path) -> String {
     for b in ["main", "master"] {
         if run_git(
@@ -525,6 +533,13 @@ fn new_impl(task: &str, agent_args: &[String], base: Option<&str>, seed: Option<
     exclude_in_worktree(&wt, &injected);
     // persist slot + injected list first, so the "running" record below merges over it
     let _ = status::record_meta(&repo, task, idx, &injected);
+    // persist the base branch this agent targets: an explicit --base, else the branch
+    // we branched off (HEAD's branch), else the repo default. Read back by the dash
+    // (which branch is it on?) and `wta push --pr` (so the PR targets the right base).
+    let resolved_base = base
+        .map(|b| b.to_string())
+        .unwrap_or_else(|| current_branch(&root).unwrap_or_else(|| base_branch(&root)));
+    let _ = status::record_base(&repo, task, &resolved_base);
     preseed_claude_trust(&wt); // avoid the folder-trust dialog on this fresh worktree
     let wt_str = wt.to_string_lossy().into_owned();
     let session = tmux::session_name(&repo, task);
@@ -1430,27 +1445,27 @@ fn push_if_managed(out: &mut Vec<Worktree>, base_dir: &Path, path: PathBuf, bran
 pub fn ls() -> Result<()> {
     let root = repo_root()?;
     let repo = repo_id_of(&root);
-    let base = base_branch(&root);
+    let default_base = base_branch(&root);
     let managed = list_managed()?;
     if managed.is_empty() {
         println!("no agents (create one with: wta new <task>)");
         return Ok(());
     }
-    println!(
-        "{:<20} {:<9} {:<22} CHANGES vs {}",
-        "TASK", "STATE", "BRANCH", base
-    );
+    // The working branch is always `agent/<task>`, so show the BASE branch each agent
+    // targets instead — that's the branch info that actually varies.
+    println!("{:<20} {:<9} {:<20} CHANGES vs base", "TASK", "STATE", "BASE");
     for w in managed {
         let alive = if tmux::has_session(&tmux::session_name(&repo, &w.task)) {
             "running"
         } else {
             "exited"
         };
+        let base = status::base_of(&repo, &w.task).unwrap_or_else(|| default_base.clone());
         println!(
-            "{:<20} {:<9} {:<22} {}",
+            "{:<20} {:<9} {:<20} {}",
             w.task,
             alive,
-            w.branch,
+            base,
             diffstat(&w.path, &base)
         );
     }
@@ -1540,11 +1555,17 @@ pub fn push(task: &str, make_pr: bool) -> Result<String> {
     append_run_log(&root, task, "push");
 
     if make_pr {
+        // Target the agent's recorded base branch, so a PR for `wta new x --base
+        // release/2.0` opens against release/2.0 — not the repo default (which would
+        // drag every base-branch commit into the diff and, on merge, into main).
+        let base = status::base_of(&repo, task).unwrap_or_else(|| base_branch(&root));
+        let mut args = vec!["pr", "create", "--fill", "--head", branch.as_str()];
+        if !base.is_empty() && base != "HEAD" {
+            args.push("--base");
+            args.push(base.as_str());
+        }
         // best-effort: create a PR, or report the existing one.
-        let created = Command::new("gh")
-            .args(["pr", "create", "--fill", "--head", &branch])
-            .current_dir(&wt)
-            .output();
+        let created = Command::new("gh").args(&args).current_dir(&wt).output();
         if let Ok(o) = created {
             let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if o.status.success() && url.starts_with("http") {

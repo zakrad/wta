@@ -4,6 +4,25 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.31] — 2026-07-13
+
+### Added
+- **Base branch is now persisted and shown per agent.** Each agent records the branch
+  it's based on / targets (from `--base`, else the branch it was forked off). The
+  dashboard sidebar and `wta ls` now show that **base branch** — the working branch is
+  always `agent/<task>` (the same as the task name), so the base is the branch info
+  that actually varies. This also fixes the diff/merge cluster from the audit:
+  - The **Diff tab, sidebar +/- counts, `wta ls`, and the merge matrix** now diff
+    against the agent's real base (no longer hard-coded to `main`/`master`), so an
+    agent based on `develop`/`release/x` no longer shows an inflated diff.
+  - **`wta push --pr`** now passes `gh pr create --base <base>`, so a PR opens against
+    the branch the agent targets instead of the repo default.
+
+### Changed
+- **Dashboard shows token count, not dollars.** The per-agent line now shows tokens
+  used (e.g. `1.3M`) instead of the `~$` estimate. Dollar estimates are still available
+  via `wta cost` and its charts (`--usd`).
+
 ## [0.1.30] — 2026-07-13
 
 ### Added

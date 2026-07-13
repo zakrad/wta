@@ -22,6 +22,8 @@ pub struct AgentState {
     pub index: u32, // stable isolation slot (WTA_INDEX / WTA_PORT_BASE), assigned at creation
     #[serde(default)]
     pub context: Vec<String>, // files injected at `new`, unstaged again by `push`
+    #[serde(default)]
+    pub base: Option<String>, // branch this agent is based on / targets — for diffs + PR base
 }
 
 pub fn wta_dir() -> Result<PathBuf> {
@@ -99,6 +101,7 @@ pub fn record(repo: &str, task: &str, status: &str, cwd: &str) -> Result<()> {
         updated_unix: 0,
         index: 0,
         context: Vec::new(),
+        base: None,
     });
     st.task = task.to_string();
     st.repo = repo.to_string();
@@ -119,12 +122,37 @@ pub fn record_meta(repo: &str, task: &str, index: u32, context: &[String]) -> Re
         updated_unix: now_unix(),
         index: 0,
         context: Vec::new(),
+        base: None,
     });
     st.task = task.to_string();
     st.repo = repo.to_string();
     st.index = index;
     st.context = context.to_vec();
     save(&st)
+}
+
+/// Record the base branch this agent is based on / targets (merge-write, so it
+/// preserves status/slot/context). Read back by the dashboard and `wta push --pr`.
+pub fn record_base(repo: &str, task: &str, base: &str) -> Result<()> {
+    let mut st = read_state(repo, task).unwrap_or(AgentState {
+        task: task.to_string(),
+        repo: repo.to_string(),
+        status: "running".to_string(),
+        cwd: String::new(),
+        updated_unix: now_unix(),
+        index: 0,
+        context: Vec::new(),
+        base: None,
+    });
+    st.task = task.to_string();
+    st.repo = repo.to_string();
+    st.base = Some(base.to_string());
+    save(&st)
+}
+
+/// The persisted base branch for an agent, if one was recorded and non-empty.
+pub fn base_of(repo: &str, task: &str) -> Option<String> {
+    read_state(repo, task).and_then(|s| s.base).filter(|b| !b.is_empty())
 }
 
 fn emit_uservar(name: &str, value: &str) -> std::io::Result<()> {

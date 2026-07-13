@@ -140,7 +140,7 @@ struct Row {
     repo: String,       // repo id (namespaces the session + state)
     root: PathBuf,      // repo root (for git ops in the global dash)
     repo_name: String,  // display name (root dir), for the tree header
-    branch: String,
+    base: String,       // branch this agent is based on / targets (for the label + diffs)
     status: Status,
     added: u32,
     removed: u32,
@@ -1002,13 +1002,12 @@ fn base_of(path: &Path) -> String {
     }
     "HEAD".to_string()
 }
-fn merge_base(path: &Path) -> Option<String> {
-    git_in(path, &["merge-base", "HEAD", &base_of(path)]).filter(|s| !s.is_empty())
+fn merge_base(path: &Path, base: &str) -> Option<String> {
+    git_in(path, &["merge-base", "HEAD", base]).filter(|s| !s.is_empty())
 }
 /// True if the agent's branch has landed in the base branch (all its commits are
 /// ancestors of base) — and it isn't just a fresh branch sitting at base's tip.
-fn is_merged(path: &Path, branch: &str) -> bool {
-    let base = base_of(path);
+fn is_merged(path: &Path, base: &str, branch: &str) -> bool {
     if base == branch || branch.is_empty() {
         return false;
     }
@@ -1049,8 +1048,8 @@ fn unpushed_count(path: &Path) -> u32 {
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
 }
-fn numstat(path: &Path) -> (u32, u32) {
-    let mb = match merge_base(path) {
+fn numstat(path: &Path, base: &str) -> (u32, u32) {
+    let mb = match merge_base(path, base) {
         Some(s) => s,
         None => return (0, 0),
     };
@@ -1070,8 +1069,8 @@ fn numstat(path: &Path) -> (u32, u32) {
     }
     (a, d)
 }
-fn full_diff(path: &Path) -> String {
-    let mut out = match merge_base(path) {
+fn full_diff(path: &Path, base: &str) -> String {
+    let mut out = match merge_base(path, base) {
         Some(mb) => git_in(path, &["diff", &mb]).unwrap_or_default(),
         None => String::new(),
     };
@@ -1235,6 +1234,13 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
         let session = tmux::session_name(repo, &task);
         let is_sel = sel_session.as_deref() == Some(session.as_str());
 
+        // The branch this agent is based on / targets: the persisted base (from `--base`
+        // or the branch it was forked off), else a best-effort main/master lookup. Used
+        // for the sidebar label AND every diff below, so they stay consistent.
+        let base = crate::status::base_of(repo, &task)
+            .or_else(|| path.as_deref().map(base_of))
+            .unwrap_or_else(|| "HEAD".to_string());
+
         // Token/$ usage, cadence-refreshed like the diffstat (parsing transcripts is
         // heavy, so only on the periodic full sweep or for the selected agent).
         let cost = match path.as_deref() {
@@ -1253,7 +1259,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
         let (added, removed) = match path.as_deref() {
             Some(p) => {
                 if full_sweep || is_sel || !app.diffcache.contains_key(&session) {
-                    let v = numstat(p);
+                    let v = numstat(p, &base);
                     app.diffcache.insert(session.clone(), v);
                     v
                 } else {
@@ -1265,7 +1271,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
         let merged = match path.as_deref() {
             Some(p) => {
                 if full_sweep || is_sel || !app.mergedcache.contains_key(&session) {
-                    let v = is_merged(p, &branch);
+                    let v = is_merged(p, &base, &branch);
                     app.mergedcache.insert(session.clone(), v);
                     v
                 } else {
@@ -1316,7 +1322,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             repo: repo.to_string(),
             root: root.to_path_buf(),
             repo_name: repo_name.clone(),
-            branch,
+            base,
             status,
             added,
             removed,
@@ -1431,8 +1437,8 @@ fn load_detail(app: &mut App) {
     if let Some(s) = app.selected().map(|r| r.session.clone()) {
         app.attention.remove(&s);
     }
-    let (alive, session, path) = match app.selected() {
-        Some(r) => (r.alive, r.session.clone(), r.path.clone()),
+    let (alive, session, path, base) = match app.selected() {
+        Some(r) => (r.alive, r.session.clone(), r.path.clone(), r.base.clone()),
         None => {
             app.preview.clear();
             app.diff_text.clear();
@@ -1450,7 +1456,7 @@ fn load_detail(app: &mut App) {
         Tab::Diff => {
             app.diff_text = match path.as_deref() {
                 Some(p) => {
-                    let d = full_diff(p);
+                    let d = full_diff(p, &base);
                     if d.is_empty() {
                         "No changes.".into()
                     } else {
@@ -1550,20 +1556,22 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         spans1.push(glyph);
         let line1 = Line::from(spans1);
 
-        // compact cost, right of the diffstat: "~$0.42" (blank under a half-cent)
-        let cost_str = if r.cost.est_usd >= 0.005 {
-            format!("~${:.2}  ", r.cost.est_usd)
+        // compact TOKEN usage, right of the diffstat: "1.3M" (blank when none yet)
+        let tok_str = if r.cost.tokens() > 0 {
+            format!("{}  ", crate::cost::human_tokens(r.cost.tokens()))
         } else {
             String::new()
         };
-        let counts_len = format!("{cost_str}+{},-{} ", r.added, r.removed).width();
-        let indent = if app.global { "     Ꮧ-" } else { "   Ꮧ-" };
-        let bhead = truncate_cols(&format!("{indent}{}", r.branch), inner_w.saturating_sub(counts_len));
+        let counts_len = format!("{tok_str}+{},-{} ", r.added, r.removed).width();
+        // Show the BASE branch each agent targets (its working branch is always
+        // `agent/<task>` = the line-1 name, so it carries no extra info).
+        let indent = if app.global { "     Ꮧ " } else { "   Ꮧ " };
+        let bhead = truncate_cols(&format!("{indent}{}", r.base), inner_w.saturating_sub(counts_len));
         let pad2 = inner_w.saturating_sub(bhead.width() + counts_len);
         let line2 = Line::from(vec![
             Span::styled(bhead, Style::default().fg(Color::DarkGray)),
             Span::raw(" ".repeat(pad2)),
-            Span::styled(cost_str, Style::default().fg(Color::Yellow)),
+            Span::styled(tok_str, Style::default().fg(Color::Yellow)),
             Span::styled(format!("+{}", r.added), Style::default().fg(GREEN)),
             Span::styled(",", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("-{} ", r.removed), Style::default().fg(RED)),
@@ -2090,7 +2098,7 @@ mod tests {
             repo: "t".into(),
             root: PathBuf::from("/tmp"),
             repo_name: "tmp".into(),
-            branch: format!("agent/{task}"),
+            base: "main".into(),
             status: s,
             added: a,
             removed: d,
@@ -2114,7 +2122,7 @@ mod tests {
         println!("\n{screen}\n");
         assert!(screen.contains("Instances"));
         assert!(screen.contains("1. auth"));
-        assert!(screen.contains("Ꮧ-agent/auth"));
+        assert!(screen.contains("Ꮧ main")); // the base branch, not the redundant agent/<task>
         assert!(screen.contains("+40"));
         assert!(screen.contains("Preview") && screen.contains("Diff"));
         assert!(screen.contains("test result: ok"));
@@ -2367,9 +2375,9 @@ mod tests {
         git(&["commit", "-qm", "init"]);
         // agent creates a new (untracked) file — a plain `git diff` would miss it
         std::fs::write(dir.join("new.rs"), "fn a() {}\nfn b() {}\n").unwrap();
-        let (a, _d) = numstat(&dir);
+        let (a, _d) = numstat(&dir, "main");
         assert!(a >= 2, "untracked lines counted in stats, got {a}");
-        assert!(full_diff(&dir).contains("new.rs"), "untracked file shown in diff");
+        assert!(full_diff(&dir, "main").contains("new.rs"), "untracked file shown in diff");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2448,17 +2456,17 @@ mod tests {
         git(&["commit", "-qm", "init"]);
         // fresh branch sitting at base tip → NOT merged (no work)
         git(&["branch", "agent/fresh"]);
-        assert!(!is_merged(&dir, "agent/fresh"), "unworked branch is not 'merged'");
+        assert!(!is_merged(&dir, "main", "agent/fresh"), "unworked branch is not 'merged'");
         // a branch with a commit, not yet in main → NOT merged
         git(&["checkout", "-qb", "agent/work"]);
         std::fs::write(dir.join("b.txt"), "2\n").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "work"]);
-        assert!(!is_merged(&dir, "agent/work"), "unmerged work is not 'merged'");
+        assert!(!is_merged(&dir, "main", "agent/work"), "unmerged work is not 'merged'");
         // merge it into main (no-ff) → now merged
         git(&["checkout", "-q", "main"]);
         git(&["merge", "--no-ff", "-q", "-m", "merge", "agent/work"]);
-        assert!(is_merged(&dir, "agent/work"), "landed branch reads as merged");
+        assert!(is_merged(&dir, "main", "agent/work"), "landed branch reads as merged");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
