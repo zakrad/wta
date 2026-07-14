@@ -78,23 +78,33 @@ pub fn list_sessions() -> Vec<String> {
 /// and bind Ctrl-q to detach (root table, so no prefix needed).
 fn configure(name: &str) {
     // Session-scoped (`-t <session>`): safe on any server — only affects our sessions.
-    for (opt, val) in [
-        ("status", "off"),
-        ("mouse", "on"),
-        ("history-limit", "10000"),
-    ] {
+    for (opt, val) in [("mouse", "on"), ("history-limit", "10000")] {
         let _ = tmux().args(["set-option", "-t", name, opt, val]).status();
     }
-    // Server-global tweaks: ONLY on our dedicated socket, so we never clobber the
-    // user's own tmux (escape-time is server-wide; `bind -n C-q` rebinds Ctrl-q
-    // for every pane on the server).
     if dedicated() {
-        let _ = tmux()
-            .args(["set-option", "-g", "escape-time", "0"])
-            .status();
-        let _ = tmux()
-            .args(["bind-key", "-n", "C-q", "detach-client"])
-            .status();
+        // We own this socket, so set server-globals: zero escape latency, Ctrl-q
+        // detaches (root table, no prefix), and a THIN status bar whose only content
+        // is a hint that you're inside a wta agent and Ctrl-q returns. The bar shows
+        // while attached but never in the dashboard Preview (capture-pane grabs pane
+        // text, not the status line).
+        for (opt, val) in [
+            ("escape-time", "0"),
+            ("status", "on"),
+            ("status-style", "bg=default,fg=green"),
+            ("status-left", ""),
+            ("status-right", " #[bold]Ctrl-q#[nobold] ↩ return to wta "),
+            ("status-right-length", "28"),
+        ] {
+            let _ = tmux().args(["set-option", "-g", opt, val]).status();
+        }
+        // Window-status is a window option — clear it so the bar is just the hint.
+        for opt in ["window-status-format", "window-status-current-format"] {
+            let _ = tmux().args(["set-option", "-gw", opt, ""]).status();
+        }
+        let _ = tmux().args(["bind-key", "-n", "C-q", "detach-client"]).status();
+    } else {
+        // On the user's own server keep it seamless — no status bar of ours.
+        let _ = tmux().args(["set-option", "-t", name, "status", "off"]).status();
     }
 }
 
@@ -298,19 +308,8 @@ pub fn attach_blocking(name: &str) -> Result<()> {
         }
     }
 
-    // best-effort hint shown briefly in the agent's message line (dedicated socket)
-    if dedicated() {
-        let _ = tmux()
-            .args([
-                "display-message",
-                "-d",
-                "1200",
-                "-t",
-                name,
-                "press Ctrl-q to return to wta",
-            ])
-            .status();
-    }
+    // (The persistent "Ctrl-q ↩ return to wta" status bar set in configure() makes the
+    // exit key obvious while attached, so no transient hint is needed here.)
     tmux()
         .args(["attach-session", "-t", name])
         // Unset $TMUX so tmux attaches in the CURRENT pane (respecting a split
