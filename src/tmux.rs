@@ -282,9 +282,11 @@ pub fn attach_blocking(name: &str) -> Result<()> {
         return Ok(());
     }
 
-    // On our dedicated socket, launched from inside the user's tmux, a plain
-    // attach would nest tmux-in-tmux; use a popup (tmux >= 3.2) to isolate it.
-    if dedicated() && inside_tmux {
+    // On our dedicated socket, launched from inside the user's tmux, a plain attach
+    // would be refused as a nested session. By default we still attach IN THE CURRENT
+    // PANE (the fall-through below unsets $TMUX to allow it), so it respects a split
+    // layout. Set WTA_ATTACH_POPUP=1 for the old full-window popup overlay instead.
+    if dedicated() && inside_tmux && std::env::var("WTA_ATTACH_POPUP").as_deref() == Ok("1") {
         let inner = format!("tmux -L {} attach-session -t {}", socket_name(), name);
         if let Ok(s) = Command::new("tmux")
             .args(["display-popup", "-w", "92%", "-h", "92%", "-E", &inner])
@@ -311,6 +313,11 @@ pub fn attach_blocking(name: &str) -> Result<()> {
     }
     tmux()
         .args(["attach-session", "-t", name])
+        // Unset $TMUX so tmux attaches in the CURRENT pane (respecting a split
+        // layout) rather than refusing this as a nested session. Our agents live on
+        // a separate socket, so this is a cross-server attach, not true nesting; the
+        // caller already released the pane, and Ctrl-q (bound on our server) returns.
+        .env_remove("TMUX")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
