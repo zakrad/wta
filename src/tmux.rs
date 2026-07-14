@@ -82,29 +82,40 @@ fn configure(name: &str) {
         let _ = tmux().args(["set-option", "-t", name, opt, val]).status();
     }
     if dedicated() {
-        // We own this socket, so set server-globals: zero escape latency, Ctrl-q
-        // detaches (root table, no prefix), and a THIN status bar whose only content
-        // is a hint that you're inside a wta agent and Ctrl-q returns. The bar shows
-        // while attached but never in the dashboard Preview (capture-pane grabs pane
-        // text, not the status line).
-        for (opt, val) in [
-            ("escape-time", "0"),
-            ("status", "on"),
-            ("status-style", "bg=default,fg=green"),
-            ("status-left", ""),
-            ("status-right", " #[bold]Ctrl-q#[nobold] ↩ return to wta "),
-            ("status-right-length", "28"),
-        ] {
-            let _ = tmux().args(["set-option", "-g", opt, val]).status();
-        }
-        // Window-status is a window option — clear it so the bar is just the hint.
-        for opt in ["window-status-format", "window-status-current-format"] {
-            let _ = tmux().args(["set-option", "-gw", opt, ""]).status();
-        }
+        // We own this socket, so set server-globals: zero escape latency + Ctrl-q
+        // detaches (root table, no prefix), plus the "return to wta" status bar.
+        let _ = tmux().args(["set-option", "-g", "escape-time", "0"]).status();
         let _ = tmux().args(["bind-key", "-n", "C-q", "detach-client"]).status();
+        ensure_hint_bar(name);
     } else {
         // On the user's own server keep it seamless — no status bar of ours.
         let _ = tmux().args(["set-option", "-t", name, "status", "off"]).status();
+    }
+}
+
+/// Turn on the THIN "Ctrl-q ↩ return to wta" status bar for a session on our socket —
+/// so it's obvious you're inside a wta agent and how to get out. Idempotent, and
+/// re-applied on attach so agents created before this feature existed (which carry a
+/// per-session `status off`) pick it up too. It shows only while attached, never in
+/// the dashboard Preview (capture-pane grabs pane text, not the status line).
+fn ensure_hint_bar(name: &str) {
+    if !dedicated() {
+        return;
+    }
+    // Drop any stale per-session `status` override so the session inherits the bar.
+    let _ = tmux().args(["set-option", "-u", "-t", name, "status"]).status();
+    for (opt, val) in [
+        ("status", "on"),
+        ("status-style", "bg=default,fg=green"),
+        ("status-left", ""),
+        ("status-right", " #[bold]Ctrl-q#[nobold] ↩ return to wta "),
+        ("status-right-length", "28"),
+    ] {
+        let _ = tmux().args(["set-option", "-g", opt, val]).status();
+    }
+    // Window-status is a window option — clear it so the bar is just the hint.
+    for opt in ["window-status-format", "window-status-current-format"] {
+        let _ = tmux().args(["set-option", "-gw", opt, ""]).status();
     }
 }
 
@@ -280,6 +291,7 @@ pub fn kill(name: &str) -> Result<()> {
 /// (bound to detach-client). Caller must suspend any raw-mode TUI first.
 pub fn attach_blocking(name: &str) -> Result<()> {
     let inside_tmux = std::env::var("TMUX").is_ok();
+    ensure_hint_bar(name); // so even pre-existing agents show the Ctrl-q bar
 
     // On the user's OWN server, agents share their tmux — so switch to the
     // session instead of a (guarded) nested attach. Ctrl-q isn't bound here, so
