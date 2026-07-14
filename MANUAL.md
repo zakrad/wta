@@ -215,28 +215,37 @@ branch in the matrix like any other verify failure.
 
 ---
 
-## Roles — model & effort
+## Roles — a different engine, model & effort per job
 
-Choose which model and reasoning effort each role uses, so a strong model builds and
-a cheap one reviews. Precedence: CLI flags > env (`WTA_<ROLE>_MODEL`/`_EFFORT`) >
-`<repo>/.wta/roles.json` > `~/.wta/roles.json`.
+Spawn an agent *as a role*, so it runs the engine/model/effort you've chosen for that
+job. The built-in roles are the convergent plan → build → review → test set:
+`architect`, `backend`, `frontend`, `reviewer`, `tester` (plus `worker`, the default).
+Any other name works too if you define it in config.
 
 ```sh
-wta new fix-auth --model opus-4.8 --effort high      # per-agent, one-off
-wta review fix-auth --by "claude --model haiku-4.5"  # a cheaper reviewer
-wta roles                                            # print the resolved model/effort per role
+wta new checkout-api --role backend      # spawn as the backend role
+wta new checkout-ui  --role frontend
+wta new spec         --role architect    # coordinator: decompose + design (defaults to --effort high)
+wta fanout refactor -n 3 --role backend  # a whole fan-out as one role
+wta roles                                # print the resolved engine/model/effort per role
 ```
 
-Set defaults in `~/.wta/roles.json` (global) or `<repo>/.wta/roles.json` (per-repo):
+**Each role can run a different ENGINE** — set `cmd` in `~/.wta/roles.json` (global
+only), so e.g. a planner runs one model while executors run another (or another CLI
+entirely):
 
 ```json
-{ "worker":   { "model": "opus-4.8", "effort": "high" },
-  "reviewer": { "model": "haiku-4.5" } }
+{ "architect": { "cmd": "claude", "model": "opus-4.8", "effort": "high" },
+  "backend":   { "cmd": "codex" },
+  "frontend":  { "cmd": "claude", "model": "sonnet-5" },
+  "reviewer":  { "cmd": "claude", "model": "haiku-4.5" } }
 ```
 
-`--model`/`--effort` are only appended for the `claude` CLI. A repo's `roles.json`
-may set model/effort but **not** the base command — a supply-chain guard, since repos
-you clone shouldn't be able to change what binary runs.
+Precedence (highest first): `--model`/`--effort` flags > env (`WTA_<ROLE>_MODEL`/`_EFFORT`)
+> `<repo>/.wta/roles.json` > `~/.wta/roles.json` > built-in defaults. `--model`/`--effort`
+are only appended for the `claude` CLI. **A repo's `roles.json` may set model/effort but
+never the engine (`cmd`)** — a supply-chain guard, since repos you clone shouldn't be
+able to change what binary runs.
 
 ---
 
