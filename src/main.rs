@@ -34,6 +34,7 @@ fn main() -> anyhow::Result<()> {
             safe,
             model,
             effort,
+            role,
             agent_args,
         } => {
             if safe {
@@ -41,7 +42,7 @@ fn main() -> anyhow::Result<()> {
             } else if yolo {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
-            worktree::apply_worker_role(model.as_deref(), effort.as_deref());
+            worktree::apply_role(role.as_deref().unwrap_or("worker"), model.as_deref(), effort.as_deref());
             match base {
                 Some(b) => worktree::new_with_base(&task, &agent_args, &b)?,
                 None => worktree::new(&task, &agent_args)?,
@@ -64,6 +65,7 @@ fn main() -> anyhow::Result<()> {
             safe,
             model,
             effort,
+            role,
             agent_args,
         } => {
             if safe {
@@ -71,7 +73,7 @@ fn main() -> anyhow::Result<()> {
             } else if yolo {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
-            worktree::apply_worker_role(model.as_deref(), effort.as_deref());
+            worktree::apply_role(role.as_deref().unwrap_or("worker"), model.as_deref(), effort.as_deref());
             worktree::fanout(&name, count, base.as_deref(), &agent_args)?
         }
         Command::Attach { task } => worktree::attach(&task)?,

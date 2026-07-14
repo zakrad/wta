@@ -410,12 +410,14 @@ pub fn new_with_base(task: &str, agent_args: &[String], base: &str) -> Result<()
     new_impl(task, agent_args, Some(base), None)
 }
 
-/// Resolve the worker role (config + `--model`/`--effort`) and set `WTA_AGENT_CMD` so
-/// the spawned agent uses the chosen model/effort. Call before `new` / `fanout`.
-pub fn apply_worker_role(cli_model: Option<&str>, cli_effort: Option<&str>) {
+/// Resolve `role` (its engine `cmd` + `--model`/`--effort`) and set `WTA_AGENT_CMD` so
+/// the spawned agent uses that role's engine/model/effort. Call before `new` / `fanout`.
+/// `role` is any name in `~/.wta/roles.json` (or a built-in like backend/reviewer);
+/// unknown names simply fall back to the default engine.
+pub fn apply_role(role: &str, cli_model: Option<&str>, cli_effort: Option<&str>) {
     let root = repo_root().ok();
     let base = agent_cmd();
-    let (cmd, _) = crate::roles::resolve("worker", None, cli_model, cli_effort, &base, root.as_deref());
+    let (cmd, _) = crate::roles::resolve(role, None, cli_model, cli_effort, &base, root.as_deref());
     std::env::set_var("WTA_AGENT_CMD", cmd);
 }
 

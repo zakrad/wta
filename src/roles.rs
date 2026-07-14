@@ -62,6 +62,23 @@ pub(crate) fn is_claude(prog: &str) -> bool {
     base == "claude" || base.starts_with("claude-") || base.starts_with("claude.")
 }
 
+/// Built-in role names shown by `wta roles` and suggested for `--role`. The
+/// convergent plan→build→review→test core from multi-agent SWE frameworks (MetaGPT /
+/// ChatDev / AutoGen / CrewAI / Claude). ANY other name also works if defined in
+/// roles.json — these are just the ones with sensible defaults + documentation.
+pub const CORE_ROLES: &[&str] = &["worker", "architect", "backend", "frontend", "reviewer", "tester"];
+
+/// Baked-in default reasoning effort per core role (claude only; overridden by any
+/// flag/env/config). Planning/architecture benefits from more thinking; independent
+/// verification needs less, and it's the cheap-model tier.
+fn default_effort(role: &str) -> Option<&'static str> {
+    match role {
+        "architect" => Some("high"),
+        "reviewer" | "tester" => Some("low"),
+        _ => None,
+    }
+}
+
 fn configs(role: &str, root: Option<&Path>) -> (RoleCfg, RoleCfg) {
     let global = dirs::home_dir().map(|h| load(&h.join(".wta/roles.json"))).unwrap_or_default();
     let repo = root.map(|r| load(&r.join(".wta/roles.json"))).unwrap_or_default();
@@ -121,7 +138,8 @@ pub fn resolve(role: &str, cli_cmd: Option<&str>, cli_model: Option<&str>, cli_e
     let effort = safe_token(cli_effort.map(str::to_string))
         .or_else(|| safe_token(env("EFFORT")))
         .or_else(|| safe_token(r.effort.clone()))
-        .or_else(|| safe_token(g.effort.clone()));
+        .or_else(|| safe_token(g.effort.clone()))
+        .or_else(|| default_effort(role).map(str::to_string));
 
     let prog = base_cmd.split_whitespace().next().unwrap_or("");
     let claude = is_claude(prog);
@@ -155,13 +173,17 @@ fn reviewer_base() -> String {
 
 /// `wta roles` — print the resolved command per role (a dry-run + cost view).
 pub fn print_roles(root: Option<&Path>) {
-    println!("resolved agent command per role (a `--model`/`--effort` flag would override):\n");
-    for (role, base) in [("worker", worker_base()), ("reviewer", reviewer_base())] {
+    println!("resolved agent command per role — spawn one with `wta new <task> --role <role>`:\n");
+    for role in CORE_ROLES {
+        let base = if *role == "reviewer" { reviewer_base() } else { worker_base() };
         let (cmd, note) = resolve(role, None, None, None, &base, root);
-        println!("  {role:<9} {cmd}");
-        println!("            {note}");
+        println!("  {role:<10} {cmd}");
+        println!("             {note}");
     }
-    println!("\nconfig: ~/.wta/roles.json (global) + <repo>/.wta/roles.json (model/effort only)");
-    println!("  e.g.  {{ \"worker\": {{ \"model\": \"opus-4.8\", \"effort\": \"high\" }},");
-    println!("          \"reviewer\": {{ \"model\": \"sonnet-5\", \"effort\": \"medium\" }} }}");
+    println!("\nEach role can run a DIFFERENT ENGINE — set `cmd` in ~/.wta/roles.json (global only):");
+    println!("  {{ \"architect\": {{ \"cmd\": \"claude\", \"effort\": \"high\" }},");
+    println!("    \"backend\":   {{ \"cmd\": \"codex\" }},");
+    println!("    \"frontend\":  {{ \"cmd\": \"claude\", \"model\": \"sonnet-5\" }},");
+    println!("    \"reviewer\":  {{ \"cmd\": \"claude\", \"model\": \"haiku-4.5\" }} }}");
+    println!("(any role name works; a repo's .wta/roles.json may set model/effort only, never the engine.)");
 }

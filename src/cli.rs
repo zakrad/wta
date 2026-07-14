@@ -36,6 +36,10 @@ pub enum Command {
         /// Reasoning effort (claude --effort): low | medium | high | xhigh | max
         #[arg(long)]
         effort: Option<String>,
+        /// Role to spawn as — picks that role's engine/model/effort from ~/.wta/roles.json
+        /// (built-ins: architect, backend, frontend, reviewer, tester; default: worker)
+        #[arg(long)]
+        role: Option<String>,
         /// Everything after `--` is passed to the agent command (default: claude)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,
@@ -83,6 +87,9 @@ pub enum Command {
         /// reasoning effort (claude --effort): low | medium | high | xhigh | max
         #[arg(long)]
         effort: Option<String>,
+        /// role for every agent — picks that role's engine/model/effort (default: worker)
+        #[arg(long)]
+        role: Option<String>,
         /// everything after `--` is passed to each agent (e.g. the prompt)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,
