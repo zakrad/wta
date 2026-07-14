@@ -18,8 +18,14 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Tokens "used" — input + output + cache writes, but NOT cache reads. Claude Code
+    /// re-reads the whole cached context every turn, so summing `cache_read` across
+    /// messages counts the same context over and over and balloons into the millions
+    /// even on a short session. Excluding it keeps this close to the session's actual
+    /// footprint (cache reads are still counted in the $ estimate, where they're billed
+    /// at 0.1×).
     pub fn tokens(&self) -> u64 {
-        self.input + self.output + self.cache_write + self.cache_read
+        self.input + self.output + self.cache_write
     }
     pub fn add(&mut self, o: &Usage) {
         self.input += o.input;
@@ -203,10 +209,13 @@ pub fn timeline(wt: &Path) -> Vec<Sample> {
                 Some(v) => v,
                 None => continue,
             };
-            let tok = u.input_tokens + u.output_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;
-            if tok == 0 {
+            // skip fully-empty (synthetic) messages, but count tokens the same way as
+            // Usage::tokens() — input + output + cache writes, NOT the per-turn cache
+            // re-reads that would otherwise dominate the chart.
+            if u.input_tokens + u.output_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens == 0 {
                 continue;
             }
+            let tok = u.input_tokens + u.output_tokens + u.cache_creation_input_tokens;
             let d = usd(&u, &model);
             raw.push((ts, model, tok, d));
         }

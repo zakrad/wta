@@ -1031,19 +1031,23 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool, usd: bool, cumulat
     }
 
     let mut total = crate::cost::Usage::default();
-    println!("{:<26} {:>9}  {:>9}  in/out/cache", "AGENT", "~USD", "TOKENS");
+    println!("{:<26} {:>9}  {:>9}  in/out/cache-write · cache-reads", "AGENT", "~USD", "TOKENS");
     for a in &agents {
         let u = crate::cost::for_worktree(&a.path);
         total.add(&u);
         let detail = if u.is_zero() {
             "—".to_string()
         } else {
-            format!(
+            let mut d = format!(
                 "{}/{}/{}",
                 crate::cost::human_tokens(u.input),
                 crate::cost::human_tokens(u.output),
-                crate::cost::human_tokens(u.cache_write + u.cache_read)
-            )
+                crate::cost::human_tokens(u.cache_write)
+            );
+            if u.cache_read > 0 {
+                d.push_str(&format!(" · {} rd", crate::cost::human_tokens(u.cache_read)));
+            }
+            d
         };
         println!(
             "{:<26} {:>9}  {:>9}  {detail}",
@@ -1060,7 +1064,7 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool, usd: bool, cumulat
             crate::cost::human_tokens(total.tokens())
         );
     }
-    println!("($ = list-price estimate; tokens are exact. cache-read billed at 10% of input.)");
+    println!("(TOKENS = in+out+cache-write; cache-reads are the context re-read each turn — shown separately, not summed into TOKENS. $ = list-price estimate incl. reads at 10%.)");
     Ok(())
 }
 
