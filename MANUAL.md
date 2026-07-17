@@ -143,6 +143,26 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
   uncommitted work (excluding injected context files), pushes `agent/<task>`, and
   with `--pr` opens a PR via `gh`.
 
+### Shared-branch teams — several agents converging on one branch
+
+Git allows only **one worktree per branch**, so two agents can't literally edit the
+same branch. The way to have a "team" collaborate on one feature branch is: each agent
+works on its **own** sub-branch (isolated worktree), and they all **land on the shared
+branch**:
+
+```sh
+wta new api  --into feature/checkout    # branch off feature/checkout, target it
+wta new ui   --into feature/checkout    # a second isolated agent, same target
+# … they work in parallel, isolated …
+wta land api                            # merge agent/api  → feature/checkout (local, no PR)
+wta land ui  --rm                       # merge agent/ui   → feature/checkout, then remove it
+```
+
+`--into <target>` branches off `<target>` and makes it the diff/PR/land target (it's
+`--base` named for this workflow). `wta land <task>` merges the agent's committed work
+into that target **locally** — safely, in a throwaway checkout, so your working copy is
+never touched; it aborts on a conflict (resolve it, or fall back to `wta push --pr`).
+
 ---
 
 ## Verification gate
