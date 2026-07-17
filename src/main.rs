@@ -30,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         Command::New {
             task,
             base,
+            into,
             yolo,
             safe,
             model,
@@ -43,7 +44,10 @@ fn main() -> anyhow::Result<()> {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
             worktree::apply_role(role.as_deref().unwrap_or("worker"), model.as_deref(), effort.as_deref());
-            match base {
+            // `--into <target>` is the shared-branch workflow: branch off <target>, which
+            // is persisted as the base so diffs/PR/land all target it (same start point as
+            // --base, named for the "several agents converge here" intent).
+            match into.or(base) {
                 Some(b) => worktree::new_with_base(&task, &agent_args, &b)?,
                 None => worktree::new(&task, &agent_args)?,
             }
@@ -61,6 +65,7 @@ fn main() -> anyhow::Result<()> {
             name,
             count,
             base,
+            into,
             yolo,
             safe,
             model,
@@ -74,7 +79,8 @@ fn main() -> anyhow::Result<()> {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
             worktree::apply_role(role.as_deref().unwrap_or("worker"), model.as_deref(), effort.as_deref());
-            worktree::fanout(&name, count, base.as_deref(), &agent_args)?
+            let tgt = into.or(base);
+            worktree::fanout(&name, count, tgt.as_deref(), &agent_args)?
         }
         Command::Attach { task } => worktree::attach(&task)?,
         Command::Open { task } => worktree::open(&task)?,
@@ -126,6 +132,14 @@ fn main() -> anyhow::Result<()> {
         Command::Push { task, pr } => {
             let summary = worktree::push(&task, pr)?;
             println!("{summary}");
+        }
+        Command::Land { task, rm } => {
+            let summary = worktree::land(&task)?;
+            println!("{summary}");
+            if rm {
+                worktree::rm(&task, false)?;
+                println!("removed '{task}' (landed)");
+            }
         }
         Command::Rm { task, force } => {
             worktree::rm(&task, force)?;

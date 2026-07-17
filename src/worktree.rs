@@ -1490,6 +1490,84 @@ pub fn rm(task: &str, force: bool) -> Result<()> {
 
 /// Commit any uncommitted work in the agent's worktree, push its branch, and
 /// (if `make_pr`) open a PR via `gh`. Returns a short human summary.
+/// Commit the agent's uncommitted work (excluding wta-injected context files), the same
+/// way `push` does. Returns whether a new commit was made. Shared by push + land.
+fn commit_agent_work(wt: &Path, repo: &str, task: &str) -> Result<bool> {
+    run_git(&["add", "-A"], Some(wt))?;
+    let injected = status::read_state(repo, task)
+        .map(|s| s.context)
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(context_files);
+    for f in injected {
+        let _ = run_git(&["reset", "-q", "--", &f], Some(wt));
+    }
+    let staged = !run_git(&["diff", "--cached", "--name-only"], Some(wt))?.trim().is_empty();
+    if staged {
+        run_git(&["commit", "-m", &format!("wta: {task}")], Some(wt))?;
+    }
+    Ok(staged)
+}
+
+/// Merge the agent's committed work into its target branch (the persisted `--into` /
+/// `--base` branch) locally — the "several isolated agents converge on one branch"
+/// action, without a PR. Conservative: it merges in a THROWAWAY worktree of the target
+/// so your main checkout is never touched, and aborts cleanly on a conflict or if the
+/// target is already checked out somewhere.
+pub fn land(task: &str) -> Result<String> {
+    let root = repo_root()?;
+    let repo = repo_id_of(&root);
+    let wt = worktrees_dir(&root).join(task);
+    if !wt.exists() {
+        bail!("no worktree for '{task}'");
+    }
+    let branch = branch_name(task);
+    let target = status::base_of(&repo, task).unwrap_or_else(|| base_branch(&root));
+    if target.is_empty() || target == "HEAD" {
+        bail!("'{task}' has no target branch to land into — create the agent with `--into <branch>`");
+    }
+    if target == branch {
+        bail!("'{task}' targets its own branch — nothing to land");
+    }
+
+    commit_agent_work(&wt, &repo, task)?;
+
+    // Nothing to land if the branch adds no commits over the target.
+    if run_git(&["rev-list", "--count", &format!("{target}..{branch}")], Some(&root))
+        .map(|s| s.trim() == "0")
+        .unwrap_or(false)
+    {
+        return Ok(format!("'{task}' has no commits beyond {target} — nothing to land"));
+    }
+
+    // Merge in a throwaway worktree of the target (never disturbs the main checkout).
+    // `git worktree add` refuses if the target is already checked out — surface that.
+    run_git(&["worktree", "prune"], Some(&root)).ok();
+    let land_wt = worktrees_dir(&root).join(format!(".land-{task}"));
+    let land_str = land_wt.to_string_lossy().into_owned();
+    let _ = std::fs::remove_dir_all(&land_wt);
+    if run_git(&["worktree", "add", &land_str, &target], Some(&root)).is_err() {
+        bail!("could not check out '{target}' to merge into — it may be checked out elsewhere; merge it there, or use `wta push {task} --pr`");
+    }
+    let merged = run_git(
+        &["merge", "--no-ff", "-m", &format!("wta: land {branch} into {target}"), &branch],
+        Some(&land_wt),
+    );
+    let result = match merged {
+        Ok(_) => Ok(format!("landed '{task}' → {target} (merged {branch})")),
+        Err(_) => {
+            let _ = run_git(&["merge", "--abort"], Some(&land_wt));
+            Err(anyhow::anyhow!(
+                "merge conflict landing '{task}' into {target} — resolve it manually, or `wta push {task} --pr`"
+            ))
+        }
+    };
+    let _ = run_git(&["worktree", "remove", "--force", &land_str], Some(&root));
+    let _ = std::fs::remove_dir_all(&land_wt);
+    run_git(&["worktree", "prune"], Some(&root)).ok();
+    append_run_log(&root, task, "land");
+    result
+}
+
 pub fn push(task: &str, make_pr: bool) -> Result<String> {
     let root = repo_root()?;
     let wt = worktrees_dir(&root).join(task);
@@ -1497,27 +1575,11 @@ pub fn push(task: &str, make_pr: bool) -> Result<String> {
         bail!("no worktree for '{task}'");
     }
     let branch = branch_name(task);
-
-    // Stage everything, then UNSTAGE the wta-injected context files so secrets /
-    // local context (CLAUDE.local.md, .env, …) never land in the PR. Commit only
-    // if real changes remain staged.
-    run_git(&["add", "-A"], Some(&wt))?;
-    // unstage the EXACT files injected at `new` time (recorded per agent), so a
-    // custom WTA_CONTEXT_FILES can't leak just because push runs in a different env
     let repo = repo_id_of(&root);
-    let injected = status::read_state(&repo, task)
-        .map(|s| s.context)
-        .filter(|c| !c.is_empty())
-        .unwrap_or_else(context_files);
-    for f in injected {
-        let _ = run_git(&["reset", "-q", "--", &f], Some(&wt));
-    }
-    let staged = !run_git(&["diff", "--cached", "--name-only"], Some(&wt))?
-        .trim()
-        .is_empty();
-    if staged {
-        run_git(&["commit", "-m", &format!("wta: {task}")], Some(&wt))?;
-    }
+
+    // Commit the agent's work, keeping wta-injected context files (CLAUDE.local.md,
+    // .env, …) out of the commit so secrets never land in the PR.
+    commit_agent_work(&wt, &repo, task)?;
 
     run_git(&["push", "-u", "origin", &branch], Some(&wt))
         .context("git push failed (is `origin` set?)")?;

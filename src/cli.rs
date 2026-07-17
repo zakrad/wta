@@ -24,6 +24,10 @@ pub enum Command {
         /// Base the agent's branch on an existing branch (default: HEAD)
         #[arg(long)]
         base: Option<String>,
+        /// Shared-branch workflow: branch off <target> AND make it the land/PR target,
+        /// so several agents can each work isolated then converge on it (`wta land`).
+        #[arg(long, conflicts_with = "base")]
+        into: Option<String>,
         /// Run the agent with no permission prompts (default; claude --dangerously-skip-permissions)
         #[arg(long)]
         yolo: bool,
@@ -75,6 +79,9 @@ pub enum Command {
         /// base the agents' branches on an existing branch (default: HEAD)
         #[arg(long)]
         base: Option<String>,
+        /// shared-branch workflow: branch off <target> and make it the land/PR target
+        #[arg(long, conflicts_with = "base")]
+        into: Option<String>,
         /// run agents with no permission prompts (default; claude --dangerously-skip-permissions)
         #[arg(long)]
         yolo: bool,
@@ -202,6 +209,14 @@ pub enum Command {
         task: String,
         #[arg(long)]
         pr: bool,
+    },
+    /// Merge the agent's committed work into its target branch locally (the shared branch
+    /// from `--into` / `--base`), so several agents can converge on it without a PR
+    Land {
+        task: String,
+        /// discard the agent afterwards (like `wta rm`) once it's landed
+        #[arg(long)]
+        rm: bool,
     },
     /// Destroy an agent: kill the session AND remove its worktree and branch
     Rm {
