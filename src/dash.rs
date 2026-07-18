@@ -1845,7 +1845,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             let area = centered(58, 5, f.area());
             f.render_widget(Clear, area);
             let body = vec![
-                Line::raw(format!("Commit, push & open a PR for agent/{task}?")),
+                Line::raw(format!("Commit, push & open a PR for '{task}'?")),
                 Line::raw("(commits any uncommitted work first)"),
                 Line::from(vec![
                     Span::raw("Press "),

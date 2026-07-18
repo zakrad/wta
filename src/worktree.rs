@@ -169,8 +169,21 @@ pub fn base_branch(root: &Path) -> String {
 fn worktrees_dir(root: &Path) -> PathBuf {
     root.join(worktree_subdir())
 }
+/// Prefix for the branch a NEW agent creates. Empty by default, so the branch is just
+/// the task name (like Superset). Set `WTA_BRANCH_PREFIX=agent/` (or your own) to
+/// prefix them.
+fn branch_prefix() -> String {
+    std::env::var("WTA_BRANCH_PREFIX").unwrap_or_default()
+}
+/// The branch name a NEW agent's worktree is created on.
 fn branch_name(task: &str) -> String {
-    format!("agent/{task}")
+    format!("{}{task}", branch_prefix())
+}
+/// The branch an EXISTING agent's worktree is *actually* on — robust to any
+/// `WTA_BRANCH_PREFIX`, to legacy `agent/<task>` agents, and to the agent switching
+/// branches itself. Falls back to the name we'd have created if the worktree is gone.
+fn agent_branch(root: &Path, task: &str) -> String {
+    current_branch(&worktrees_dir(root).join(task)).unwrap_or_else(|| branch_name(task))
 }
 
 /// Reject task names that aren't safe as a tmux session name, a filesystem path,
@@ -548,7 +561,7 @@ pub fn fanout(name: &str, count: u32, base: Option<&str>, agent_args: &[String])
 /// agent CLI (`--by` / `WTA_REVIEW_AGENT_CMD`).
 pub fn review(builder: &str, by: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Result<()> {
     let root = repo_root()?;
-    let builder_branch = branch_name(builder);
+    let builder_branch = agent_branch(&root, builder);
     let exists = run_git(
         &["show-ref", "--verify", "--quiet", &format!("refs/heads/{builder_branch}")],
         Some(&root),
@@ -691,7 +704,7 @@ pub fn send(task: &str, message: &str) -> Result<()> {
 pub fn handoff(from: &str, new: &str, agent_args: &[String]) -> Result<()> {
     validate_task(new)?;
     let root = repo_root()?;
-    let from_branch = branch_name(from);
+    let from_branch = agent_branch(&root, from);
     if run_git(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{from_branch}")], Some(&root)).is_err() {
         bail!("no agent '{from}' here to hand off from (branch '{from_branch}' not found)");
     }
@@ -1283,14 +1296,36 @@ fn tail_lines(s: &str, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
-/// Local branches a new agent could be based on (excludes wta's own `agent/*`).
+/// Branches currently checked out in wta's own agent worktrees (under `.agents/`), so
+/// the branch picker can exclude them — `agent/*` is no longer a reliable marker now
+/// that branches default to the bare task name.
+fn managed_branches(root: &Path) -> std::collections::HashSet<String> {
+    let subdir = worktrees_dir(root);
+    let mut set = std::collections::HashSet::new();
+    if let Ok(out) = run_git(&["worktree", "list", "--porcelain"], Some(root)) {
+        let mut under = false;
+        for line in out.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                under = Path::new(p).starts_with(&subdir);
+            } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+                if under {
+                    set.insert(b.to_string());
+                }
+            }
+        }
+    }
+    set
+}
+
+/// Local branches a new agent could be based on (excludes wta's own agent branches).
 pub fn list_branches() -> Result<Vec<String>> {
     let root = repo_root()?;
+    let managed = managed_branches(&root);
     let out = run_git(&["branch", "--format=%(refname:short)"], Some(&root))?;
     Ok(out
         .lines()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && !s.starts_with("agent/"))
+        .filter(|s| !s.is_empty() && !managed.contains(s))
         .collect())
 }
 
@@ -1444,7 +1479,7 @@ pub fn ls() -> Result<()> {
 pub fn rm(task: &str, force: bool) -> Result<()> {
     let root = repo_root()?;
     let repo = repo_id_of(&root);
-    let branch = branch_name(task);
+    let branch = agent_branch(&root, task);
     let wt = worktrees_dir(&root).join(task);
     let wt_str = wt.to_string_lossy().into_owned();
 
@@ -1520,7 +1555,7 @@ pub fn land(task: &str) -> Result<String> {
     if !wt.exists() {
         bail!("no worktree for '{task}'");
     }
-    let branch = branch_name(task);
+    let branch = agent_branch(&root, task);
     let target = status::base_of(&repo, task).unwrap_or_else(|| base_branch(&root));
     if target.is_empty() || target == "HEAD" {
         bail!("'{task}' has no target branch to land into — create the agent with `--into <branch>`");
@@ -1574,7 +1609,7 @@ pub fn push(task: &str, make_pr: bool) -> Result<String> {
     if !wt.exists() {
         bail!("no worktree for '{task}'");
     }
-    let branch = branch_name(task);
+    let branch = agent_branch(&root, task);
     let repo = repo_id_of(&root);
 
     // Commit the agent's work, keeping wta-injected context files (CLAUDE.local.md,
