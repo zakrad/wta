@@ -561,6 +561,7 @@ The defaults also lean Claude — `WTA_AGENT_CMD=claude`,
 | `WTA_AGENT_RESUME_ARGS` | `--continue` | args appended when resuming (empty = none) |
 | `WTA_REVIEW_AGENT_CMD` | `$WTA_AGENT_CMD` | agent CLI for `wta review` |
 | `WTA_WORKTREE_DIR` | `.agents` | where worktrees live under the repo root |
+| `WTA_BRANCH_PREFIX` | `` (none) | prefix for a new agent's branch — empty = the bare task name; set `agent/` to restore the old naming |
 | `WTA_CONTEXT_FILES` | `CLAUDE.local.md .env .env.local .mcp.json` | untracked files copied into each worktree (and kept out of pushes) |
 | `WTA_AUTO_TRUST` | `1` | pre-accept + dismiss Claude's folder-trust prompt (`0` off) — **Claude only** |
 | `WTA_COPY_PERMISSIONS` | `0` | copy `.claude/settings.local.json` (tool grants) into each worktree — **Claude only, opt-in** |
