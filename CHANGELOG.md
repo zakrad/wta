@@ -4,6 +4,15 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.35] — 2026-07-18
+
+### Changed
+- **Roles carry no built-in behavior.** The suggested role names (`architect`,
+  `backend`, `frontend`, `reviewer`, `tester`) are pure convention now — a role does
+  exactly what you set in `~/.wta/roles.json` (engine/model/effort) and nothing more,
+  and any name works the same. Removed the baked-in default efforts (previously
+  architect → high, reviewer/tester → low).
+
 ## [0.1.34] — 2026-07-18
 
 ### Added
