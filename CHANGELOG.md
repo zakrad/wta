@@ -4,6 +4,37 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.34] — 2026-07-18
+
+### Added
+- **Per-role engines** — `wta new/fanout --role <name>` spawns as a role (`architect`,
+  `backend`, `frontend`, `reviewer`, `tester`, or any name you define), each with its
+  own engine (`cmd`), model, and effort from `~/.wta/roles.json`. `wta roles` lists
+  them. Run a heterogeneous team — e.g. a planner on one model, executors on another CLI.
+- **Shared-branch teams** — `wta new/fanout --into <target>` branches off a target and
+  makes it the diff/PR/land target; **`wta land <task> [--rm]`** merges an agent's work
+  into that target **locally** (no PR) — safely, in a throwaway checkout that never
+  touches your working copy. Several isolated agents can converge on one branch.
+- `WTA_BRANCH_PREFIX` to control the new-agent branch prefix.
+
+### Changed
+- **Agent branches default to the bare task name** (`wta new foo` → branch `foo`),
+  not `agent/<task>`. Set `WTA_BRANCH_PREFIX=agent/` to restore the old naming.
+- **wta follows the worktree's real branch.** `push`/`land`/`rm`/`review`/`handoff` read
+  the branch the worktree is actually on, so an agent can switch its own branch and wta
+  keeps up — and legacy `agent/<task>` agents keep working.
+- A `Ctrl-q ↩ return to wta` status bar shows while attached to an agent (dedicated
+  socket; not shown in the dashboard Preview).
+
+### Fixed
+- **Attach respects a split layout** — attaching to an agent from inside your own tmux
+  now stays in the current pane instead of a full-window popup. `WTA_ATTACH_POPUP=1`
+  restores the old popup.
+- **Token meter no longer inflated by cache reads.** Claude Code re-reads the whole
+  cached context each turn, so summing `cache_read` made a fresh session read millions
+  of tokens. The count is now input + output + cache-write (cache-reads shown
+  separately in `wta cost`, still counted in the `$` estimate).
+
 ## [0.1.33] — 2026-07-13
 
 ### Changed
