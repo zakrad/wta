@@ -62,22 +62,12 @@ pub(crate) fn is_claude(prog: &str) -> bool {
     base == "claude" || base.starts_with("claude-") || base.starts_with("claude.")
 }
 
-/// Built-in role names shown by `wta roles` and suggested for `--role`. The
-/// convergent plan→build→review→test core from multi-agent SWE frameworks (MetaGPT /
-/// ChatDev / AutoGen / CrewAI / Claude). ANY other name also works if defined in
-/// roles.json — these are just the ones with sensible defaults + documentation.
+/// Suggested role names shown by `wta roles` — the convergent plan→build→review→test
+/// vocabulary from multi-agent SWE frameworks (MetaGPT / ChatDev / AutoGen / CrewAI /
+/// Claude). These are pure convention: they carry NO baked-in behavior. A role does
+/// exactly what you give it in `~/.wta/roles.json` (engine/model/effort) and nothing
+/// more; any other name works just the same.
 pub const CORE_ROLES: &[&str] = &["worker", "architect", "backend", "frontend", "reviewer", "tester"];
-
-/// Baked-in default reasoning effort per core role (claude only; overridden by any
-/// flag/env/config). Planning/architecture benefits from more thinking; independent
-/// verification needs less, and it's the cheap-model tier.
-fn default_effort(role: &str) -> Option<&'static str> {
-    match role {
-        "architect" => Some("high"),
-        "reviewer" | "tester" => Some("low"),
-        _ => None,
-    }
-}
 
 fn configs(role: &str, root: Option<&Path>) -> (RoleCfg, RoleCfg) {
     let global = dirs::home_dir().map(|h| load(&h.join(".wta/roles.json"))).unwrap_or_default();
@@ -138,8 +128,7 @@ pub fn resolve(role: &str, cli_cmd: Option<&str>, cli_model: Option<&str>, cli_e
     let effort = safe_token(cli_effort.map(str::to_string))
         .or_else(|| safe_token(env("EFFORT")))
         .or_else(|| safe_token(r.effort.clone()))
-        .or_else(|| safe_token(g.effort.clone()))
-        .or_else(|| default_effort(role).map(str::to_string));
+        .or_else(|| safe_token(g.effort.clone()));
 
     let prog = base_cmd.split_whitespace().next().unwrap_or("");
     let claude = is_claude(prog);
@@ -173,7 +162,8 @@ fn reviewer_base() -> String {
 
 /// `wta roles` — print the resolved command per role (a dry-run + cost view).
 pub fn print_roles(root: Option<&Path>) {
-    println!("resolved agent command per role — spawn one with `wta new <task> --role <role>`:\n");
+    println!("roles are just names you configure — spawn one with `wta new <task> --role <role>`.");
+    println!("these suggested names carry no built-in behavior; any name works. resolved now:\n");
     for role in CORE_ROLES {
         let base = if *role == "reviewer" { reviewer_base() } else { worker_base() };
         let (cmd, note) = resolve(role, None, None, None, &base, root);
