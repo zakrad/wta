@@ -547,6 +547,32 @@ WTA_AGENT_CMD=bash  wta new scratch                    # kick the tyres, no toke
 `--continue`-style resume is Claude's default; set `WTA_AGENT_RESUME_ARGS` for
 another CLI (or empty to just relaunch it).
 
+### Status detection for any agent (screen manifests)
+
+Only Claude reports its state through hooks. For every other engine the dashboard
+reads the **pane content** — it pattern-matches the last lines against a per-engine
+rule set to decide `▲ needs-input` / `● working` / `● ready`, so a codex/gemini/…
+agent still gets a live glyph without hooks. Built-in rules ship for common engines
+(a generic `(y/n)`/prompt/spinner set, plus extras for claude/codex/gemini/aider);
+Claude's `▲ needs-input` hook stays authoritative where it exists.
+
+Check what wta reads for a running agent, and tune it:
+
+```sh
+wta detect build        # prints the resolved engine + detected state right now
+```
+
+Extend any engine with `~/.wta/detect/<engine>.json` (patterns are **appended** to
+the built-ins, matched as case-insensitive substrings of the pane):
+
+```json
+{ "needs_input": ["apply this patch?", "confirm (y/n)"], "working": ["crunching"] }
+```
+
+Detection never sends keys — a wrong guess is only a wrong glyph that self-corrects
+next tick — so it's safe to be generous with `working` patterns and tight with
+`needs_input`.
+
 ### Permissions & trust (Claude)
 
 Every wta worktree is a **new folder path** to Claude Code, so by default a fresh
@@ -575,14 +601,14 @@ agent would hit two prompts. wta handles them like this:
 ### What's Claude Code-specific
 
 The **core is agent-agnostic** — worktrees, tmux, attach/quick-send, the
-mergeability matrix, verify gate, cross-agent review, fanout, open-in-editor, and
-**finish notifications** all work with any CLI. Two conveniences are **Claude Code
-only** and simply don't apply to other agents:
+mergeability matrix, verify gate, cross-agent review, fanout, open-in-editor,
+**status detection** (via screen manifests, above), and **finish notifications**
+all work with any CLI. A couple of conveniences lean **Claude Code**:
 
-- **`▲ needs input` status** (and its Telegram "needs input" pings) comes from the
-  Claude Code hooks that `wta install-hooks` writes into `.claude/settings.json`.
-  Other agents still get running / ready / finished / exited from their pane —
-  just never `▲`.
+- **Hook-driven status** — with `wta install-hooks`, Claude reports
+  running/needs-input/finished *exactly* (and drives the Telegram "needs input"
+  pings). Other agents get the same glyphs inferred from their pane (screen
+  manifests); the hook path is just faster and never guesses.
 - **Auto-trust-dismiss** (`WTA_AUTO_TRUST`) only matches Claude's folder-trust
   prompt; it's a harmless no-op for other agents.
 

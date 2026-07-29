@@ -200,6 +200,8 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         entry: Vec<String>,
     },
+    /// Show how the screen-manifest classifier reads an agent's pane (engine + detected state)
+    Detect { task: String },
     /// Block until agent(s) reach a state — for scripting A-then-B (idle/needs-input/exited/done)
     Wait {
         /// one or more agents in the current repo

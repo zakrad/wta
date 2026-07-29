@@ -4,6 +4,7 @@ mod cli;
 mod cost;
 mod cron;
 mod dash;
+mod detect;
 mod notify;
 mod roles;
 mod status;
@@ -121,6 +122,7 @@ fn main() -> anyhow::Result<()> {
             let joined = entry.join(" ");
             worktree::board(if joined.trim().is_empty() { None } else { Some(joined.as_str()) })?
         }
+        Command::Detect { task } => worktree::detect(&task)?,
         Command::Wait { tasks, until, any, timeout, poll, quiet } => {
             worktree::wait(&tasks, &until, any, &timeout, &poll, quiet)?
         }

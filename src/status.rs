@@ -24,6 +24,8 @@ pub struct AgentState {
     pub context: Vec<String>, // files injected at `new`, unstaged again by `push`
     #[serde(default)]
     pub base: Option<String>, // branch this agent is based on / targets — for diffs + PR base
+    #[serde(default)]
+    pub engine: Option<String>, // agent CLI basename (claude/codex/gemini…) for screen-manifest status detection
 }
 
 pub fn wta_dir() -> Result<PathBuf> {
@@ -98,6 +100,7 @@ pub fn record(repo: &str, task: &str, status: &str, cwd: &str) -> Result<()> {
         index: 0,
         context: Vec::new(),
         base: None,
+        engine: None,
     });
     st.task = task.to_string();
     st.repo = repo.to_string();
@@ -119,6 +122,7 @@ pub fn record_meta(repo: &str, task: &str, index: u32, context: &[String]) -> Re
         index: 0,
         context: Vec::new(),
         base: None,
+        engine: None,
     });
     st.task = task.to_string();
     st.repo = repo.to_string();
@@ -139,6 +143,7 @@ pub fn record_base(repo: &str, task: &str, base: &str) -> Result<()> {
         index: 0,
         context: Vec::new(),
         base: None,
+        engine: None,
     });
     st.task = task.to_string();
     st.repo = repo.to_string();
@@ -149,6 +154,27 @@ pub fn record_base(repo: &str, task: &str, base: &str) -> Result<()> {
 /// The persisted base branch for an agent, if one was recorded and non-empty.
 pub fn base_of(repo: &str, task: &str) -> Option<String> {
     read_state(repo, task).and_then(|s| s.base).filter(|b| !b.is_empty())
+}
+
+/// Record the agent CLI basename (claude/codex/gemini…), merge-write so it preserves
+/// status/slot/context/base. Read back by the dashboard for screen-manifest status
+/// detection of non-Claude agents (which don't report state via hooks).
+pub fn record_engine(repo: &str, task: &str, engine: &str) -> Result<()> {
+    let mut st = read_state(repo, task).unwrap_or(AgentState {
+        task: task.to_string(),
+        repo: repo.to_string(),
+        status: "running".to_string(),
+        cwd: String::new(),
+        updated_unix: now_unix(),
+        index: 0,
+        context: Vec::new(),
+        base: None,
+        engine: None,
+    });
+    st.task = task.to_string();
+    st.repo = repo.to_string();
+    st.engine = Some(engine.to_string());
+    save(&st)
 }
 
 fn emit_uservar(name: &str, value: &str) -> std::io::Result<()> {

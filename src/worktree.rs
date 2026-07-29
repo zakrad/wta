@@ -518,6 +518,11 @@ fn new_impl(task: &str, agent_args: &[String], base: Option<&str>, seed: Option<
         .map(|b| b.to_string())
         .unwrap_or_else(|| current_branch(&root).unwrap_or_else(|| base_branch(&root)));
     let _ = status::record_base(&repo, task, &resolved_base);
+    // persist the agent CLI basename so the dashboard can screen-manifest-detect the
+    // status of non-Claude agents (which don't report state via hooks)
+    if let Some(eng) = agent_cmd().split_whitespace().next() {
+        let _ = status::record_engine(&repo, task, eng);
+    }
     preseed_claude_trust(&wt); // avoid the folder-trust dialog on this fresh worktree
     let wt_str = wt.to_string_lossy().into_owned();
     let session = tmux::session_name(&repo, task);
@@ -1829,6 +1834,28 @@ pub fn matrix() -> Result<()> {
             println!("  {} ✗ {}  — {}", m.labels[p.i], m.labels[p.j], files);
         }
     }
+    Ok(())
+}
+
+/// `wta detect <task>` — show how the screen-manifest classifier reads an agent's
+/// pane right now (its resolved engine + the detected state), for debugging status
+/// detection and authoring `~/.wta/detect/<engine>.json` overrides.
+pub fn detect(task: &str) -> Result<()> {
+    let repo = repo_id()?;
+    let session = tmux::session_name(&repo, task);
+    if !tmux::has_session(&session) {
+        bail!("'{task}' has no live session (nothing to read)");
+    }
+    let engine = status::read_state(&repo, task).and_then(|s| s.engine);
+    let text = tmux::capture(&session).unwrap_or_default();
+    let detected = match crate::detect::classify(engine.as_deref(), &text) {
+        Some(crate::detect::PaneState::NeedsInput) => "needs-input",
+        Some(crate::detect::PaneState::Working) => "working",
+        None => "no match (falls back to pane-hash: changed=working, else ready)",
+    };
+    println!("task:     {task}");
+    println!("engine:   {}", engine.as_deref().unwrap_or("(unknown — generic rules only)"));
+    println!("detected: {detected}");
     Ok(())
 }
 

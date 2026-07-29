@@ -1271,10 +1271,22 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             // refresh and Ready on the next — a phantom "finished" edge that chimed
             // for the whole fleet every time you opened the dashboard.
             let changed = app.hashes.insert(session.clone(), h).map(|old| old != h).unwrap_or(false);
-            match states.get(&task).map(|s| s.status.as_str()) {
+            let st = states.get(&task);
+            match st.map(|s| s.status.as_str()) {
+                // Claude's Notification hook is the authoritative "needs you" signal.
                 Some("needs_input") => Status::NeedsInput,
-                _ if changed => Status::Running,
-                _ => Status::Ready,
+                // No authoritative hook signal → classify the pane by screen manifest so
+                // NON-Claude agents (codex/gemini/…) still report needs-input / working
+                // without hooks. `None` = no opinion → fall back to the pane-hash heuristic.
+                _ => {
+                    let engine = st.and_then(|s| s.engine.as_deref());
+                    match crate::detect::classify(engine, &text) {
+                        Some(crate::detect::PaneState::NeedsInput) => Status::NeedsInput,
+                        Some(crate::detect::PaneState::Working) => Status::Running,
+                        None if changed => Status::Running,
+                        None => Status::Ready,
+                    }
+                }
             }
         } else if path.is_some() {
             Status::Exited
