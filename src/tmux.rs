@@ -30,6 +30,25 @@ fn tmux() -> Command {
     c
 }
 
+/// The tmux server label for diagnostics: the dedicated socket name, or "default"
+/// when running on the user's own server.
+pub(crate) fn server_label() -> String {
+    if dedicated() {
+        format!("-L {}", socket_name())
+    } else {
+        "default".into()
+    }
+}
+
+/// `tmux -V` output (e.g. "tmux 3.4"), or None if the binary isn't found.
+pub fn version() -> Option<String> {
+    let out = Command::new("tmux").arg("-V").output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Map a name to the safe character class shared by tmux session names, state
 /// filenames, and worktree dirs — every non-`[A-Za-z0-9_-]` char becomes `_` — so
 /// those three representations of a task can never diverge or escape their directory.

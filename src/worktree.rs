@@ -1837,6 +1837,140 @@ pub fn matrix() -> Result<()> {
     Ok(())
 }
 
+/// First line of `<bin> --version` (tries stderr too — some tools print there),
+/// or None if the binary isn't on PATH.
+fn probe_version(bin: &str) -> Option<String> {
+    let out = Command::new(bin).arg("--version").output().ok()?;
+    let text = if out.status.success() { &out.stdout } else { &out.stderr };
+    String::from_utf8_lossy(text)
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+}
+
+/// Does a Claude settings.json wire wta's status hooks? (looks for a `wta status
+/// <state>` command in any hook event).
+fn hooks_installed(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let hooks = match v.get("hooks").and_then(|h| h.as_object()) {
+        Some(h) => h,
+        None => return false,
+    };
+    hooks.values().any(|arr| {
+        arr.as_array().is_some_and(|groups| {
+            groups.iter().any(|g| {
+                g.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                    hs.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|c| c.contains(" status ") && c.contains("wta"))
+                    })
+                })
+            })
+        })
+    })
+}
+
+/// `wta doctor` — one-shot health check: confirm the fleet will run the agent /
+/// version / tmux / git you think it will. Read-only; no changelog feed, no self-
+/// update (mutating global binaries mid-fleet is a reproducibility hazard).
+pub fn doctor() -> Result<()> {
+    let ok = |b: bool| if b { "\u{2713}" } else { "\u{2717}" }; // ✓ / ✗
+    println!("wta {}", env!("CARGO_PKG_VERSION"));
+
+    println!("\ntools");
+    match tmux::version() {
+        Some(v) => {
+            println!("  {} tmux — {v}  (server: {})", ok(true), tmux::server_label())
+        }
+        None => println!("  {} tmux — NOT FOUND (required)", ok(false)),
+    }
+    match probe_version("git") {
+        Some(v) => println!("  {} git — {v}", ok(true)),
+        None => println!("  {} git — NOT FOUND (required)", ok(false)),
+    }
+    match probe_version("gh") {
+        Some(v) => println!("  {} gh — {v}  (for `push --pr`)", ok(true)),
+        None => println!("  \u{2013} gh — not found (optional; only `push --pr` needs it)"),
+    }
+
+    // Agent engines, per role — the whole point: which binary/version actually runs.
+    println!("\nengines");
+    let root = repo_root().ok();
+    let base = agent_cmd();
+    for role in ["worker", "reviewer"] {
+        let rev_base = if role == "reviewer" {
+            std::env::var("WTA_REVIEW_AGENT_CMD")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| base.clone())
+        } else {
+            base.clone()
+        };
+        let (cmd, _note) =
+            crate::roles::resolve(role, None, None, None, &rev_base, root.as_deref());
+        let bin = cmd.split_whitespace().next().unwrap_or("");
+        match probe_version(bin) {
+            Some(v) => println!("  {} {role}: {cmd}  →  {v}", ok(true)),
+            None => println!("  {} {role}: {cmd}  →  '{bin}' NOT FOUND on PATH", ok(false)),
+        }
+    }
+
+    // Claude hooks — optional (screen manifests cover other engines), but they make
+    // Claude's needs-input instant instead of pane-inferred.
+    println!("\nclaude hooks (optional — fast needs-input for claude)");
+    let global_hooks = dirs::home_dir()
+        .map(|h| hooks_installed(&h.join(".claude/settings.json")))
+        .unwrap_or(false);
+    println!("  {} global (~/.claude/settings.json)", ok(global_hooks));
+    if let Some(r) = &root {
+        let repo_hooks = hooks_installed(&r.join(".claude/settings.json"));
+        println!("  {} this repo (.claude/settings.json)", ok(repo_hooks));
+    }
+    if !global_hooks {
+        println!("  \u{2192} run `wta install-hooks --global` to enable (other engines use screen manifests anyway)");
+    }
+
+    // Repo context.
+    println!("\nrepo");
+    match &root {
+        Some(r) => {
+            println!("  {} git repo: {}", ok(true), r.display());
+            println!("  worktrees under: {}/", worktree_subdir());
+            let present: Vec<String> =
+                context_files().into_iter().filter(|f| r.join(f).exists()).collect();
+            println!(
+                "  context files present: {}",
+                if present.is_empty() { "(none)".to_string() } else { present.join(", ") }
+            );
+            let has_verify = r.join(".wta/verify.sh").exists() || r.join(".wta/checks").is_dir();
+            let vmark = if has_verify { "\u{2713}" } else { "\u{2013}" };
+            println!("  {vmark} .wta verify suite (verify.sh / checks/)");
+        }
+        None => println!("  \u{2013} not inside a git repo (run from a repo for repo-specific checks)"),
+    }
+
+    // Config echo — the env that steers everything above.
+    println!("\nconfig");
+    println!(
+        "  WTA_AGENT_CMD      = {}",
+        std::env::var("WTA_AGENT_CMD").unwrap_or_else(|_| "claude (default)".into())
+    );
+    println!("  tmux server        = {}", tmux::server_label());
+    println!("  WTA_WORKTREE_DIR   = {}", worktree_subdir());
+    let skip = std::env::var("WTA_SKIP_PERMISSIONS").map(|v| v != "0").unwrap_or(true);
+    let skip_note = if skip { "--dangerously-skip-permissions" } else { "with prompts" };
+    println!("  skip-permissions   = {skip} (claude runs {skip_note})");
+    println!("  WTA_CONTEXT_FILES  = {}", context_files().join(" "));
+    Ok(())
+}
+
 /// `wta detect <task>` — show how the screen-manifest classifier reads an agent's
 /// pane right now (its resolved engine + the detected state), for debugging status
 /// detection and authoring `~/.wta/detect/<engine>.json` overrides.
@@ -2009,6 +2143,30 @@ pub fn wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hooks_installed_matches_wta_status_command() {
+        let dir = std::env::temp_dir().join(format!("wta-doctor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wired = dir.join("wired.json");
+        std::fs::write(
+            &wired,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/opt/bin/wta status waiting"}]}]}}"#,
+        )
+        .unwrap();
+        assert!(hooks_installed(&wired));
+
+        let other = dir.join("other.json");
+        std::fs::write(
+            &other,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+        )
+        .unwrap();
+        assert!(!hooks_installed(&other));
+
+        assert!(!hooks_installed(&dir.join("missing.json")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn wait_cond_parse_accepts_aliases_and_rejects_junk() {

@@ -24,6 +24,7 @@ how to use each feature on its own.
 - [Multiple repos](#multiple-repos)
 - [Remote control (Telegram)](#remote-control-telegram)
 - [Using a different agent CLI](#using-a-different-agent-cli)
+- [Health check](#health-check) · `doctor`
 - [Configuration reference](#configuration-reference)
 
 ---
@@ -615,6 +616,35 @@ all work with any CLI. A couple of conveniences lean **Claude Code**:
 The defaults also lean Claude — `WTA_AGENT_CMD=claude`,
 `WTA_AGENT_RESUME_ARGS=--continue`, and `CLAUDE.local.md`/`.mcp.json` in
 `WTA_CONTEXT_FILES`. Override them for your CLI and everything else works.
+
+---
+
+## Health check
+
+`wta doctor` is a one-shot check that the fleet will run what you think it will —
+useful the first time you point wta at a non-Claude engine, or when something's off.
+
+```sh
+wta doctor
+```
+
+It prints, with ✓ / ✗ marks:
+
+- **tools** — tmux (+ version + which server socket), git, and gh (optional, only
+  `push --pr` needs it).
+- **engines** — for the `worker` and `reviewer` roles, the *resolved* command and
+  its `--version`, so you can confirm `--role backend` really launches the codex
+  you expect and not a stale default. A missing binary shows ✗ NOT FOUND on PATH.
+- **claude hooks** — whether `wta status` hooks are wired globally / in this repo
+  (optional: they make Claude's `▲ needs-input` instant; other engines use screen
+  manifests regardless).
+- **repo** — the worktree dir, which context files are present to inject, and
+  whether a `.wta` verify suite exists.
+- **config** — the env that steers all of the above (`WTA_AGENT_CMD`, tmux server,
+  worktree dir, skip-permissions default, context files).
+
+It's read-only — no changelog feed, no self-update (mutating agent binaries
+mid-fleet would break reproducibility; that's your package manager's job).
 
 ---
 
