@@ -82,7 +82,7 @@ fn save(rs: &[Routine]) -> Result<()> {
 }
 
 /// Parse `30s` / `15m` / `2h` / `1d` (bare number = seconds) into seconds.
-fn parse_dur(s: &str) -> Result<u64> {
+pub(crate) fn parse_dur(s: &str) -> Result<u64> {
     let s = s.trim();
     let (num, mult) = if let Some(n) = s.strip_suffix('s') {
         (n, 1)

@@ -121,6 +121,9 @@ fn main() -> anyhow::Result<()> {
             let joined = entry.join(" ");
             worktree::board(if joined.trim().is_empty() { None } else { Some(joined.as_str()) })?
         }
+        Command::Wait { tasks, until, any, timeout, poll, quiet } => {
+            worktree::wait(&tasks, &until, any, &timeout, &poll, quiet)?
+        }
         Command::Stop { task } => {
             worktree::stop(&task)?;
             println!("stopped '{task}' — worktree kept; resume with `wta resume {task}`");

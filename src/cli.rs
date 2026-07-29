@@ -200,6 +200,27 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         entry: Vec<String>,
     },
+    /// Block until agent(s) reach a state — for scripting A-then-B (idle/needs-input/exited/done)
+    Wait {
+        /// one or more agents in the current repo
+        #[arg(required = true)]
+        tasks: Vec<String>,
+        /// condition to wait for: idle | needs-input | exited | done
+        #[arg(long, default_value = "done")]
+        until: String,
+        /// return as soon as ANY listed agent meets it (default: wait for ALL); prints the winner
+        #[arg(long)]
+        any: bool,
+        /// give up after this long, e.g. 30m, 2h (0 = no limit)
+        #[arg(long, default_value = "0")]
+        timeout: String,
+        /// how often to poll, e.g. 1s, 5s (bare number = seconds)
+        #[arg(long, default_value = "1s")]
+        poll: String,
+        /// suppress the progress line on stderr
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later
     Stop { task: String },
     /// Resume a stopped agent — re-spawn its session in the existing worktree

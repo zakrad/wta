@@ -218,6 +218,45 @@ It runs in the foreground and exits **non-zero if a guard trips**, so
 
 ---
 
+## Wait — block until an agent reaches a state
+
+`wta wait <task>...` blocks in the foreground until the agent(s) reach a state, so
+you can chain steps in a plain shell script without a daemon or an event bus. It
+polls the same state files the status bus already writes.
+
+```sh
+wta wait build --until idle             # until the agent finishes its turn (Stop hook)
+wta wait build --until needs-input      # until it's blocked on a question / permission
+wta wait build --until exited           # until its session ends
+wta wait build --until done             # any of the above (default) — "stopped working"
+wta wait a b c --all --until idle        # wait for EVERY listed agent (default)
+w=$(wta wait a b c --any --until idle)   # return on the FIRST; prints its name to stdout
+wta wait build --timeout 30m --poll 2s --quiet
+```
+
+It exits with a **distinct code so scripts can branch**: `0` reached, `3` no such
+agent, `4` the agent exited before an `idle`/`needs-input` state could happen, `124`
+timed out. That makes real pipelines a few lines of shell:
+
+```sh
+wta new build -- "implement the parser"
+wta wait build --until idle --timeout 30m || exit 1
+wta review build --by reviewer
+wta wait review-build --until idle        || exit 1
+wta land build --rm
+
+# fan-in: compare a whole fanout only once every agent has finished
+wta fanout impl -n 5 -- "try an approach"
+wta wait impl-1 impl-2 impl-3 impl-4 impl-5 --all --until idle
+wta matrix
+```
+
+`idle` / `needs-input` require the Claude hooks (`wta install-hooks`); without them
+only `exited` / `done` (via live session liveness) resolve. Every poll also checks
+tmux liveness, so a crashed agent resolves instead of hanging forever.
+
+---
+
 ## Locked regression checks
 
 `wta lock` freezes a command into a permanent check that every future agent must

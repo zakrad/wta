@@ -1832,9 +1832,176 @@ pub fn matrix() -> Result<()> {
     Ok(())
 }
 
+// ---- `wta wait` — block until agent(s) reach a state (scripting primitive) ----
+
+/// The state a `wta wait` blocks on. Mapped from the hook-driven status file
+/// (`waiting`/`needs_input`/`exited`) plus live tmux liveness, so a crashed agent
+/// (stale `running` file, dead session) still resolves instead of hanging forever.
+#[derive(Clone, Copy, PartialEq)]
+pub enum WaitCond {
+    /// hook wrote `waiting` — the agent finished its turn and is idle
+    Idle,
+    /// hook wrote `needs_input` — the agent is blocked on a question / permission
+    NeedsInput,
+    /// the tmux session is gone (or state `exited`) — the agent process ended
+    Exited,
+    /// any rest state: idle OR needs-input OR exited ("stopped working")
+    Done,
+}
+
+impl WaitCond {
+    fn parse(s: &str) -> Result<Self> {
+        Ok(match s {
+            "idle" | "waiting" => Self::Idle,
+            "needs-input" | "needs_input" => Self::NeedsInput,
+            "exited" | "exit" | "gone" => Self::Exited,
+            "done" => Self::Done,
+            other => bail!("--until must be idle | needs-input | exited | done (got '{other}')"),
+        })
+    }
+    fn wants_activity(self) -> bool {
+        matches!(self, Self::Idle | Self::NeedsInput)
+    }
+}
+
+/// True if `task` (in `repo`) currently satisfies `cond`.
+fn cond_met(repo: &str, task: &str, cond: WaitCond) -> bool {
+    let alive = tmux::has_session(&tmux::session_name(repo, task));
+    let st = status::read_state(repo, task).map(|s| s.status).unwrap_or_default();
+    match cond {
+        WaitCond::Idle => st == "waiting",
+        WaitCond::NeedsInput => st == "needs_input",
+        WaitCond::Exited => !alive || st == "exited",
+        WaitCond::Done => !alive || matches!(st.as_str(), "waiting" | "needs_input" | "exited"),
+    }
+}
+
+/// A task that can NEVER reach `cond`: we're waiting for it to go idle / need-input,
+/// but its session already died without getting there. Prevents an infinite wait on
+/// a crashed agent for the activity conditions (Exited/Done treat a dead session as met).
+fn cond_deadend(repo: &str, task: &str, cond: WaitCond) -> bool {
+    cond.wants_activity()
+        && !tmux::has_session(&tmux::session_name(repo, task))
+        && !cond_met(repo, task, cond)
+}
+
+/// `wta wait <task>... --until <cond>` — block in the foreground until the agent(s)
+/// reach a state, polling the state files the status bus already writes (no daemon,
+/// no event bus). Exit codes are the point: 0 met, 3 unknown task, 4 unreachable
+/// (crashed before an activity state), 124 timed out — so shell scripts can branch.
+pub fn wait(
+    tasks: &[String],
+    until: &str,
+    any: bool,
+    timeout: &str,
+    poll: &str,
+    quiet: bool,
+) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+
+    let cond = WaitCond::parse(until)?;
+    let repo = repo_id()?;
+    let timeout_secs = if matches!(timeout.trim(), "0" | "0s") {
+        0
+    } else {
+        crate::cron::parse_dur(timeout)?
+    };
+    let poll_secs = crate::cron::parse_dur(poll)?; // parse_dur rejects 0 → poll is always > 0
+
+    // Existence guard: don't hang forever on a typo. A task is "known" if it has a
+    // state file or a live session.
+    for t in tasks {
+        let known = status::read_state(&repo, t).is_some()
+            || tmux::has_session(&tmux::session_name(&repo, t));
+        if !known {
+            eprintln!("wta wait: no such agent '{t}' in this repo");
+            std::process::exit(3);
+        }
+    }
+
+    let show_progress = !quiet && std::io::stderr().is_terminal();
+    let clear = |on: bool| {
+        if on {
+            eprint!("\r\x1b[K");
+            let _ = std::io::stderr().flush();
+        }
+    };
+
+    let start = std::time::Instant::now();
+    let deadline = (timeout_secs > 0).then(|| start + std::time::Duration::from_secs(timeout_secs));
+
+    loop {
+        // Success first.
+        if any {
+            if let Some(w) = tasks.iter().find(|t| cond_met(&repo, t, cond)) {
+                clear(show_progress);
+                println!("{w}"); // the winner → stdout, so `$(wta wait a b c --any)` captures it
+                return Ok(());
+            }
+        } else if tasks.iter().all(|t| cond_met(&repo, t, cond)) {
+            clear(show_progress);
+            if !quiet {
+                eprintln!("wta wait: all {} agent(s) reached '{until}'", tasks.len());
+            }
+            return Ok(());
+        }
+
+        // Unreachable: for --any, only fail if EVERY task is a dead-end (none can still
+        // reach it); for --all, one dead-end already makes "all" impossible.
+        let deadend = if any {
+            tasks.iter().all(|t| cond_deadend(&repo, t, cond))
+        } else {
+            tasks.iter().any(|t| cond_deadend(&repo, t, cond))
+        };
+        if deadend {
+            clear(show_progress);
+            eprintln!("wta wait: agent(s) exited before reaching '{until}'");
+            std::process::exit(4);
+        }
+
+        if let Some(d) = deadline {
+            if std::time::Instant::now() >= d {
+                clear(show_progress);
+                eprintln!("wta wait: timed out after {timeout} waiting for '{until}'");
+                std::process::exit(124);
+            }
+        }
+
+        if show_progress {
+            let n = tasks.iter().filter(|t| !cond_met(&repo, t, cond)).count();
+            eprint!(
+                "\r\x1b[K… waiting for {n} agent(s) to reach '{until}' [{}s]",
+                start.elapsed().as_secs()
+            );
+            let _ = std::io::stderr().flush();
+        }
+        std::thread::sleep(std::time::Duration::from_secs(poll_secs));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wait_cond_parse_accepts_aliases_and_rejects_junk() {
+        assert!(WaitCond::parse("idle").is_ok());
+        assert!(WaitCond::parse("waiting").is_ok());
+        assert!(WaitCond::parse("needs-input").is_ok());
+        assert!(WaitCond::parse("needs_input").is_ok());
+        assert!(WaitCond::parse("exited").is_ok());
+        assert!(WaitCond::parse("done").is_ok());
+        assert!(WaitCond::parse("nonsense").is_err());
+        assert!(WaitCond::parse("").is_err());
+    }
+
+    #[test]
+    fn wait_cond_activity_flag() {
+        assert!(WaitCond::parse("idle").unwrap().wants_activity());
+        assert!(WaitCond::parse("needs-input").unwrap().wants_activity());
+        assert!(!WaitCond::parse("exited").unwrap().wants_activity());
+        assert!(!WaitCond::parse("done").unwrap().wants_activity());
+    }
 
     #[test]
     fn task_validation_rejects_unsafe_names() {
