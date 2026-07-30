@@ -455,7 +455,7 @@ wta rm fix-auth --force # also discard uncommitted work / an unmerged branch
 ## Per-repo setup
 
 ```sh
-wta init    # scaffold .wta/{verify.sh, setup.sh, teardown.sh} (idempotent)
+wta init    # scaffold .wta/{verify.sh, setup.sh, teardown.sh, worktree-include} (idempotent)
 ```
 
 - **`.wta/setup.sh`** runs in each fresh worktree on `wta new` — install deps,
@@ -465,6 +465,17 @@ wta init    # scaffold .wta/{verify.sh, setup.sh, teardown.sh} (idempotent)
 - **Context files** — `WTA_CONTEXT_FILES` (default `CLAUDE.local.md .env
   .env.local .mcp.json`) are copied into every worktree at creation and are kept
   out of `push` commits so secrets don't land in a PR.
+- **`.wta/worktree-include`** — a fresh worktree only gets *tracked* files, so
+  agents miss the gitignored env they need (`.env.local`, `certs/`, `.venv`, build
+  artifacts). List them here, one **gitignore-style pattern per line**; wta resolves
+  each to the actual ignored files (via git's own matcher) and copies them in,
+  git-excluded like context files. Keep it small — **symlink** big dirs
+  (`node_modules`) from `setup.sh` rather than copying them.
+  ```
+  # .wta/worktree-include
+  .env.local
+  certs/
+  ```
 - **Isolation slots** — each agent gets a stable `WTA_INDEX` (a distinct 0–99
   slot) and `WTA_PORT_BASE` (a unique 10-port block) in its pane **and** in
   `setup.sh`. Use them so parallel dev servers / DBs don't collide:

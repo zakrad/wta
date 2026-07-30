@@ -117,6 +117,66 @@ fn context_files() -> Vec<String> {
     v
 }
 
+/// Extra files to seed into each new worktree, from `.wta/worktree-include` — one
+/// gitignore-style pathspec per line (`#` comments). A fresh worktree only gets
+/// TRACKED files, so agents miss `.env.local`, certs, `.venv`, build artifacts they
+/// need. We resolve the patterns to actual IGNORED files via git's own matcher
+/// (`git ls-files --others --ignored --exclude-standard`), so there's no new glob
+/// dependency and the semantics match `.gitignore`. Returns repo-relative paths.
+fn worktree_include_matches(root: &Path) -> Vec<String> {
+    let text = match std::fs::read_to_string(root.join(".wta/worktree-include")) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let patterns: Vec<String> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_string())
+        .collect();
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+    let mut c = Command::new("git");
+    let flags = [
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+        "--",
+    ];
+    c.args(flags).args(&patterns).current_dir(root);
+    let out = match c.output() {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&out)
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Copy one repo-relative path (file or dir) from `root` into `wt`, creating parent
+/// dirs. Returns true on a successful copy. Shared by the context-file and
+/// worktree-include seeding.
+fn copy_into_worktree(root: &Path, wt: &Path, rel: &str) -> bool {
+    let src = root.join(rel);
+    if !src.exists() {
+        return false;
+    }
+    let dst = wt.join(rel);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if src.is_dir() {
+        Command::new("cp").args(["-R"]).arg(&src).arg(&dst).status().map(|s| s.success()).unwrap_or(false)
+    } else {
+        std::fs::copy(&src, &dst).is_ok()
+    }
+}
+
 fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
     let mut c = Command::new("git");
     c.args(args);
@@ -252,25 +312,18 @@ fn make_worktree(task: &str, base: Option<&str>, idx: u32) -> Result<(PathBuf, P
         run_git(&["worktree", "add", "-b", &branch, &wt_str], Some(&root))?;
     }
 
+    // Seed the worktree with files git won't carry over: the named context files
+    // (CLAUDE.local.md/.env/…) plus anything matched by `.wta/worktree-include`.
     let mut injected = Vec::new();
-    for name in context_files() {
-        let src = root.join(&name);
-        if src.exists() {
-            let dst = wt.join(&name);
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            if src.is_dir() {
-                Command::new("cp")
-                    .args(["-R"])
-                    .arg(&src)
-                    .arg(&dst)
-                    .status()
-                    .ok();
-            } else {
-                std::fs::copy(&src, &dst).ok();
-            }
-            injected.push(name);
+    let mut to_seed = context_files();
+    for m in worktree_include_matches(&root) {
+        if !to_seed.contains(&m) {
+            to_seed.push(m);
+        }
+    }
+    for rel in to_seed {
+        if copy_into_worktree(&root, &wt, &rel) {
+            injected.push(rel);
         }
     }
 
@@ -623,8 +676,18 @@ pub fn init() -> Result<()> {
             created.push(name);
         }
     }
+    // A non-executable text file: gitignore-style patterns for the ignored files each
+    // fresh worktree should be seeded with (a fresh worktree only gets tracked files).
+    let inc = dir.join("worktree-include");
+    if !inc.exists() {
+        std::fs::write(
+            &inc,
+            "# One gitignore-style pattern per line. Matching IGNORED files are copied\n# into each new worktree so agents have the env they need. Keep it small —\n# symlink big dirs (node_modules) from .wta/setup.sh instead of copying them.\n# .env.local\n# certs/\n",
+        )?;
+        created.push("worktree-include");
+    }
     if created.is_empty() {
-        println!(".wta/ is already set up (verify.sh, setup.sh, teardown.sh)");
+        println!(".wta/ is already set up (verify.sh, setup.sh, teardown.sh, worktree-include)");
     } else {
         println!("scaffolded .wta/{{{}}} — edit them for your stack", created.join(", "));
     }
@@ -2304,6 +2367,27 @@ mod tests {
         assert!(WaitCond::parse("done").is_ok());
         assert!(WaitCond::parse("nonsense").is_err());
         assert!(WaitCond::parse("").is_err());
+    }
+
+    #[test]
+    fn worktree_include_matches_only_listed_ignored_files() {
+        let dir = std::env::temp_dir().join(format!("wta-inc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join(".gitignore"), ".env.local\nsecret.txt\n").unwrap();
+        std::fs::write(dir.join(".env.local"), "x").unwrap();
+        std::fs::write(dir.join("secret.txt"), "x").unwrap(); // ignored but NOT included
+        std::fs::create_dir_all(dir.join(".wta")).unwrap();
+        std::fs::write(dir.join(".wta/worktree-include"), "# seed\n.env.local\n").unwrap();
+
+        let got = worktree_include_matches(&dir);
+        assert!(got.contains(&".env.local".to_string()), "matched: {got:?}");
+        assert!(!got.contains(&"secret.txt".to_string()), "should not seed unlisted ignored file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
