@@ -1281,6 +1281,8 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
                 _ => {
                     let engine = st.and_then(|s| s.engine.as_deref());
                     match crate::detect::classify(engine, &text) {
+                        // a terminal error (auth/quota) needs you as much as a prompt does
+                        Some(crate::detect::PaneState::Error) => Status::NeedsInput,
                         Some(crate::detect::PaneState::NeedsInput) => Status::NeedsInput,
                         Some(crate::detect::PaneState::Working) => Status::Running,
                         None if changed => Status::Running,

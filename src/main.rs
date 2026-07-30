@@ -57,11 +57,11 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("{hint}");
             }
         }
-        Command::Ls => worktree::ls()?,
+        Command::Ls { json } => worktree::ls(json)?,
         Command::Cost { task, chart, usd, cumulative, json } => {
             worktree::show_cost(task.as_deref(), chart, json, usd, cumulative)?
         }
-        Command::Matrix => worktree::matrix()?,
+        Command::Matrix { json } => worktree::matrix(json)?,
         Command::Fanout {
             name,
             count,

@@ -698,6 +698,9 @@ pub fn send(task: &str, message: &str) -> Result<()> {
     let from = std::env::var("WTA_TASK").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "you".into());
     let framed = format!("[wta:{from}] {}", msg.replace('\n', " "));
     tmux::send_text(&session, &framed)?;
+    // Stamp the delivery so `wta wait --until idle` stays turn-bound: it must wait for
+    // the NEW turn to finish, not return on this agent's stale prior-turn idle.
+    status::mark_prompt_sent(&repo, task);
     println!("→ {task}: {}", msg.chars().take(70).collect::<String>());
     Ok(())
 }
@@ -1383,6 +1386,24 @@ fn diffstat(path: &Path, base: &str) -> String {
     }
 }
 
+/// Exact (added, deleted) line counts vs `base` for `--json` output.
+fn changes_vs_base(path: &Path, base: &str) -> (u64, u64) {
+    let mb = match run_git(&["merge-base", "HEAD", base], Some(path)) {
+        Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return (0, 0),
+    };
+    let out = run_git(&["diff", "--numstat", &mb], Some(path)).unwrap_or_default();
+    let (mut add, mut del) = (0u64, 0u64);
+    for line in out.lines() {
+        let mut it = line.split('\t');
+        if let (Some(a), Some(d)) = (it.next(), it.next()) {
+            add += a.parse::<u64>().unwrap_or(0);
+            del += d.parse::<u64>().unwrap_or(0);
+        }
+    }
+    (add, del)
+}
+
 pub fn list_managed() -> Result<Vec<Worktree>> {
     list_managed_in(&repo_root()?)
 }
@@ -1451,11 +1472,38 @@ fn push_if_managed(out: &mut Vec<Worktree>, base_dir: &Path, path: PathBuf, bran
     }
 }
 
-pub fn ls() -> Result<()> {
+pub fn ls(json: bool) -> Result<()> {
     let root = repo_root()?;
     let repo = repo_id_of(&root);
     let default_base = base_branch(&root);
     let managed = list_managed()?;
+
+    if json {
+        // Stable machine contract: a fleet snapshot for scripts / CI / an agent SKILL.
+        let rows: Vec<serde_json::Value> = managed
+            .iter()
+            .map(|w| {
+                let st = status::read_state(&repo, &w.task);
+                let base = status::base_of(&repo, &w.task).unwrap_or_else(|| default_base.clone());
+                let (added, deleted) = changes_vs_base(&w.path, &base);
+                serde_json::json!({
+                    "task": w.task,
+                    "alive": tmux::has_session(&tmux::session_name(&repo, &w.task)),
+                    "status": st.as_ref().map(|s| s.status.clone()).unwrap_or_default(),
+                    "base": base,
+                    "engine": st.as_ref().and_then(|s| s.engine.clone()),
+                    "index": st.as_ref().map(|s| s.index).unwrap_or(0),
+                    "worktree": w.path.to_string_lossy(),
+                    "session": tmux::session_name(&repo, &w.task),
+                    "added": added,
+                    "deleted": deleted,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!(rows))?);
+        return Ok(());
+    }
+
     if managed.is_empty() {
         println!("no agents (create one with: wta new <task>)");
         return Ok(());
@@ -1790,9 +1838,29 @@ pub fn mergeability() -> Result<MergeMatrix> {
 }
 
 /// `wta matrix` — print the pairwise conflict grid.
-pub fn matrix() -> Result<()> {
+pub fn matrix(json: bool) -> Result<()> {
     let m = mergeability()?;
     let n = m.labels.len();
+
+    if json {
+        // Stable conflict-graph contract (feeds e.g. a future `land --order`).
+        let pairs: Vec<serde_json::Value> = m
+            .pairs
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "a": m.labels[p.i],
+                    "b": m.labels[p.j],
+                    "clean": p.clean,
+                    "conflicts": p.files,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({ "labels": m.labels, "pairs": pairs });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
     if n <= 1 {
         println!("no agent branches to compare (create some with `wta new`)");
         return Ok(());
@@ -1983,6 +2051,7 @@ pub fn detect(task: &str) -> Result<()> {
     let engine = status::read_state(&repo, task).and_then(|s| s.engine);
     let text = tmux::capture(&session).unwrap_or_default();
     let detected = match crate::detect::classify(engine.as_deref(), &text) {
+        Some(crate::detect::PaneState::Error) => "error (terminal — auth/quota; fail-closed)",
         Some(crate::detect::PaneState::NeedsInput) => "needs-input",
         Some(crate::detect::PaneState::Working) => "working",
         None => "no match (falls back to pane-hash: changed=working, else ready)",
@@ -2025,31 +2094,76 @@ impl WaitCond {
     }
 }
 
-/// True if `task` (in `repo`) currently satisfies `cond`.
-fn cond_met(repo: &str, task: &str, cond: WaitCond) -> bool {
-    let alive = tmux::has_session(&tmux::session_name(repo, task));
-    let st = status::read_state(repo, task).map(|s| s.status).unwrap_or_default();
+/// The resolved runtime phase of an agent — unifying tmux liveness + the hook status
+/// file + screen-manifest pane detection (the SAME signals the dashboard uses). This
+/// is what makes `wta wait` agent-agnostic (idle/needs-input resolve for codex/gemini,
+/// not just Claude) and fail-closed (a broken agent is `Error`, never a false idle).
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Working,
+    Idle,
+    NeedsInput,
+    Error,
+    Exited,
+}
+
+fn agent_phase(repo: &str, task: &str) -> Phase {
+    let session = tmux::session_name(repo, task);
+    if !tmux::has_session(&session) {
+        return Phase::Exited;
+    }
+    let st = status::read_state(repo, task);
+    let hook = st.as_ref().map(|s| s.status.as_str()).unwrap_or("");
+    if hook == "needs_input" {
+        return Phase::NeedsInput; // Claude's Notification hook is authoritative
+    }
+    if hook == "exited" {
+        return Phase::Exited;
+    }
+    // Screen manifest — agent-agnostic. Error wins (fail-closed), then needs-input, then working.
+    let engine = st.as_ref().and_then(|s| s.engine.as_deref());
+    let text = tmux::capture(&session).unwrap_or_default();
+    match crate::detect::classify(engine, &text) {
+        Some(crate::detect::PaneState::Error) => return Phase::Error,
+        Some(crate::detect::PaneState::NeedsInput) => return Phase::NeedsInput,
+        Some(crate::detect::PaneState::Working) => return Phase::Working,
+        None => {}
+    }
+    // No manifest opinion. Trust a FRESH hook `waiting` — turn-bound: a `waiting` older
+    // than the last delivered prompt is a stale prior-turn idle and does NOT count.
+    let last_prompt = st.as_ref().map(|s| s.last_prompt_unix).unwrap_or(0);
+    let updated = st.as_ref().map(|s| s.updated_unix).unwrap_or(0);
+    if hook == "waiting" && updated >= last_prompt {
+        return Phase::Idle;
+    }
+    // Stateless fallback for hookless engines: two captures a beat apart, unchanged = idle.
+    if tmux::pane_is_idle(&session) {
+        return Phase::Idle;
+    }
+    Phase::Working
+}
+
+/// True if `phase` satisfies `cond` (Error is handled separately — it fail-closes the wait).
+fn cond_met(phase: Phase, cond: WaitCond) -> bool {
     match cond {
-        WaitCond::Idle => st == "waiting",
-        WaitCond::NeedsInput => st == "needs_input",
-        WaitCond::Exited => !alive || st == "exited",
-        WaitCond::Done => !alive || matches!(st.as_str(), "waiting" | "needs_input" | "exited"),
+        WaitCond::Idle => phase == Phase::Idle,
+        WaitCond::NeedsInput => phase == Phase::NeedsInput,
+        WaitCond::Exited => phase == Phase::Exited,
+        WaitCond::Done => matches!(phase, Phase::Idle | Phase::NeedsInput | Phase::Exited),
     }
 }
 
-/// A task that can NEVER reach `cond`: we're waiting for it to go idle / need-input,
-/// but its session already died without getting there. Prevents an infinite wait on
-/// a crashed agent for the activity conditions (Exited/Done treat a dead session as met).
-fn cond_deadend(repo: &str, task: &str, cond: WaitCond) -> bool {
-    cond.wants_activity()
-        && !tmux::has_session(&tmux::session_name(repo, task))
-        && !cond_met(repo, task, cond)
+/// A task that can NEVER reach `cond`: we're waiting for it to go idle / need-input but
+/// its session already exited without getting there — prevents an infinite wait.
+fn cond_deadend(phase: Phase, cond: WaitCond) -> bool {
+    cond.wants_activity() && phase == Phase::Exited
 }
 
 /// `wta wait <task>... --until <cond>` — block in the foreground until the agent(s)
-/// reach a state, polling the state files the status bus already writes (no daemon,
-/// no event bus). Exit codes are the point: 0 met, 3 unknown task, 4 unreachable
-/// (crashed before an activity state), 124 timed out — so shell scripts can branch.
+/// reach a state, from the same signals the dashboard uses (hook status + screen
+/// manifests + tmux liveness; no daemon, no event bus). Exit codes are the point:
+/// 0 met, 3 unknown task, 4 unreachable (exited before an activity state), 5 a
+/// terminal error (fail-closed), 124 timed out — so shell scripts can branch.
 pub fn wait(
     tasks: &[String],
     until: &str,
@@ -2092,14 +2206,26 @@ pub fn wait(
     let deadline = (timeout_secs > 0).then(|| start + std::time::Duration::from_secs(timeout_secs));
 
     loop {
-        // Success first.
+        // Resolve every agent's phase ONCE per poll (each resolve does pane I/O), then
+        // decide from the snapshot.
+        let phases: Vec<Phase> = tasks.iter().map(|t| agent_phase(&repo, t)).collect();
+
+        // Fail-closed: an agent stuck on a terminal error (auth/quota) must abort the
+        // wait — never let a scripted `wait && next` proceed on a broken step.
+        if let Some(i) = phases.iter().position(|p| *p == Phase::Error) {
+            clear(show_progress);
+            eprintln!("wta wait: '{}' hit a terminal error (auth/quota) — aborting", tasks[i]);
+            std::process::exit(5);
+        }
+
+        // Success.
         if any {
-            if let Some(w) = tasks.iter().find(|t| cond_met(&repo, t, cond)) {
+            if let Some(i) = phases.iter().position(|p| cond_met(*p, cond)) {
                 clear(show_progress);
-                println!("{w}"); // the winner → stdout, so `$(wta wait a b c --any)` captures it
+                println!("{}", tasks[i]); // the winner → stdout, so `$(wta wait a b c --any)` captures it
                 return Ok(());
             }
-        } else if tasks.iter().all(|t| cond_met(&repo, t, cond)) {
+        } else if phases.iter().all(|p| cond_met(*p, cond)) {
             clear(show_progress);
             if !quiet {
                 eprintln!("wta wait: all {} agent(s) reached '{until}'", tasks.len());
@@ -2110,9 +2236,9 @@ pub fn wait(
         // Unreachable: for --any, only fail if EVERY task is a dead-end (none can still
         // reach it); for --all, one dead-end already makes "all" impossible.
         let deadend = if any {
-            tasks.iter().all(|t| cond_deadend(&repo, t, cond))
+            phases.iter().all(|p| cond_deadend(*p, cond))
         } else {
-            tasks.iter().any(|t| cond_deadend(&repo, t, cond))
+            phases.iter().any(|p| cond_deadend(*p, cond))
         };
         if deadend {
             clear(show_progress);
@@ -2129,7 +2255,7 @@ pub fn wait(
         }
 
         if show_progress {
-            let n = tasks.iter().filter(|t| !cond_met(&repo, t, cond)).count();
+            let n = phases.iter().filter(|p| !cond_met(**p, cond)).count();
             eprint!(
                 "\r\x1b[K… waiting for {n} agent(s) to reach '{until}' [{}s]",
                 start.elapsed().as_secs()
@@ -2178,6 +2304,23 @@ mod tests {
         assert!(WaitCond::parse("done").is_ok());
         assert!(WaitCond::parse("nonsense").is_err());
         assert!(WaitCond::parse("").is_err());
+    }
+
+    #[test]
+    fn cond_met_maps_phase_to_condition() {
+        assert!(cond_met(Phase::Idle, WaitCond::Idle));
+        assert!(!cond_met(Phase::Working, WaitCond::Idle));
+        assert!(cond_met(Phase::NeedsInput, WaitCond::NeedsInput));
+        assert!(cond_met(Phase::Exited, WaitCond::Exited));
+        // done = any clean rest state, but NOT working and NOT error
+        for p in [Phase::Idle, Phase::NeedsInput, Phase::Exited] {
+            assert!(cond_met(p, WaitCond::Done));
+        }
+        assert!(!cond_met(Phase::Working, WaitCond::Done));
+        assert!(!cond_met(Phase::Error, WaitCond::Done)); // error fail-closes, never "done"
+        // dead-end only for activity conditions when the session exited
+        assert!(cond_deadend(Phase::Exited, WaitCond::Idle));
+        assert!(!cond_deadend(Phase::Exited, WaitCond::Exited));
     }
 
     #[test]

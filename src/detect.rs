@@ -24,6 +24,9 @@ pub enum PaneState {
     NeedsInput,
     /// actively working (spinner / "esc to interrupt" / thinking)
     Working,
+    /// stuck on a TERMINAL error (auth/quota/login) — needs a human, and must never
+    /// read as a successful idle. `wta wait` treats this as fail-closed.
+    Error,
 }
 
 #[derive(Default, Deserialize)]
@@ -32,15 +35,18 @@ struct Rules {
     needs_input: Vec<String>,
     #[serde(default)]
     working: Vec<String>,
+    #[serde(default)]
+    error: Vec<String>,
 }
 
 impl Rules {
     fn extend(&mut self, other: Rules) {
         self.needs_input.extend(other.needs_input);
         self.working.extend(other.working);
+        self.error.extend(other.error);
     }
     fn lowercased(mut self) -> Self {
-        for v in [&mut self.needs_input, &mut self.working] {
+        for v in [&mut self.needs_input, &mut self.working, &mut self.error] {
             for p in v.iter_mut() {
                 *p = p.to_lowercase();
             }
@@ -99,13 +105,31 @@ fn generic() -> Rules {
         .iter()
         .map(|s| s.to_string())
         .collect(),
+        // TERMINAL errors only — an agent stuck here needs a human and did NOT finish
+        // its turn. Kept deliberately narrow (auth / quota / login) so a transient,
+        // self-retrying "overloaded"/"rate limit" does NOT fail-close a working agent.
+        error: [
+            "invalid api key",
+            "authentication_error",
+            "authentication failed",
+            "login expired",
+            "please run /login",
+            "session expired",
+            "usage limit reached",
+            "quota exceeded",
+            "insufficient_quota",
+            "insufficient credit",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
     }
 }
 
 /// Engine-specific extras (by CLI basename). Bonus signal on top of [`generic`];
 /// users add more via `~/.wta/detect/<engine>.json`.
 fn engine_extra(engine: &str) -> Rules {
-    let (ni, wk): (&[&str], &[&str]) = match engine {
+    let (ni, wk, er): (&[&str], &[&str], &[&str]) = match engine {
         "claude" => (
             &[
                 "no, and tell claude",
@@ -113,10 +137,12 @@ fn engine_extra(engine: &str) -> Rules {
                 "i trust this folder",
             ],
             &["✻", "✽", "✢"],
+            &["credit balance is too low", "please run /login"],
         ),
         "codex" => (
             &["allow command", "run this command?", "approve"],
             &["codex is working"],
+            &["not logged in", "run `codex login`"],
         ),
         "gemini" => (
             &[
@@ -125,13 +151,15 @@ fn engine_extra(engine: &str) -> Rules {
                 "do you want to proceed",
             ],
             &["gemini is thinking"],
+            &[],
         ),
-        "aider" => (&["apply edits?", "add these files"], &[]),
-        _ => (&[], &[]),
+        "aider" => (&["apply edits?", "add these files"], &[], &[]),
+        _ => (&[], &[], &[]),
     };
     Rules {
         needs_input: ni.iter().map(|s| s.to_string()).collect(),
         working: wk.iter().map(|s| s.to_string()).collect(),
+        error: er.iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -180,14 +208,18 @@ fn tail(text: &str, n: usize) -> String {
     crate::tmux::norm(&lines[start..].join("\n")).to_lowercase()
 }
 
-/// Classify the pane for `engine`. `needs_input` wins over `working`; no match → `None`
-/// (caller keeps its pane-hash fallback). Case/whitespace-insensitive.
+/// Classify the pane for `engine`. Precedence: `error` (fail-closed — a broken agent
+/// must never read as success) > `needs_input` > `working`; no match → `None` (caller
+/// keeps its pane-hash fallback). Case/whitespace-insensitive.
 pub fn classify(engine: Option<&str>, text: &str) -> Option<PaneState> {
     let hay = tail(text, 15);
     if hay.is_empty() {
         return None;
     }
     let rules = resolve(engine);
+    if rules.error.iter().any(|p| hay.contains(p.as_str())) {
+        return Some(PaneState::Error);
+    }
     if rules.needs_input.iter().any(|p| hay.contains(p.as_str())) {
         return Some(PaneState::NeedsInput);
     }
@@ -219,6 +251,24 @@ mod tests {
         // both a spinner and a prompt on screen → the prompt (needs you) wins
         let text = "⠹ working\n❯ 1. Yes\n  2. No";
         assert_eq!(classify(Some("claude"), text), Some(PaneState::NeedsInput));
+    }
+
+    #[test]
+    fn terminal_error_is_fail_closed_and_beats_idle() {
+        // an auth failure must classify as Error, never read as idle/no-opinion
+        assert_eq!(
+            classify(Some("claude"), "…\nInvalid API key · Please run /login"),
+            Some(PaneState::Error)
+        );
+        assert_eq!(
+            classify(None, "usage limit reached, try again later"),
+            Some(PaneState::Error)
+        );
+        // a transient, self-retrying overload must NOT fail-close (agent is still working)
+        assert_ne!(
+            classify(None, "API Error: Overloaded (retrying 1/5)"),
+            Some(PaneState::Error)
+        );
     }
 
     #[test]

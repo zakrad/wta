@@ -49,7 +49,11 @@ pub enum Command {
         agent_args: Vec<String>,
     },
     /// List wta-managed agents (worktrees) with diffstat vs the base branch
-    Ls,
+    Ls {
+        /// emit a stable JSON fleet snapshot (for scripts / CI / an agent)
+        #[arg(long)]
+        json: bool,
+    },
     /// Token usage + estimated $ per agent (from Claude Code transcripts)
     Cost {
         /// a single agent (default: all agents in this repo, with a total)
@@ -68,7 +72,11 @@ pub enum Command {
         json: bool,
     },
     /// Preview which agent branches merge cleanly vs each other + base (no files touched)
-    Matrix,
+    Matrix {
+        /// emit the conflict graph as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Spawn N agents on the SAME prompt (names <name>-1..N); compare with `matrix`, merge the winner
     Fanout {
         /// name prefix for the agents (creates <name>-1 .. <name>-N)

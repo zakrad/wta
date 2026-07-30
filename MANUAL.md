@@ -235,9 +235,18 @@ w=$(wta wait a b c --any --until idle)   # return on the FIRST; prints its name 
 wta wait build --timeout 30m --poll 2s --quiet
 ```
 
+It resolves state from the **same signals the dashboard uses** — the Claude hook
+status *and* the screen-manifest pane detector — so `--until idle`/`needs-input` work
+for **any** engine (codex/gemini/…), not just Claude. It is also **fail-closed**: an
+agent stuck on a terminal error (invalid API key, quota/login) never reads as a
+successful idle — the wait aborts with exit `5`. And it is **turn-bound**: after
+`wta send`, a `wait --until idle` waits for the *new* turn to finish rather than
+returning on the agent's stale prior-turn idle.
+
 It exits with a **distinct code so scripts can branch**: `0` reached, `3` no such
-agent, `4` the agent exited before an `idle`/`needs-input` state could happen, `124`
-timed out. That makes real pipelines a few lines of shell:
+agent, `4` the agent exited before an `idle`/`needs-input` state could happen, `5` a
+terminal error (fail-closed), `124` timed out. That makes real pipelines a few lines
+of shell:
 
 ```sh
 wta new build -- "implement the parser"
@@ -567,8 +576,13 @@ Extend any engine with `~/.wta/detect/<engine>.json` (patterns are **appended** 
 the built-ins, matched as case-insensitive substrings of the pane):
 
 ```json
-{ "needs_input": ["apply this patch?", "confirm (y/n)"], "working": ["crunching"] }
+{ "needs_input": ["apply this patch?"], "working": ["crunching"], "error": ["seat limit reached"] }
 ```
+
+The `error` category is for **terminal** failures (auth/quota/login) — an agent
+matching it is treated as fail-closed by `wta wait` (never a false idle) and shown as
+needs-you on the dashboard. Keep it narrow so a transient, self-retrying "overloaded"
+doesn't fail-close a working agent.
 
 Detection never sends keys — a wrong guess is only a wrong glyph that self-corrects
 next tick — so it's safe to be generous with `working` patterns and tight with
@@ -645,6 +659,30 @@ It prints, with ✓ / ✗ marks:
 
 It's read-only — no changelog feed, no self-update (mutating agent binaries
 mid-fleet would break reproducibility; that's your package manager's job).
+
+---
+
+## Scripting (the CLI is the API)
+
+wta has no daemon and no socket — the read commands emit JSON and the action
+commands set meaningful exit codes, so you drive a fleet from plain shell, CI, or an
+agent itself.
+
+```sh
+wta ls --json        # stable fleet snapshot: [{task,alive,status,base,engine,added,deleted,worktree,session}]
+wta matrix --json    # the conflict graph: {labels, pairs:[{a,b,clean,conflicts}]}
+wta cost --json      # per-message token/$/model time series
+```
+
+Combined with `wta wait`'s exit codes (`0` reached · `4` exited-first · `5` errored ·
+`124` timed out), that's enough to sequence agents into a pipeline — e.g. a Makefile
+where targets are `wta new` and prerequisites are `wta wait`, so `make -j` becomes the
+parallel scheduler:
+
+```make
+api web:    ; wta new $@ -- "implement $@"
+integrate:  api web ; wta wait api web --all --until idle && wta new $@ -- "wire them together"
+```
 
 ---
 

@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// hook-driven `needs_input`/`waiting` states. Liveness/preview come from tmux.
 /// Stored per-repo at `~/.wta/state/<repo>/<task>.json` so agents with the same
 /// task name in different repos never collide.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AgentState {
     pub task: String,
     #[serde(default)]
@@ -26,6 +26,8 @@ pub struct AgentState {
     pub base: Option<String>, // branch this agent is based on / targets — for diffs + PR base
     #[serde(default)]
     pub engine: Option<String>, // agent CLI basename (claude/codex/gemini…) for screen-manifest status detection
+    #[serde(default)]
+    pub last_prompt_unix: u64, // when a prompt was last delivered — makes `wait --until idle` turn-bound (ignore a stale prior-turn idle)
 }
 
 pub fn wta_dir() -> Result<PathBuf> {
@@ -91,17 +93,7 @@ pub fn read_state(repo: &str, task: &str) -> Option<AgentState> {
 /// existing file so the isolation slot + injected-file list set at creation
 /// aren't clobbered by later hook writes.
 pub fn record(repo: &str, task: &str, status: &str, cwd: &str) -> Result<()> {
-    let mut st = read_state(repo, task).unwrap_or(AgentState {
-        task: String::new(),
-        repo: String::new(),
-        status: String::new(),
-        cwd: String::new(),
-        updated_unix: 0,
-        index: 0,
-        context: Vec::new(),
-        base: None,
-        engine: None,
-    });
+    let mut st = read_state(repo, task).unwrap_or_default();
     st.task = task.to_string();
     st.repo = repo.to_string();
     st.status = status.to_string();
@@ -113,17 +105,7 @@ pub fn record(repo: &str, task: &str, status: &str, cwd: &str) -> Result<()> {
 /// Record the creation-time metadata (isolation slot + injected files), merging
 /// over any existing status/cwd.
 pub fn record_meta(repo: &str, task: &str, index: u32, context: &[String]) -> Result<()> {
-    let mut st = read_state(repo, task).unwrap_or(AgentState {
-        task: task.to_string(),
-        repo: repo.to_string(),
-        status: "running".to_string(),
-        cwd: String::new(),
-        updated_unix: now_unix(),
-        index: 0,
-        context: Vec::new(),
-        base: None,
-        engine: None,
-    });
+    let mut st = read_state(repo, task).unwrap_or_default();
     st.task = task.to_string();
     st.repo = repo.to_string();
     st.index = index;
@@ -134,17 +116,7 @@ pub fn record_meta(repo: &str, task: &str, index: u32, context: &[String]) -> Re
 /// Record the base branch this agent is based on / targets (merge-write, so it
 /// preserves status/slot/context). Read back by the dashboard and `wta push --pr`.
 pub fn record_base(repo: &str, task: &str, base: &str) -> Result<()> {
-    let mut st = read_state(repo, task).unwrap_or(AgentState {
-        task: task.to_string(),
-        repo: repo.to_string(),
-        status: "running".to_string(),
-        cwd: String::new(),
-        updated_unix: now_unix(),
-        index: 0,
-        context: Vec::new(),
-        base: None,
-        engine: None,
-    });
+    let mut st = read_state(repo, task).unwrap_or_default();
     st.task = task.to_string();
     st.repo = repo.to_string();
     st.base = Some(base.to_string());
@@ -160,21 +132,23 @@ pub fn base_of(repo: &str, task: &str) -> Option<String> {
 /// status/slot/context/base. Read back by the dashboard for screen-manifest status
 /// detection of non-Claude agents (which don't report state via hooks).
 pub fn record_engine(repo: &str, task: &str, engine: &str) -> Result<()> {
-    let mut st = read_state(repo, task).unwrap_or(AgentState {
-        task: task.to_string(),
-        repo: repo.to_string(),
-        status: "running".to_string(),
-        cwd: String::new(),
-        updated_unix: now_unix(),
-        index: 0,
-        context: Vec::new(),
-        base: None,
-        engine: None,
-    });
+    let mut st = read_state(repo, task).unwrap_or_default();
     st.task = task.to_string();
     st.repo = repo.to_string();
     st.engine = Some(engine.to_string());
     save(&st)
+}
+
+/// Stamp "a prompt was just delivered to this agent" (merge-write). `wta wait
+/// --until idle` uses it to stay TURN-BOUND: a `waiting` state older than the last
+/// prompt is a stale prior-turn idle and must not satisfy the wait. Called from
+/// `new` (with a kickoff prompt), `send`, and dashboard quick-send.
+pub fn mark_prompt_sent(repo: &str, task: &str) {
+    let mut st = read_state(repo, task).unwrap_or_default();
+    st.task = task.to_string();
+    st.repo = repo.to_string();
+    st.last_prompt_unix = now_unix();
+    let _ = save(&st);
 }
 
 fn emit_uservar(name: &str, value: &str) -> std::io::Result<()> {
