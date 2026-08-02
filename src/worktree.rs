@@ -559,6 +559,12 @@ fn new_impl(task: &str, agent_args: &[String], base: Option<&str>, seed: Option<
             injected.push(f);
         }
     }
+    // opt-in safety seatbelt: block force-push / rm -rf / reset --hard via a PreToolUse hook
+    if let Some(f) = crate::guard::seed_worktree(&root, &wt) {
+        if !injected.contains(&f) {
+            injected.push(f);
+        }
+    }
     // git-exclude every injected file in the worktree so the agent's own commits
     // (or push) can never publish local context / the fleet digest
     exclude_in_worktree(&wt, &injected);

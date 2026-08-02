@@ -210,6 +210,14 @@ pub enum Command {
     },
     /// One-shot health check: resolved engine/version per role, tmux/git, hooks, config
     Doctor,
+    /// Opt-in safety: block destructive commands (force-push, rm -rf, reset --hard) in each agent
+    Guard {
+        #[command(subcommand)]
+        action: Option<GuardAction>,
+    },
+    /// PreToolUse hook target — reads a tool call on stdin, exits 2 to block (internal)
+    #[command(hide = true)]
+    GuardCheck,
     /// Show how the screen-manifest classifier reads an agent's pane (engine + detected state)
     Detect { task: String },
     /// Block until agent(s) reach a state — for scripting A-then-B (idle/needs-input/exited/done)
@@ -277,6 +285,21 @@ pub enum Command {
         /// Send one test message to verify config, then exit
         #[arg(long)]
         test: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GuardAction {
+    /// Turn guard ON for this repo (new agents get the safety hook)
+    On,
+    /// Turn guard OFF for this repo
+    Off,
+    /// Show whether guard is on + the built-in and custom rules
+    Status,
+    /// Dry-run a command through the rules without an agent
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
     },
 }
 

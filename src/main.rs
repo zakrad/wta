@@ -5,6 +5,7 @@ mod cost;
 mod cron;
 mod dash;
 mod detect;
+mod guard;
 mod notify;
 mod roles;
 mod status;
@@ -123,6 +124,16 @@ fn main() -> anyhow::Result<()> {
             worktree::board(if joined.trim().is_empty() { None } else { Some(joined.as_str()) })?
         }
         Command::Doctor => worktree::doctor()?,
+        Command::Guard { action } => {
+            let root = worktree::repo_root()?;
+            match action.unwrap_or(cli::GuardAction::Status) {
+                cli::GuardAction::On => guard::on(&root)?,
+                cli::GuardAction::Off => guard::off(&root)?,
+                cli::GuardAction::Status => guard::status(&root)?,
+                cli::GuardAction::Test { command } => guard::test(&command.join(" "))?,
+            }
+        }
+        Command::GuardCheck => guard::run_check()?,
         Command::Detect { task } => worktree::detect(&task)?,
         Command::Wait { tasks, until, any, timeout, poll, quiet } => {
             worktree::wait(&tasks, &until, any, &timeout, &poll, quiet)?

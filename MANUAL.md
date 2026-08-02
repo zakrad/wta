@@ -20,6 +20,7 @@ how to use each feature on its own.
 - [Notifications](#notifications) · sound, terminal toast, hooks
 - [Agent lifecycle](#agent-lifecycle) · stop/resume/kill, merged
 - [Per-repo setup](#per-repo-setup) · `init`, setup/teardown, isolation slots, run-log
+- [Safety guard](#safety-guard) · `guard`, block destructive commands
 - [Cross-agent awareness](#cross-agent-awareness) · `send`, `board`, fleet digest
 - [Multiple repos](#multiple-repos)
 - [Remote control (Telegram)](#remote-control-telegram)
@@ -488,6 +489,37 @@ wta init    # scaffold .wta/{verify.sh, setup.sh, teardown.sh, worktree-include}
   `.wta/run-log.md`.
 
 Add `.agents/` (and `.wta/run-log.md` if you like) to `.gitignore`.
+
+---
+
+## Safety guard
+
+wta isolates **files** (a worktree per agent), but not the machine — a fleet running
+unattended with `--dangerously-skip-permissions` can still force-push, `rm -rf` your
+home, or wipe ignored files. `wta guard` is an **opt-in seatbelt**: it installs a
+Claude Code **PreToolUse** hook into each new agent that blocks the clearly-destructive
+`Bash` commands before they run.
+
+```sh
+wta guard on                       # enable for this repo (new agents get the hook)
+wta guard status                   # on/off + the active rules
+wta guard test 'git push --force'  # dry-run a command through the rules (no agent needed)
+wta guard off
+```
+
+Built-in blocks: **force-push** (allows `--force-with-lease`), **`git reset --hard`**,
+**`git clean -f` with `-x`/`-X`**, and **`rm -rf`** targeting `/`, `~`, `..`, `$HOME`,
+or a wildcard. In-worktree cleanup (`rm -rf target`, `git clean -fd`) is allowed. Add
+your own rules as executable **`~/.wta/guard.d/*.sh`** (each gets the command as `$1`; a
+non-zero exit blocks, and its stderr is shown to the agent).
+
+It's **off by default**, applies only to agents created after `guard on` (recreate
+existing ones to pick it up), and the hook lives in each worktree's
+`.claude/settings.local.json` (git-excluded, so it never dirties the repo). It is a
+seatbelt, **not a sandbox** — matching a shell string is best-effort and a determined
+agent can evade it; the worktree is still the real isolation. It also stays true to
+wta's stance: this is deterministic *per-command* policy that escalates to **you**, not
+an inter-agent lock or an LLM deciding to kill.
 
 ---
 
