@@ -712,10 +712,20 @@ fn resolve_repo() -> Result<String> {
 
 /// The MAIN repo root, resolved from anywhere (incl. a linked worktree) via
 /// `--git-common-dir` — so `wta board` works whether you or an agent runs it.
+/// The MAIN repo root for a directory anywhere inside a repo or one of its worktrees
+/// (`git rev-parse --git-common-dir` → the shared `.git`'s parent). Works from a
+/// worktree subdirectory, unlike a fixed parent-hop. `None` if `dir` isn't in a repo.
+fn main_root_of(dir: &Path) -> Option<PathBuf> {
+    let out = run_git(&["rev-parse", "--git-common-dir"], Some(dir)).ok()?;
+    let raw = out.trim();
+    let gc = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { dir.join(raw) };
+    let gc = std::fs::canonicalize(&gc).unwrap_or(gc);
+    gc.parent().map(|p| p.to_path_buf())
+}
+
 fn main_root() -> Result<PathBuf> {
-    let out = run_git(&["rev-parse", "--git-common-dir"], None).context("not inside a git repo")?;
-    let gc = std::fs::canonicalize(out.trim()).unwrap_or_else(|_| PathBuf::from(out.trim()));
-    Ok(gc.parent().map(|p| p.to_path_buf()).unwrap_or(gc))
+    let cwd = std::env::current_dir().context("no current dir")?;
+    main_root_of(&cwd).context("not inside a git repo")
 }
 
 /// Shared coordination board at `<main-root>/.wta/board.md`. `wta board` prints it;
@@ -1408,18 +1418,41 @@ pub fn list_branches() -> Result<Vec<String>> {
 
 /// Re-spawn an agent's session in its EXISTING worktree (its session was stopped
 /// or died). Reuses the branch + all uncommitted work.
+/// The repo id an existing worktree belongs to, derived from the worktree itself
+/// (its main repo via `--git-common-dir`) rather than the process cwd — so resume
+/// always recreates the EXACT session/state the agent was created under, no matter
+/// where wta is invoked from. This is what the dashboard's global resume depends on.
+fn repo_of_worktree(wt: &Path) -> Option<String> {
+    main_root_of(wt).map(|root| repo_id_of(&root))
+}
+
+/// Re-spawn an agent's tmux session in its existing worktree under an EXPLICIT repo id
+/// — no dependence on the current directory, so the session name + WTA_REPO + state
+/// exactly match what the dashboard row already tracks (fixes resume across repos and
+/// for duplicate task names).
+pub fn resume_session(repo: &str, task: &str, wt: &Path) -> Result<()> {
+    if !wt.exists() {
+        bail!("no worktree at {} to resume", wt.display());
+    }
+    let idx = status::read_state(repo, task).map(|s| s.index).unwrap_or_else(|| assign_slot(repo));
+    preseed_claude_trust(wt);
+    let session = tmux::session_name(repo, task);
+    let (prog, extra) = agent_argv(repo, task, idx, &resume_args());
+    tmux::new_session(&session, wt, &prog, &extra)?;
+    let _ = status::record(repo, task, "running", &wt.to_string_lossy());
+    Ok(())
+}
+
+/// Resume the agent living at worktree `wt`, resolving its repo id from the worktree
+/// (falling back to the cwd repo). Used by CLI resume-by-path.
 pub fn resume_at(task: &str, wt: &Path) -> Result<()> {
     if !wt.exists() {
         bail!("no worktree at {} to resume", wt.display());
     }
-    let repo = repo_id()?;
-    let idx = status::read_state(&repo, task).map(|s| s.index).unwrap_or_else(|| assign_slot(&repo));
-    preseed_claude_trust(wt);
-    let session = tmux::session_name(&repo, task);
-    let (prog, extra) = agent_argv(&repo, task, idx, &resume_args());
-    tmux::new_session(&session, wt, &prog, &extra)?;
-    let _ = status::record(&repo, task, "running", &wt.to_string_lossy());
-    Ok(())
+    let repo = repo_of_worktree(wt)
+        .or_else(|| repo_id().ok())
+        .context("cannot resolve the repo for this worktree")?;
+    resume_session(&repo, task, wt)
 }
 
 /// Resume by task name (looks up the worktree under the current repo).
@@ -1490,13 +1523,22 @@ pub fn repo_name(root: &Path) -> String {
 pub fn discover_repos() -> Vec<(String, PathBuf)> {
     let mut map: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     for st in status::read_all_states().unwrap_or_default() {
-        if st.cwd.is_empty() {
-            continue;
+        if st.cwd.is_empty() || map.contains_key(&st.repo) {
+            continue; // one correct root per repo id is enough
         }
-        let wt = PathBuf::from(&st.cwd);
-        if let Some(root) = wt.parent().and_then(|p| p.parent()) {
+        let cwd = PathBuf::from(&st.cwd);
+        // Cheap path: `<root>/<subdir>/<task>` → two hops up, accepted only if it's a
+        // MAIN repo (a real `.git` DIR — a linked worktree's `.git` is a file). Falls
+        // back to git for a worktree-subdirectory cwd or a nested worktree layout.
+        let root = cwd
+            .parent()
+            .and_then(|p| p.parent())
+            .filter(|r| r.join(".git").is_dir())
+            .map(|r| r.to_path_buf())
+            .or_else(|| main_root_of(&cwd));
+        if let Some(root) = root {
             if root.exists() {
-                map.entry(st.repo.clone()).or_insert_with(|| root.to_path_buf());
+                map.insert(st.repo.clone(), root);
             }
         }
     }
@@ -2373,6 +2415,33 @@ mod tests {
         assert!(WaitCond::parse("done").is_ok());
         assert!(WaitCond::parse("nonsense").is_err());
         assert!(WaitCond::parse("").is_err());
+    }
+
+    #[test]
+    fn repo_of_worktree_matches_creation_repo_id() {
+        // A linked worktree must resolve to its MAIN repo's id (not its own path, and
+        // not the process cwd) — this is what makes dashboard resume hit the right session.
+        let dir = std::env::temp_dir().join(format!("wta-row-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            std::process::Command::new("git").args(args).current_dir(cwd).output().unwrap();
+        };
+        git(&["init", "-q"], &dir);
+        git(&["config", "user.email", "t@t"], &dir);
+        git(&["config", "user.name", "t"], &dir);
+        git(&["config", "commit.gpgsign", "false"], &dir);
+        std::fs::write(dir.join("f"), "x").unwrap();
+        git(&["add", "-A"], &dir);
+        git(&["commit", "-qm", "init"], &dir);
+        let wt = dir.join(".agents/task1");
+        git(&["worktree", "add", "-q", "-b", "task1", wt.to_str().unwrap()], &dir);
+
+        let main_id = repo_id_of(&dir);
+        assert_eq!(repo_of_worktree(&wt).as_deref(), Some(main_id.as_str()));
+        // NOT the worktree's own id (the bug: deriving repo from the wrong path)
+        assert_ne!(repo_of_worktree(&wt), Some(repo_id_of(&wt)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

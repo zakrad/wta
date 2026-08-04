@@ -90,7 +90,7 @@ enum Modal {
     },
     Confirm(String),
     ForceKill { task: String, unpushed: u32 },
-    Resume(String),
+    Resume { task: String, repo: String, path: PathBuf },
     Push(String),
     BranchPick {
         branches: Vec<String>,
@@ -463,24 +463,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
-        Modal::Resume(task) => {
+        Modal::Resume { task, repo, path } => {
             match key.code {
                 KeyCode::Char('y') => {
-                    let task = task.clone();
+                    let (task, repo, path) = (task.clone(), repo.clone(), path.clone());
                     app.modal = Modal::None;
-                    match app
-                        .rows
-                        .iter()
-                        .find(|r| r.task == task)
-                        .and_then(|r| r.path.clone())
-                    {
-                        Some(p) => {
-                            let root = app.op_root.clone();
-                            if let Err(e) = in_repo(&root, || worktree::resume_at(&task, &p)) {
-                                app.set_err(e);
-                            }
-                        }
-                        None => app.set_err("worktree not found to resume"),
+                    if let Err(e) = worktree::resume_session(&repo, &task, &path) {
+                        app.set_err(e);
                     }
                     refresh(app);
                     load_detail(app);
@@ -694,13 +683,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
         KeyCode::Enter | KeyCode::Char('o') => {
             if let Some(r) = app.selected() {
-                let (alive, session, task, root, has_path) =
-                    (r.alive, r.session.clone(), r.task.clone(), r.root.clone(), r.path.is_some());
-                if alive {
-                    app.attach = Some(session);
-                } else if has_path {
-                    app.op_root = root;
-                    app.modal = Modal::Resume(task);
+                if r.alive {
+                    app.attach = Some(r.session.clone());
+                } else if let Some(path) = r.path.clone() {
+                    // Capture the EXACT agent identity (repo + path), so resume can't
+                    // grab another repo's same-named agent or depend on the cwd.
+                    app.modal = Modal::Resume {
+                        task: r.task.clone(),
+                        repo: r.repo.clone(),
+                        path,
+                    };
                 } else {
                     app.set_err("no session and no worktree to resume");
                 }
@@ -1833,7 +1825,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
-        Modal::Resume(task) => {
+        Modal::Resume { task, .. } => {
             let area = centered(56, 4, f.area());
             f.render_widget(Clear, area);
             let body = vec![
