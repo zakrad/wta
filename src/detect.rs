@@ -37,6 +37,11 @@ struct Rules {
     working: Vec<String>,
     #[serde(default)]
     error: Vec<String>,
+    // A VETO list (herdr's `skip_state_update`): when the pane is showing something
+    // that isn't a live agent turn — an editor overlay, a model picker, a pager — a
+    // match here forces "no opinion" so a menu/scrollback isn't misread as idle/working.
+    #[serde(default)]
+    neutral: Vec<String>,
 }
 
 impl Rules {
@@ -44,9 +49,15 @@ impl Rules {
         self.needs_input.extend(other.needs_input);
         self.working.extend(other.working);
         self.error.extend(other.error);
+        self.neutral.extend(other.neutral);
     }
     fn lowercased(mut self) -> Self {
-        for v in [&mut self.needs_input, &mut self.working, &mut self.error] {
+        for v in [
+            &mut self.needs_input,
+            &mut self.working,
+            &mut self.error,
+            &mut self.neutral,
+        ] {
             for p in v.iter_mut() {
                 *p = p.to_lowercase();
             }
@@ -123,6 +134,19 @@ fn generic() -> Rules {
         .iter()
         .map(|s| s.to_string())
         .collect(),
+        // Veto: the pane is showing an overlay/menu, not a live agent turn — defer to the
+        // caller's pane-hash heuristic instead of guessing. Kept unmistakable so a real
+        // state is never suppressed; extend per engine via ~/.wta/detect/<engine>.json.
+        neutral: [
+            "-- insert --", // an editor (vim/nvim) opened in the pane
+            "-- visual --",
+            "-- normal --",
+            "select a model", // a model-picker menu is open
+            "switch model",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
     }
 }
 
@@ -160,6 +184,7 @@ fn engine_extra(engine: &str) -> Rules {
         needs_input: ni.iter().map(|s| s.to_string()).collect(),
         working: wk.iter().map(|s| s.to_string()).collect(),
         error: er.iter().map(|s| s.to_string()).collect(),
+        neutral: Vec::new(),
     }
 }
 
@@ -217,6 +242,11 @@ pub fn classify(engine: Option<&str>, text: &str) -> Option<PaneState> {
         return None;
     }
     let rules = resolve(engine);
+    // Veto first: if the pane is an editor/menu/pager overlay, give no opinion so the
+    // caller falls back to its pane-hash heuristic (never misreads a menu as idle).
+    if rules.neutral.iter().any(|p| hay.contains(p.as_str())) {
+        return None;
+    }
     if rules.error.iter().any(|p| hay.contains(p.as_str())) {
         return Some(PaneState::Error);
     }
@@ -251,6 +281,17 @@ mod tests {
         // both a spinner and a prompt on screen → the prompt (needs you) wins
         let text = "⠹ working\n❯ 1. Yes\n  2. No";
         assert_eq!(classify(Some("claude"), text), Some(PaneState::NeedsInput));
+    }
+
+    #[test]
+    fn neutral_veto_suppresses_state() {
+        // an editor overlay in the pane must NOT read as needs-input just because it
+        // contains a "(y/n)"-ish string in a buffer; veto → no opinion
+        assert_eq!(classify(None, "editing config\n-- INSERT --\nsave? (y/n)"), None);
+        // a model picker menu (with a ❯ pointer) must not read as needs-input
+        assert_eq!(classify(Some("claude"), "Select a model\n❯ 1. Opus\n  2. Sonnet"), None);
+        // but a genuine prompt with no overlay still classifies
+        assert_eq!(classify(None, "Do you want to proceed? (y/n)"), Some(PaneState::NeedsInput));
     }
 
     #[test]

@@ -619,13 +619,21 @@ Extend any engine with `~/.wta/detect/<engine>.json` (patterns are **appended** 
 the built-ins, matched as case-insensitive substrings of the pane):
 
 ```json
-{ "needs_input": ["apply this patch?"], "working": ["crunching"], "error": ["seat limit reached"] }
+{
+  "needs_input": ["apply this patch?"],
+  "working": ["crunching"],
+  "error": ["seat limit reached"],
+  "neutral": ["fzf > ", "-- more --"]
+}
 ```
 
 The `error` category is for **terminal** failures (auth/quota/login) — an agent
 matching it is treated as fail-closed by `wta wait` (never a false idle) and shown as
 needs-you on the dashboard. Keep it narrow so a transient, self-retrying "overloaded"
-doesn't fail-close a working agent.
+doesn't fail-close a working agent. The `neutral` category is a **veto**: when the pane
+is showing an overlay that isn't a live agent turn (an editor, a model picker, a pager),
+a match here gives *no opinion* so a menu isn't misread as idle/working — built-ins
+cover vim mode-lines and the model picker; add your engine's menus here.
 
 Detection never sends keys — a wrong guess is only a wrong glyph that self-corrects
 next tick — so it's safe to be generous with `working` patterns and tight with
