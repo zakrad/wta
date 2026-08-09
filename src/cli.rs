@@ -209,6 +209,9 @@ pub enum Command {
     Send {
         /// the agent to message
         task: String,
+        /// report delivery as JSON `{task, submitted}` (put --json before the message)
+        #[arg(long)]
+        json: bool,
         /// the message (everything after the task name)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         message: Vec<String>,

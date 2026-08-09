@@ -256,13 +256,13 @@ pub fn pane_is_idle(name: &str) -> bool {
 }
 
 /// Type `text` into a session and submit it, hardened against races with a live
-/// agent TUI: literal → settle → echo-confirm → Enter → submit-confirm. Only
-/// presses Enter once the typed text is confirmed on screen, so a dropped burst
-/// becomes a clean error instead of a half-submitted line. Used by the dashboard
-/// quick-send, the peer relay (`wta send`), and the Telegram bridge.
-pub fn send_text(name: &str, text: &str) -> Result<()> {
-    let before = capture(name).map(|p| norm(&p)).unwrap_or_default();
-
+/// agent TUI: literal → settle → echo-confirm → Enter → **consumption-confirm**. Only
+/// presses Enter once the typed text is confirmed on screen, so a dropped burst becomes
+/// a clean error instead of a half-submitted line. Returns whether the turn was actually
+/// **submitted** (the agent accepted it) vs merely typed — "keystrokes landed in the
+/// pane" is not "the agent consumed the turn" (it may sit at a multiline prompt). Used by
+/// the dashboard quick-send, the peer relay (`wta send`), and the Telegram bridge.
+pub fn send_text(name: &str, text: &str) -> Result<bool> {
     send_literal(name, text)?;
     // let the editor drain the burst before Enter arrives as a distinct event
     sleep(Duration::from_millis(60));
@@ -287,15 +287,32 @@ pub fn send_text(name: &str, text: &str) -> Result<()> {
     if capture(name).map(|p| looks_interactive_dialog(&p)).unwrap_or(false) {
         bail!("send aborted: '{name}' is at a prompt/dialog");
     }
+    // Pane state with the text typed but not yet submitted — the baseline the submit
+    // must move away from.
+    let typed = capture(name).map(|p| norm(&p)).unwrap_or_default();
     send_enter(name)?;
 
-    // if nothing moved at all, the Enter was likely lost — retry once (a 2nd Enter
-    // on an already-empty input is a harmless no-op, so no double-submit risk)
-    sleep(Duration::from_millis(50));
-    if capture(name).map(|p| norm(&p)) == Some(before) {
-        let _ = send_enter(name);
+    // Consumption-confirm: a real submit has a visible effect (input clears, the message
+    // echoes into the transcript, or the agent starts working). If the pane never moves
+    // from the just-typed state, the Enter was swallowed (multiline prompt / a dialog) —
+    // the text landed but the turn wasn't consumed. Poll briefly, then retry Enter once
+    // (harmless no-op on an empty input) before concluding it wasn't submitted.
+    let moved = |base: &str| -> bool {
+        for _ in 0..6 {
+            sleep(Duration::from_millis(100));
+            if capture(name).map(|p| norm(&p)).as_deref() != Some(base) {
+                return true;
+            }
+        }
+        false
+    };
+    if moved(&typed) {
+        return Ok(true);
     }
-    Ok(())
+    let _ = send_enter(name);
+    sleep(Duration::from_millis(150));
+    let submitted = capture(name).map(|p| norm(&p)).as_deref() != Some(typed.as_str());
+    Ok(submitted)
 }
 
 pub fn kill(name: &str) -> Result<()> {

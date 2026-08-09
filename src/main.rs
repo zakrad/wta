@@ -119,7 +119,7 @@ fn main() -> anyhow::Result<()> {
             }
             CronAction::Start { interval } => cron::start(interval)?,
         },
-        Command::Send { task, message } => worktree::send(&task, &message.join(" "))?,
+        Command::Send { task, json, message } => worktree::send(&task, &message.join(" "), json)?,
         Command::Board { entry } => {
             let joined = entry.join(" ");
             worktree::board(if joined.trim().is_empty() { None } else { Some(joined.as_str()) })?

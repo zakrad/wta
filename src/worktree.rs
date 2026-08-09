@@ -757,7 +757,7 @@ pub fn board(entry: Option<&str>) -> Result<()> {
 /// reaches a running agent mid-session. Agents can call `wta send` themselves
 /// (their pane has the wta binary + WTA_* env). REFUSES if the target is at a
 /// dialog (so the message can't silently answer a permission/trust prompt) or busy.
-pub fn send(task: &str, message: &str) -> Result<()> {
+pub fn send(task: &str, message: &str, json: bool) -> Result<()> {
     let msg = message.trim();
     if msg.is_empty() {
         bail!("nothing to send");
@@ -776,11 +776,21 @@ pub fn send(task: &str, message: &str) -> Result<()> {
     }
     let from = std::env::var("WTA_TASK").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "you".into());
     let framed = format!("[wta:{from}] {}", msg.replace('\n', " "));
-    tmux::send_text(&session, &framed)?;
+    let submitted = tmux::send_text(&session, &framed)?;
     // Stamp the delivery so `wta wait --until idle` stays turn-bound: it must wait for
     // the NEW turn to finish, not return on this agent's stale prior-turn idle.
     status::mark_prompt_sent(&repo, task);
-    println!("→ {task}: {}", msg.chars().take(70).collect::<String>());
+    if json {
+        let out = serde_json::json!({ "task": task, "submitted": submitted });
+        println!("{}", serde_json::to_string(&out)?);
+    } else {
+        println!("→ {task}: {}", msg.chars().take(70).collect::<String>());
+    }
+    // Fail loud: the text reached the pane but the agent never accepted the turn (it may
+    // be sitting at a multiline prompt) — a scripted `wta send && next` must not proceed.
+    if !submitted {
+        bail!("'{task}': message typed but the agent didn't accept the turn — check `wta dash`");
+    }
     Ok(())
 }
 

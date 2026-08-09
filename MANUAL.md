@@ -583,7 +583,11 @@ reaches a running agent is the relay** (a typed line into its pane).
   agent's pane. **Agents can call it themselves** (their pane has the `wta` binary
   + `WTA_*` env), so one agent can tell another "I finished auth, rebase." It
   **refuses to send when the target is at a permission/trust dialog** (so a message
-  can't accidentally answer it) or busy.
+  can't accidentally answer it) or busy. It also **confirms the turn was actually
+  consumed** — "keystrokes landed in the pane" isn't "the agent accepted the turn" —
+  and **fails loud (non-zero exit)** if the text landed but wasn't submitted, so a
+  scripted `wta send … && next` won't proceed on a dropped message. `wta send <task>
+  --json <msg>` reports `{task, submitted}` for scripts.
 
 - **Shared board** — `wta board` prints `<repo>/.wta/board.md`; `wta board
   "<claim>"` appends a line (e.g. `owning src/auth/**`). Works from any worktree.
