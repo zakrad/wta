@@ -127,6 +127,17 @@ pub enum Command {
         #[arg(long)]
         effort: Option<String>,
     },
+    /// Show (or scaffold) an agent's checkable spec `.wta/task.md` (acceptance criteria + Final Summary)
+    Task {
+        /// the agent (omit to use the current worktree — an agent can run it on itself)
+        task: Option<String>,
+        /// scaffold a `.wta/task.md` template if absent
+        #[arg(long)]
+        new: bool,
+        /// emit JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Scaffold `.wta/` convention stubs (verify.sh, setup.sh, teardown.sh)
     Init,
     /// Show the resolved agent command per role (model/effort from config + flags)

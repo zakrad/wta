@@ -799,6 +799,17 @@ pub fn handoff(from: &str, new: &str, agent_args: &[String]) -> Result<()> {
     let note = handoff_note(&root, from, &from_branch, prompt.trim());
     // Pass the prompt as the new agent's initial instruction too, so it starts working.
     new_impl(new, agent_args, Some(&from_branch), Some(&note))?;
+    // Carry the checkable spec forward — the durable context (goal + acceptance criteria
+    // + plan) that a freeform note can't hold. Git-excluded in the new worktree too.
+    let (from_wt, new_wt) = (worktrees_dir(&root).join(from), worktrees_dir(&root).join(new));
+    if from_wt.join(TASK_FILE).exists() && !new_wt.join(TASK_FILE).exists() {
+        if let Some(parent) = new_wt.join(TASK_FILE).parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if std::fs::copy(from_wt.join(TASK_FILE), new_wt.join(TASK_FILE)).is_ok() {
+            exclude_in_worktree(&new_wt, &[TASK_FILE.to_string()]);
+        }
+    }
     println!("handed off '{from}' → '{new}' (branched from {from_branch}; context in CLAUDE.local.md)");
     if let Some(hint) = instructions_hint() {
         eprintln!("{hint}");
@@ -1170,12 +1181,161 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool, usd: bool, cumulat
     Ok(())
 }
 
+// ---- `.wta/task.md` — a durable, checkable per-agent spec (context that survives) ----
+
+/// Parsed state of a worktree's `.wta/task.md`: how many acceptance criteria are
+/// checked, which remain, and whether a Final Summary was written. This is the
+/// machine-readable half of "done" — verify.sh proves the build/tests; the checked
+/// acceptance criteria prove the agent met the *intent* it was given.
+pub struct TaskSpec {
+    pub total_ac: u32,
+    pub checked_ac: u32,
+    pub unchecked: Vec<String>,
+    pub has_final_summary: bool,
+}
+
+/// Relative path of the per-agent spec inside a worktree.
+const TASK_FILE: &str = ".wta/task.md";
+
+/// Parse a `.wta/task.md` body. Acceptance criteria are Markdown task-list items
+/// (`- [ ]` / `- [x]`) under an `## Acceptance Criteria` heading; the Final Summary is
+/// any non-empty prose under `## Final Summary`. Returns None only if the text has no
+/// acceptance-criteria section at all (so a spec-less agent is never gated).
+fn parse_task_spec(text: &str) -> Option<TaskSpec> {
+    #[derive(PartialEq)]
+    enum Sec {
+        Ac,
+        Final,
+        Other,
+    }
+    let mut sec = Sec::Other;
+    let mut saw_ac_heading = false;
+    let (mut total, mut checked) = (0u32, 0u32);
+    let mut unchecked = Vec::new();
+    let mut has_final_summary = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(h) = line.strip_prefix("##") {
+            let h = h.trim().to_ascii_lowercase();
+            sec = if h.starts_with("acceptance criteria") {
+                saw_ac_heading = true;
+                Sec::Ac
+            } else if h.starts_with("final summary") {
+                Sec::Final
+            } else {
+                Sec::Other
+            };
+            continue;
+        }
+        match sec {
+            Sec::Ac => {
+                let l = line.to_ascii_lowercase();
+                if l.starts_with("- [x]") || l.starts_with("* [x]") {
+                    total += 1;
+                    checked += 1;
+                } else if l.starts_with("- [ ]") || l.starts_with("* [ ]") {
+                    total += 1;
+                    let t = line.trim_start_matches(['-', '*', ' ', '[', ']']).trim();
+                    unchecked.push(t.to_string());
+                }
+            }
+            Sec::Final => {
+                // any real prose (not an empty line or an HTML/template comment) counts
+                if !line.is_empty() && !line.starts_with("<!--") {
+                    has_final_summary = true;
+                }
+            }
+            Sec::Other => {}
+        }
+    }
+    if !saw_ac_heading {
+        return None;
+    }
+    Some(TaskSpec {
+        total_ac: total,
+        checked_ac: checked,
+        unchecked,
+        has_final_summary,
+    })
+}
+
+/// Read + parse a worktree's `.wta/task.md`, if present.
+pub fn read_task_spec(wt: &Path) -> Option<TaskSpec> {
+    parse_task_spec(&std::fs::read_to_string(wt.join(TASK_FILE)).ok()?)
+}
+
+const TASK_TEMPLATE: &str = "# <task title>\n\n## Acceptance Criteria\n- [ ] #1 <a testable outcome — what \"done\" means>\n\n## Plan\n- <step>\n\n## Notes\n<!-- append decisions / blockers as you go -->\n\n## Final Summary\n<!-- fill at the end: what changed, why, how it was verified -->\n";
+
+/// Scaffold `.wta/task.md` in a worktree (idempotent) and keep it OUT of commits/PRs
+/// (git-excluded, like the injected context files). Returns true if newly written.
+fn scaffold_task(wt: &Path) -> bool {
+    let path = wt.join(TASK_FILE);
+    if path.exists() {
+        return false;
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if std::fs::write(&path, TASK_TEMPLATE).is_ok() {
+        exclude_in_worktree(wt, &[TASK_FILE.to_string()]);
+        true
+    } else {
+        false
+    }
+}
+
+/// `wta task [<task>] [--new] [--json]` — show (or scaffold) an agent's checkable spec.
+/// With no task name it uses the current worktree, so an agent can run it on itself.
+pub fn task_cmd(task: Option<&str>, new: bool, json: bool) -> Result<()> {
+    let wt = match task {
+        Some(t) => worktrees_dir(&repo_root()?).join(t),
+        None => std::env::current_dir()?,
+    };
+    if !wt.exists() {
+        bail!("no worktree at {}", wt.display());
+    }
+    if new && scaffold_task(&wt) {
+        println!("scaffolded {}", wt.join(TASK_FILE).display());
+    }
+    match read_task_spec(&wt) {
+        None => {
+            if json {
+                println!("null");
+            } else {
+                println!(
+                    "no {TASK_FILE} — create one with `wta task {} --new`",
+                    task.unwrap_or("<task>")
+                );
+            }
+        }
+        Some(s) => {
+            if json {
+                let out = serde_json::json!({
+                    "total_ac": s.total_ac,
+                    "checked_ac": s.checked_ac,
+                    "has_final_summary": s.has_final_summary,
+                    "unchecked": s.unchecked,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!("acceptance criteria: {}/{} checked", s.checked_ac, s.total_ac);
+                for u in &s.unchecked {
+                    println!("  ☐ {u}");
+                }
+                let fs = if s.has_final_summary { "written" } else { "empty" };
+                println!("final summary: {fs}");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Re-prompt an agent with the output of `.wta/verify.sh` until it passes (exit 0)
-/// or a **termination guard** trips — an automated maker/checker fix loop that is
-/// safe to leave running. Three guards stop a loop that would otherwise bill
-/// forever: `max` attempts, a wall-clock `timeout_secs` budget (0 = off), and a
-/// no-progress detector (`no_progress` = stop if the agent leaves its diff unchanged
-/// that many attempts running; 0 = off). Foreground; watch the agent in `wta dash`.
+/// **and** every `.wta/task.md` acceptance criterion is checked — or a **termination
+/// guard** trips. An automated maker/checker fix loop safe to leave running. Three
+/// guards stop a loop that would otherwise bill forever: `max` attempts, a wall-clock
+/// `timeout_secs` budget (0 = off), and a no-progress detector (`no_progress` = stop if
+/// the agent leaves its diff unchanged that many attempts running; 0 = off).
 pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, agent_args: &[String]) -> Result<()> {
     if max == 0 {
         bail!("--max must be at least 1 (it's the attempt cap, not 'unlimited')");
@@ -1223,16 +1383,44 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
         // Cap verify at the remaining budget so a hung check can't wedge the loop past
         // --timeout (unbounded only when no budget is set, to respect long suites).
         let (code, out) = run_verify_sh(&wt, &suite, remaining(&start));
-        if code == 0 {
-            println!("✓ verify passed on attempt {attempt} — {}", crate::cost::short(&crate::cost::for_worktree(&wt)));
-            return Ok(());
-        }
-        let tail = tail_lines(&out, 40);
-        println!("✗ verify failed (exit {code}) — asking '{task}' to fix");
-        let msg = format!(
-            "the verify suite failed (exit {code}) — that's `.wta/verify.sh` and/or a locked check in `.wta/checks/`. Fix the underlying cause and finish. Last output: {}",
-            tail.replace('\n', " ⏎ "),
-        );
+
+        // What to re-prompt the agent with this round — None means we're done.
+        let msg = if code != 0 {
+            let tail = tail_lines(&out, 40);
+            println!("✗ verify failed (exit {code}) — asking '{task}' to fix");
+            Some(format!(
+                "the verify suite failed (exit {code}) — that's `.wta/verify.sh` and/or a locked check in `.wta/checks/`. Fix the underlying cause and finish. Last output: {}",
+                tail.replace('\n', " ⏎ "),
+            ))
+        } else {
+            // verify is green — but if a `.wta/task.md` lists acceptance criteria, the
+            // agent isn't done until it has met and CHECKED every one (intent, not just
+            // build). No spec, or all AC checked, means done.
+            match read_task_spec(&wt) {
+                Some(s) if s.total_ac > 0 && s.checked_ac < s.total_ac => {
+                    println!(
+                        "✓ verify passed, but {}/{} acceptance criteria unchecked — asking '{task}' to finish",
+                        s.total_ac - s.checked_ac,
+                        s.total_ac
+                    );
+                    Some(format!(
+                        "verify.sh passes, but these acceptance criteria in `.wta/task.md` are still unchecked — complete each, confirm it holds, then check it off (`- [x]`): {}",
+                        s.unchecked.join("; "),
+                    ))
+                }
+                _ => None,
+            }
+        };
+        let msg = match msg {
+            None => {
+                println!(
+                    "✓ verify passed + acceptance criteria met on attempt {attempt} — {}",
+                    crate::cost::short(&crate::cost::for_worktree(&wt))
+                );
+                return Ok(());
+            }
+            Some(m) => m,
+        };
         drive(&session, &msg)?;
         // Budget guard again — the drive above can take a while, so re-check before looping.
         if over_budget(&start) {
@@ -1597,6 +1785,9 @@ pub fn ls(json: bool) -> Result<()> {
                 let st = status::read_state(&repo, &w.task);
                 let base = status::base_of(&repo, &w.task).unwrap_or_else(|| default_base.clone());
                 let (added, deleted) = changes_vs_base(&w.path, &base);
+                let ac = read_task_spec(&w.path).map(|s| {
+                    serde_json::json!({ "checked": s.checked_ac, "total": s.total_ac })
+                });
                 serde_json::json!({
                     "task": w.task,
                     "alive": tmux::has_session(&tmux::session_name(&repo, &w.task)),
@@ -1608,6 +1799,7 @@ pub fn ls(json: bool) -> Result<()> {
                     "session": tmux::session_name(&repo, &w.task),
                     "added": added,
                     "deleted": deleted,
+                    "ac": ac,
                 })
             })
             .collect();
@@ -2415,6 +2607,25 @@ mod tests {
         assert!(WaitCond::parse("done").is_ok());
         assert!(WaitCond::parse("nonsense").is_err());
         assert!(WaitCond::parse("").is_err());
+    }
+
+    #[test]
+    fn task_spec_parses_acceptance_criteria_and_final_summary() {
+        let md = "# Add auth\n\n## Acceptance Criteria\n- [x] #1 login works\n- [ ] #2 logout works\n- [ ] #3 session persists\n\n## Plan\n- do it\n\n## Final Summary\n<!-- fill later -->\n";
+        let s = parse_task_spec(md).unwrap();
+        assert_eq!(s.total_ac, 3);
+        assert_eq!(s.checked_ac, 1);
+        assert_eq!(s.unchecked.len(), 2);
+        assert!(!s.has_final_summary); // only an HTML comment → still empty
+
+        // a written Final Summary counts
+        let done = "## Acceptance Criteria\n- [x] #1 ok\n## Final Summary\nShipped it; tests green.\n";
+        let s2 = parse_task_spec(done).unwrap();
+        assert_eq!((s2.checked_ac, s2.total_ac), (1, 1));
+        assert!(s2.has_final_summary);
+
+        // no acceptance-criteria section → not a spec (never gates)
+        assert!(parse_task_spec("# just notes\nsome text").is_none());
     }
 
     #[test]

@@ -89,6 +89,7 @@ fn main() -> anyhow::Result<()> {
         Command::Review { builder, by, model, effort } => {
             worktree::review(&builder, by.as_deref(), model.as_deref(), effort.as_deref())?
         }
+        Command::Task { task, new, json } => worktree::task_cmd(task.as_deref(), new, json)?,
         Command::Init => worktree::init()?,
         Command::Roles => roles::print_roles(worktree::repo_root().ok().as_deref()),
         Command::Supervise { here, interval, stuck_secs } => {

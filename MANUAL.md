@@ -11,6 +11,7 @@ how to use each feature on its own.
 - [Verification gate](#verification-gate) · `.wta/verify.sh`
 - [Cross-agent review](#cross-agent-review) · `review`
 - [Loop until green](#loop-until-green) · `loop`
+- [Task spec](#task-spec) · `task`, acceptance criteria, context migration
 - [Locked regression checks](#locked-regression-checks) · `lock`
 - [Roles — model & effort](#roles--model--effort) · `roles`
 - [Cost & spend](#cost--spend) · `cost`, charts
@@ -265,6 +266,45 @@ wta matrix
 `idle` / `needs-input` require the Claude hooks (`wta install-hooks`); without them
 only `exited` / `done` (via live session liveness) resolve. Every poll also checks
 tmux liveness, so a crashed agent resolves instead of hanging forever.
+
+---
+
+## Task spec
+
+`.wta/task.md` is an optional, per-agent **checkable contract** — the durable context
+that survives a compaction, a `resume`, or a `handoff`, where a freeform note can't.
+`verify.sh` proves the *build/tests*; the task spec proves the agent met the **intent**
+it was given.
+
+```sh
+wta task fix-auth --new     # scaffold .wta/task.md (git-excluded — never lands in a PR)
+wta task fix-auth           # show acceptance-criteria progress + Final Summary status
+wta task fix-auth --json    # { total_ac, checked_ac, has_final_summary, unchecked:[…] }
+wta task                    # no name = the current worktree (an agent runs it on itself)
+```
+
+The file is plain Markdown; only two sections are load-bearing:
+
+```markdown
+## Acceptance Criteria
+- [ ] #1 a testable outcome — what "done" means
+- [x] #2 another one, already met
+
+## Final Summary
+<!-- filled at the end: what changed, why, how it was verified -->
+```
+
+What reads it:
+- **`wta loop`** — a loop is done only when `verify.sh` passes **and** every acceptance
+  criterion is checked. Verify green with unchecked criteria re-prompts the agent to
+  finish and check them off, so "green" means *met the reviewed intent*, not just
+  "the script exited 0".
+- **`wta handoff`** — carries the spec into the new agent (context migration), so the
+  successor inherits the goal + criteria, not just the committed code.
+- **`wta ls --json`** — includes an `ac: {checked,total}` field per agent.
+
+It's opt-in (nothing happens until a `.wta/task.md` exists) and git-excluded per
+worktree, so it never clutters a commit or a PR.
 
 ---
 
