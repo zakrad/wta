@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs};
 use ratatui::{Frame, Terminal};
 
 use ansi_to_tui::IntoText;
@@ -1479,11 +1479,36 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_modal(f, app);
 }
 
+/// A compact glyph rollup of a set of agents by status (`◐3 ●2 ▲1 ✗1`) — the fleet's
+/// at-a-glance health line. Only non-zero buckets are shown; empty when there are none.
+fn status_summary<'a>(rows: impl Iterator<Item = &'a Row>) -> String {
+    let (mut run, mut rdy, mut need, mut merged, mut exit) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    for r in rows {
+        match r.status {
+            Status::Running => run += 1,
+            Status::Ready => rdy += 1,
+            Status::NeedsInput => need += 1,
+            Status::Merged => merged += 1,
+            Status::Exited => exit += 1,
+            Status::Idle => {}
+        }
+    }
+    [(run, '◐'), (rdy, '●'), (need, '▲'), (merged, '✓'), (exit, '✗')]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, g)| format!("{g}{n}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn render_list(f: &mut Frame, app: &App, area: Rect) {
+    let base = if app.global { "Agents · all repos" } else { "Instances" };
+    let sum = status_summary(app.rows.iter());
+    let title = if sum.is_empty() { format!(" {base} ") } else { format!(" {base} · {sum} ") };
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::ALL).border_type(BorderType::Rounded)
         .border_style(Style::default().fg(HL))
-        .title(if app.global { " Agents · all repos " } else { " Instances " })
+        .title(title)
         .title_style(
             Style::default()
                 .bg(GREEN)
@@ -1497,10 +1522,10 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
     for (i, r) in app.rows.iter().enumerate() {
         // repo header before each group (global tree only)
         if app.global && last_repo.as_deref() != Some(r.repo.as_str()) {
-            let n = app.rows.iter().filter(|x| x.repo == r.repo).count();
+            let sub = status_summary(app.rows.iter().filter(|x| x.repo == r.repo));
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(format!("▸ {} ", r.repo_name), Style::default().fg(GREEN_BRIGHT).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("({n})"), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("({sub})"), Style::default().fg(Color::DarkGray)),
             ])));
             last_repo = Some(r.repo.clone());
         }
@@ -1584,7 +1609,7 @@ fn render_right(f: &mut Frame, app: &mut App, area: Rect) {
         None => " agent ".to_string(),
     };
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::ALL).border_type(BorderType::Rounded)
         .border_style(Style::default().fg(HL))
         .title(title);
     let inner = block.inner(area);
@@ -1755,7 +1780,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             };
             let p = Paragraph::new(format!("{name}▏")).block(
                 Block::default()
-                    .borders(Borders::ALL)
+                    .borders(Borders::ALL).border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(GREEN))
                     .title(title),
             );
@@ -1768,7 +1793,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(GREEN))
                         .title(format!(" prompt for '{task}' (Enter starts, Esc cancels) ")),
                 );
@@ -1790,7 +1815,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new(body).block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(RED))
                         .title(" confirm "),
                 ),
@@ -1818,7 +1843,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new(body).block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(RED))
                         .title(" force kill "),
                 ),
@@ -1840,7 +1865,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new(body).block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(HL))
                         .title(" resume "),
                 ),
@@ -1864,7 +1889,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new(body).block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(HL))
                         .title(" push "),
                 ),
@@ -1908,7 +1933,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new(lines).block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(HL))
                         .title(" base a new agent on a branch (↑↓ Enter, Esc) "),
                 ),
@@ -1923,7 +1948,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                     .wrap(ratatui::widgets::Wrap { trim: false })
                     .block(
                         Block::default()
-                            .borders(Borders::ALL)
+                            .borders(Borders::ALL).border_type(BorderType::Rounded)
                             .border_style(Style::default().fg(GREEN))
                             .title(format!(" send to '{task}' (Enter sends, Esc cancels) ")),
                     ),
@@ -1959,7 +1984,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new(lines).block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(HL))
                         .title(" new agent — pick a repo (↑↓ Enter, Esc) "),
                 ),
@@ -1974,7 +1999,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new(lines.clone()).block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(HL))
                         .title(" mergeability — do branches conflict? (any key closes) "),
                 ),
@@ -2026,7 +2051,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new(body).block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(HL))
                         .title(" wta — keys "),
                 ),
@@ -2083,6 +2108,18 @@ mod tests {
             path: Some(PathBuf::from("/tmp/x")),
             cost: crate::cost::Usage::default(),
         }
+    }
+
+    #[test]
+    fn status_summary_rolls_up_by_glyph() {
+        let rows = vec![
+            row("a", Status::Running, true, 0, 0),
+            row("b", Status::Running, true, 0, 0),
+            row("c", Status::NeedsInput, true, 0, 0),
+            row("d", Status::Exited, false, 0, 0),
+        ];
+        assert_eq!(status_summary(rows.iter()), "◐2 ▲1 ✗1");
+        assert_eq!(status_summary(Vec::<Row>::new().iter()), "");
     }
 
     #[test]
