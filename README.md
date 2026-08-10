@@ -16,9 +16,11 @@ Most tools stop at “spin up N agents in isolation.” wta is the **harness aro
 loop** — it drives agents to done, lets you move between them, and shows what they cost:
 
 - **Close the loop** — give it a goal and a `verify.sh`; wta re-prompts the agent until
-  the tests pass, then locks the fix in as a check every future agent must clear.
+  the tests pass — and, if you list acceptance criteria in `.wta/task.md`, until every
+  one is checked — then locks the fix in as a check every future agent must clear.
 - **Work across a fleet** — run many agents at once, switch between them from one
-  dashboard, and hand off one agent’s context into a fresh one.
+  dashboard, hand off one agent’s context into a fresh one, and `wta wait` on any agent
+  to script whole pipelines from the shell.
 - **Analyze the run** — per-agent tokens and estimated cost, with usage-over-time
   charts so you can see where the budget went and compare agents.
 
@@ -64,7 +66,8 @@ output until it passes, with guards (`--max`, `--no-progress`, `--timeout`). `wt
 fanout <name> -n N` (run N agents on one prompt, compare, keep the winner) scale you
 out; the **global dashboard** and `wta attach` / `i` quick-send move you between agents;
 `wta handoff <from> <new>` migrates one agent’s context into a fresh one, and `wta send`
-/ `wta board` let agents coordinate.
+/ `wta board` let agents coordinate. `wta wait <task> --until done|idle|needs-input`
+blocks (with exit codes) so you can sequence agents from a plain shell script or Makefile.
 
 **Analyze the run** — `wta cost [<task>] --chart` shows per-agent tokens and an
 estimated spend with a usage-over-time chart (rate or cumulative, tokens or `$`) and a
@@ -109,6 +112,10 @@ wta needs **tmux** and **git ≥ 2.20** (native Windows means WSL). The core is
 Code-specific and degrade gracefully otherwise: the `▲ needs-input` status and
 finish/needs-input notifications (Claude Code hooks), the auto-dismiss of the
 folder-trust prompt, and the estimated `$` in `wta cost` (token counts stay exact).
+
+By default agents run with `--dangerously-skip-permissions` (worktrees isolate *files*,
+not the machine); `wta guard on` blocks destructive commands (force-push, `rm -rf`,
+`reset --hard`), and `wta new --safe` keeps per-tool prompts.
 
 ## Configuration
 

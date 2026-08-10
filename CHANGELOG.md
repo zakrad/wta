@@ -4,6 +4,35 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-08-10
+
+### Added
+- **`wta wait <task>… --until idle|needs-input|exited|done`** — block until agent(s)
+  reach a state, with distinct exit codes (0/3/4/5/124) so shell scripts and Makefiles
+  can sequence agents. `--all`/`--any`/`--timeout`/`--poll`.
+- **Agent-agnostic status detection** (screen manifests) — non-Claude agents get live
+  `working`/`needs-input`/`error` state from the pane, extensible via
+  `~/.wta/detect/<engine>.json`. `wta detect <task>` inspects it.
+- **`wta guard`** — opt-in safety hook that blocks destructive commands (force-push,
+  `rm -rf`, `reset --hard`, `git clean -fdx`) per agent; `~/.wta/guard.d/*.sh` extend it.
+- **`.wta/task.md`** — an optional checkable spec; `wta loop` is done only when
+  `verify.sh` passes **and** every acceptance criterion is checked; `wta handoff` carries
+  it forward. `wta task [--new] [--json]`.
+- **`.wta/worktree-include`** — seed gitignored files (`.env.local`, certs, …) into each
+  new worktree.
+- **`wta doctor`** — health check: resolved engine/version per role, tmux/git, hooks.
+- **`--json`** on `ls`, `matrix`, and `send` (with a `submitted` field).
+- **Dashboard** — a fleet-health rollup in the sidebar title + per-repo counts; rounded
+  borders.
+
+### Changed
+- `wta send` confirms the agent **consumed the turn** (not just that keystrokes landed)
+  and fails loud otherwise.
+
+### Fixed
+- **Dashboard resume** now re-spawns the exact selected agent (repo-scoped, cwd-
+  independent) — fixes "nothing happens / no session" and same-named agents across repos.
+
 ## [0.1.35] — 2026-07-18
 
 ### Changed
