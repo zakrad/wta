@@ -106,7 +106,6 @@ enum Modal {
         sel: usize,
     },
     Matrix(Vec<Line<'static>>),
-    Chart(Vec<Line<'static>>),
     QuickSend {
         task: String,
         session: String,
@@ -191,6 +190,8 @@ struct App {
     scrollback: Option<String>,           // Some => Preview scroll mode: full (colored) history snapshot
     prev_status: HashMap<String, Status>, // last-seen status per task, for transition detection
     attention: HashSet<String>,           // agents that finished / need input and haven't been viewed
+    chart: Vec<Line<'static>>,            // selected agent's tokens-over-time chart (table overlay)
+    chart_session: String,                // which agent `chart` was computed for (lazy recompute)
 }
 
 impl App {
@@ -224,6 +225,8 @@ impl App {
             scrollback: None,
             prev_status: HashMap::new(),
             attention: HashSet::new(),
+            chart: Vec::new(),
+            chart_session: String::new(),
         }
     }
     fn selected(&self) -> Option<&Row> {
@@ -621,7 +624,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
-        Modal::Matrix(_) | Modal::Chart(_) | Modal::Help => {
+        Modal::Matrix(_) | Modal::Help => {
             app.modal = Modal::None;
             return Ok(false);
         }
@@ -852,12 +855,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 }
             }
         }
-        // on-demand cost chart for the selected agent (computed only when asked)
-        KeyCode::Char('c') => {
-            if let Some(path) = app.selected().and_then(|r| r.path.clone()) {
-                app.modal = Modal::Chart(chart_lines(&path));
-            }
-        }
         // quick-send one line to the selected agent, gated so we never inject
         // into a busy/streaming pane (only when it's idle at its prompt = Ready).
         KeyCode::Char('i') => match app.selected() {
@@ -893,7 +890,7 @@ fn chart_lines(wt: &Path) -> Vec<Line<'static>> {
         return vec![Line::styled("no usage recorded yet", Style::default().fg(Color::DarkGray))];
     }
     let vals: Vec<f64> = tl.iter().map(|s| s.delta_tokens as f64).collect();
-    let (bars, max) = crate::cost::barchart(&vals, 60, 10, false);
+    let (bars, max) = crate::cost::barchart(&vals, 92, 8, false);
     let total: u64 = tl.iter().map(|s| s.delta_tokens).sum();
     let mut out: Vec<Line<'static>> = vec![Line::styled(
         format!(
@@ -1588,12 +1585,28 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_menu(f, app, root[2]);
     render_err(f, app, root[3]);
     // The fleet table is an OVERLAY over the split (lazygit-style; esc/q/t close it),
-    // sized to its content so it doesn't leave a big empty box with few agents.
+    // sized to its content, with the selected agent's tokens-over-time chart BELOW it
+    // (btop-style). The chart is recomputed lazily only when the selection changes.
     if app.view == View::Table {
+        if let Some(r) = app.rows.get(app.sel) {
+            if app.chart_session != r.session {
+                app.chart_session = r.session.clone();
+                app.chart = r.path.clone().map(|p| chart_lines(&p)).unwrap_or_default();
+            }
+        }
         let ta = root[1];
+        let chart_h = 12u16;
+        let table_h = app.rows.len() as u16 + 3; // header + 2 borders + rows
         let w = 101u16.min(ta.width.saturating_sub(2));
-        let h = (app.rows.len() as u16 + 3).min(ta.height); // header + 2 borders + rows
-        render_table(f, app, centered(w, h, ta));
+        let h = (table_h + chart_h).min(ta.height);
+        let area = centered(w, h, ta);
+        f.render_widget(Clear, area);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(chart_h)])
+            .split(area);
+        render_table(f, app, parts[0]);
+        render_chart_panel(f, app, parts[1]);
     }
     render_modal(f, app);
 }
@@ -1765,6 +1778,32 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
         st.select(Some(app.sel.min(app.rows.len().saturating_sub(1))));
     }
     f.render_stateful_widget(table, area, &mut st);
+}
+
+/// The chart panel beneath the fleet table — the selected agent's tokens-over-time
+/// bars (precomputed in `app.chart`, recomputed on selection change).
+fn render_chart_panel(f: &mut Frame, app: &App, area: Rect) {
+    f.render_widget(Clear, area);
+    let title = app
+        .rows
+        .get(app.sel)
+        .map(|r| format!(" {} · tokens over time ", r.task))
+        .unwrap_or_else(|| " tokens over time ".to_string());
+    let body = if app.chart.is_empty() {
+        vec![Line::styled("  no usage recorded yet", Style::default().fg(Color::DarkGray))]
+    } else {
+        app.chart.clone()
+    };
+    f.render_widget(
+        Paragraph::new(body).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(HL))
+                .title(title),
+        ),
+        area,
+    );
 }
 
 fn render_list(f: &mut Frame, app: &App, area: Rect) {
@@ -2274,22 +2313,6 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
-        Modal::Chart(lines) => {
-            let h = (lines.len() as u16 + 2).min(f.area().height);
-            let w = 66u16.min(f.area().width);
-            let area = centered(w, h, f.area());
-            f.render_widget(Clear, area);
-            f.render_widget(
-                Paragraph::new(lines.clone()).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(HL))
-                        .title(" tokens over time — this agent (any key closes) "),
-                ),
-                area,
-            );
-        }
         Modal::Help => {
             let area = centered(56, 23, f.area());
             f.render_widget(Clear, area);
@@ -2306,10 +2329,9 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("j / k", "move up / down"),
                 k("gg / G", "jump to top / bottom"),
                 k("Ctrl-d/u", "half-page down / up"),
-                k("t", "toggle list+preview ⇄ fleet table"),
                 k("J / K", "reorder down / up"),
+                k("t", "fleet table + per-agent chart (esc/q closes)"),
                 k("m", "mergeability matrix (conflict preview)"),
-                k("c", "tokens-over-time chart for this agent"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("i", "send one line to the agent (when ● ready)"),
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
@@ -2409,9 +2431,10 @@ mod tests {
             row("auth", Status::Running, true, 40, 4),
             row("flaky", Status::NeedsInput, true, 0, 0),
         ];
-        let screen = render_to_string(&mut app, 100, 12);
+        let screen = render_to_string(&mut app, 100, 22);
         println!("\n{screen}\n");
         assert!(screen.contains("TASK"));
+        assert!(screen.contains("tokens over time"));
         assert!(screen.contains("AGE"));
         assert!(screen.contains("auth"));
         assert!(screen.contains("Agents"));
