@@ -81,9 +81,14 @@ a PR against the agent’s base. (`wta matrix` also previews which branches conf
 
 ## Dashboard
 
-Keys: `n`/`N` new · `b` new from a branch · `s` stop · `D` kill · `p` push/PR ·
-`v` run checks · `e` open in your editor · `J`/`K` reorder · `Shift+↑`/`↓` scroll ·
-`q` quit. The Preview keeps the agent’s **real colors** — no need to attach.
+A k9s-style top band shows fleet health at a glance. Press **`t`** to toggle between
+the list+preview split and a full-width **fleet table** (sortable-looking columns:
+status, base, tokens, `$`, changes, acceptance-criteria, age). **`e`** opens the
+worktree in **nvim in a new tmux window** (the dashboard keeps running).
+
+Keys: `j`/`k` move · `gg`/`G` top/bottom · `Ctrl-d`/`u` half-page · `t` table · `↵`
+attach · `i` send · `n`/`N` new · `b` from a branch · `s` stop · `D` kill · `p` push/PR ·
+`v` checks · `e` edit · `J`/`K` reorder · `tab` Preview/Diff · `?` help · `q` quit.
 
 Status glyphs: `⠋ running · ● ready · ▲ needs input · ◆ review (finished, unseen) · ✓ merged · ✗ exited`.
 

@@ -2048,8 +2048,30 @@ pub fn is_gui_editor(cmd: &str) -> bool {
     )
 }
 
-/// `wta open <task>` — open the agent's worktree in the editor (foreground; GUI
-/// apps return immediately, terminal editors run until you quit).
+/// If the user is inside their OWN tmux, open `cmd` in a NEW WINDOW rooted at `wt`
+/// (non-blocking — the dashboard / current pane stays put; switch back with your tmux
+/// keys). Uses the user's default tmux server (from `$TMUX`), never wta's `-L wta`
+/// socket. Returns true if the window was created; false (a no-op) when not in tmux.
+pub fn open_editor_window(cmd: &str, wt: &Path) -> bool {
+    if std::env::var("TMUX").is_err() {
+        return false;
+    }
+    let name = wt.file_name().and_then(|s| s.to_str()).unwrap_or("wta");
+    Command::new("tmux")
+        .arg("new-window")
+        .arg("-c")
+        .arg(wt)
+        .args(["-n", name, "sh", "-c"])
+        .arg(cmd)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// `wta open <task>` — open the agent's worktree in the editor. Inside tmux this pops
+/// the editor into a NEW WINDOW (non-blocking); otherwise it runs in the foreground
+/// (GUI apps return immediately, terminal editors run until you quit). Force the
+/// foreground path with `WTA_OPEN_INLINE=1`.
 pub fn open(task: &str) -> Result<()> {
     let root = repo_root()?;
     let wt = worktrees_dir(&root).join(task);
@@ -2057,6 +2079,11 @@ pub fn open(task: &str) -> Result<()> {
         bail!("no worktree for '{task}'");
     }
     let cmd = editor_cmd().context("set WTA_OPEN_CMD or $EDITOR to an editor (e.g. nvim, code)")?;
+    let forced_inline = std::env::var("WTA_OPEN_INLINE").ok().as_deref() == Some("1");
+    if !is_gui_editor(&cmd) && !forced_inline && open_editor_window(&cmd, &wt) {
+        println!("opened '{task}' in a new tmux window");
+        return Ok(());
+    }
     let mut it = cmd.split_whitespace();
     let prog = it.next().unwrap();
     let args: Vec<&str> = it.collect();

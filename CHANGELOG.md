@@ -23,8 +23,10 @@ All notable changes to **wta** are documented here. The format is based on
 - **`wta doctor`** — health check: resolved engine/version per role, tmux/git, hooks.
 - **`--json`** on `ls`, `matrix`, and `send` (with a `submitted` field).
 - **Dashboard (k9s-style)** — a top summary band (scope · agent count · colored status
-  rollup · fleet spend), per-agent token-burn bars, a status rollup in the sidebar title
-  + per-repo counts, and rounded borders.
+  rollup · fleet spend); a **fleet table view** (toggle `t`) with aligned columns
+  (status/base/tokens/`$`/changes/AC/age); per-agent token-burn bars; per-repo counts;
+  rounded borders; **vim keys** (`gg`/`G`, `Ctrl-d`/`u`); and `e` opens the worktree in
+  a **new tmux window** (nvim) instead of suspending the dashboard.
 
 ### Changed
 - `wta send` confirms the agent **consumed the turn** (not just that keystrokes landed)

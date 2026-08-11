@@ -78,6 +78,14 @@ enum Tab {
     Diff,
 }
 
+/// Dashboard layout: `Split` = the master-detail list + live Preview/Diff (watch one
+/// agent); `Table` = a full-width, column-aligned fleet grid (k9s-style — scan many).
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Split,
+    Table,
+}
+
 enum Modal {
     None,
     NewTask {
@@ -135,6 +143,8 @@ struct Row {
     alive: bool,
     path: Option<PathBuf>,
     cost: crate::cost::Usage,
+    ac: Option<(u32, u32)>, // .wta/task.md acceptance criteria (checked, total)
+    updated_unix: u64,      // last status write — for the table's AGE column
 }
 
 /// A `.wta/verify.sh` run for one agent. Runs async (spawn + poll) so the repo's
@@ -151,6 +161,8 @@ enum Check {
 }
 
 struct App {
+    view: View,   // Split (list + preview) or Table (full-width fleet grid)
+    pending_g: bool, // saw a `g` — next `g` jumps to the top (vim gg)
     global: bool, // true = show every repo's agents as a tree; false = current repo only
     repo: String, // launch repo id (current-repo mode + the "current" repo default)
     root: PathBuf, // launch repo root
@@ -182,6 +194,8 @@ struct App {
 impl App {
     fn new() -> Self {
         App {
+            view: View::Split,
+            pending_g: false,
             global: false,
             repo: worktree::repo_id().unwrap_or_default(),
             root: worktree::repo_root().unwrap_or_default(),
@@ -648,9 +662,30 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
     }
 
+    // vim `gg`: a `g` arms the next key; any other key disarms it.
+    let was_g = std::mem::replace(&mut app.pending_g, false);
     match key.code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+        // vim navigation: gg/G jump to ends, Ctrl-d/Ctrl-u half-page
+        KeyCode::Char('g') => {
+            if was_g {
+                select_to(app, 0);
+            } else {
+                app.pending_g = true;
+            }
+        }
+        KeyCode::Char('G') => select_to(app, app.rows.len().saturating_sub(1)),
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            select_to(app, app.sel + app.rows.len().max(1) / 2);
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            select_to(app, app.sel.saturating_sub(app.rows.len().max(1) / 2));
+        }
+        // toggle the fleet grid (k9s table) vs the list+preview split
+        KeyCode::Char('t') => {
+            app.view = if app.view == View::Split { View::Table } else { View::Split };
+        }
         KeyCode::Esc if app.scrollback.is_some() => {
             app.scrollback = None; // leave Preview scroll mode, back to live output
             app.scroll = 0;
@@ -753,7 +788,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                         _ => !worktree::is_gui_editor(&cmd), // terminal editor → inline
                     };
                     if inline {
-                        app.open = Some((cmd, path)); // suspend TUI + run after this frame
+                        // Inside the user's own tmux, pop the editor into a NEW WINDOW so
+                        // the dashboard keeps running (switch back with your tmux keys);
+                        // otherwise suspend the TUI and run it in place.
+                        let popped = forced.as_deref() != Some("1")
+                            && worktree::open_editor_window(&cmd, &path);
+                        if popped {
+                            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("agent");
+                            app.set_info(format!("opened '{name}' in a new tmux window"));
+                        } else {
+                            app.open = Some((cmd, path)); // suspend TUI + run after this frame
+                        }
                     } else {
                         // GUI editor: fire-and-forget so wta stays on the dashboard
                         let mut it = cmd.split_whitespace();
@@ -1293,6 +1338,11 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             status
         };
 
+        let ac = path
+            .as_deref()
+            .and_then(crate::worktree::read_task_spec)
+            .map(|s| (s.checked_ac, s.total_ac));
+        let updated_unix = states.get(&task).map(|s| s.updated_unix).unwrap_or(0);
         out.push(Row {
             task,
             repo: repo.to_string(),
@@ -1306,6 +1356,8 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             alive,
             path,
             cost,
+            ac,
+            updated_unix,
         });
     }
 }
@@ -1408,6 +1460,18 @@ fn is_trust_prompt(text: &str) -> bool {
     legacy || current
 }
 
+/// Move the selection to `idx` (clamped) and refresh the detail pane — shared by the
+/// vim jumps (gg/G/Ctrl-d/Ctrl-u) and j/k.
+fn select_to(app: &mut App, idx: usize) {
+    if app.rows.is_empty() {
+        return;
+    }
+    app.sel = idx.min(app.rows.len() - 1);
+    app.scroll = 0;
+    app.scrollback = None;
+    load_detail(app);
+}
+
 fn load_detail(app: &mut App) {
     // viewing an agent clears its "needs review" flag
     if let Some(s) = app.selected().map(|r| r.session.clone()) {
@@ -1469,13 +1533,18 @@ fn ui(f: &mut Frame, app: &mut App) {
             Constraint::Length(1), // status/err line
         ])
         .split(f.area());
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(root[1]);
     render_header(f, app, root[0]);
-    render_list(f, app, cols[0]);
-    render_right(f, app, cols[1]);
+    match app.view {
+        View::Split => {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+                .split(root[1]);
+            render_list(f, app, cols[0]);
+            render_right(f, app, cols[1]);
+        }
+        View::Table => render_table(f, app, root[1]),
+    }
     render_menu(f, app, root[2]);
     render_err(f, app, root[3]);
     render_modal(f, app);
@@ -1552,6 +1621,98 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Compact "time since last activity" for the table AGE column (`3h`, `20m`, `2d`).
+fn short_age(updated: u64) -> String {
+    if updated == 0 {
+        return "-".into();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let s = now.saturating_sub(updated);
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 86400 {
+        format!("{}h", s / 3600)
+    } else {
+        format!("{}d", s / 86400)
+    }
+}
+
+/// k9s-style full-width fleet grid — one row per agent, aligned sortable-looking
+/// columns, for scanning many agents at once (toggle with `t`).
+fn render_table(f: &mut Frame, app: &App, area: Rect) {
+    use ratatui::widgets::{Cell, Row as TRow, Table, TableState};
+    let max_tok = app.rows.iter().map(|r| r.cost.tokens()).max().unwrap_or(0);
+    let header = TRow::new(["TASK", "REPO", "", "BASE", "TOKENS", "$", "Δ", "AC", "AGE"])
+        .style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD));
+    let rows: Vec<TRow> = app
+        .rows
+        .iter()
+        .map(|r| {
+            let (glyph, gc) = match r.status {
+                Status::Running => ('◐', Color::Reset),
+                Status::Ready => ('●', GREEN),
+                Status::NeedsInput => ('▲', Color::Yellow),
+                Status::Merged => ('✓', Color::Cyan),
+                Status::Exited => ('✗', RED),
+                Status::Idle => ('·', Color::DarkGray),
+            };
+            let tok = if r.cost.tokens() > 0 {
+                let ratio = if max_tok > 0 { r.cost.tokens() as f64 / max_tok as f64 } else { 0.0 };
+                format!("{} {}", crate::cost::human_tokens(r.cost.tokens()), inline_bar(ratio, 4))
+            } else {
+                String::new()
+            };
+            let usd = if r.cost.est_usd > 0.0 { format!("${:.2}", r.cost.est_usd) } else { String::new() };
+            let ac = r.ac.map(|(c, t)| format!("{c}/{t}")).unwrap_or_else(|| "-".into());
+            TRow::new(vec![
+                Cell::from(r.task.clone()),
+                Cell::from(r.repo_name.clone()).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(glyph.to_string()).style(Style::default().fg(gc)),
+                Cell::from(r.base.clone()).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(tok).style(Style::default().fg(Color::Yellow)),
+                Cell::from(usd).style(Style::default().fg(Color::Yellow)),
+                Cell::from(format!("+{}/-{}", r.added, r.removed)),
+                Cell::from(ac),
+                Cell::from(short_age(r.updated_unix)).style(Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Min(14),
+        Constraint::Length(12),
+        Constraint::Length(2),
+        Constraint::Length(10),
+        Constraint::Length(12),
+        Constraint::Length(7),
+        Constraint::Length(10),
+        Constraint::Length(5),
+        Constraint::Length(4),
+    ];
+    let sum = status_summary(app.rows.iter());
+    let title = if sum.is_empty() { " Agents ".to_string() } else { format!(" Agents · {sum} ") };
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(HL))
+            .title(title)
+            .title_style(Style::default().bg(GREEN).fg(SEL_FG).add_modifier(Modifier::BOLD)),
+    );
+    let table = table.row_highlight_style(
+        Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD),
+    );
+    let mut st = TableState::default();
+    if !app.rows.is_empty() {
+        st.select(Some(app.sel.min(app.rows.len().saturating_sub(1))));
+    }
+    f.render_stateful_widget(table, area, &mut st);
 }
 
 fn render_list(f: &mut Frame, app: &App, area: Rect) {
@@ -1797,8 +1958,8 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" edit  │  ", muted),
             Span::styled("tab", action),
             Span::styled(" switch  ", muted),
-            Span::styled("⇧↕", action),
-            Span::styled(" scroll  ", muted),
+            Span::styled("t", action),
+            Span::styled(" table  ", muted),
             Span::styled("?", action),
             Span::styled(" help  ", muted),
             Span::styled("q", action),
@@ -2079,7 +2240,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             );
         }
         Modal::Help => {
-            let area = centered(52, 19, f.area());
+            let area = centered(56, 23, f.area());
             f.render_widget(Clear, area);
             let k = |key: &str, desc: &str| {
                 Line::from(vec![
@@ -2092,12 +2253,15 @@ fn render_modal(f: &mut Frame, app: &App) {
             };
             let body = vec![
                 k("j / k", "move up / down"),
+                k("gg / G", "jump to top / bottom"),
+                k("Ctrl-d/u", "half-page down / up"),
+                k("t", "toggle list+preview ⇄ fleet table"),
                 k("J / K", "reorder down / up"),
                 k("m", "mergeability matrix (conflict preview)"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("i", "send one line to the agent (when ● ready)"),
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
-                k("e", "open the worktree in $EDITOR / WTA_OPEN_CMD (nvim, code…)"),
+                k("e", "open the worktree in nvim (new tmux window) / $EDITOR"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("tab", "switch Preview / Diff"),
                 k("Shift+↑↓", "scroll Preview / Diff"),
@@ -2179,7 +2343,25 @@ mod tests {
             alive,
             path: Some(PathBuf::from("/tmp/x")),
             cost: crate::cost::Usage::default(),
+            ac: None,
+            updated_unix: 0,
         }
+    }
+
+    #[test]
+    fn table_view_renders_columns() {
+        let mut app = App::new();
+        app.view = View::Table;
+        app.rows = vec![
+            row("auth", Status::Running, true, 40, 4),
+            row("flaky", Status::NeedsInput, true, 0, 0),
+        ];
+        let screen = render_to_string(&mut app, 100, 12);
+        println!("\n{screen}\n");
+        assert!(screen.contains("TASK"));
+        assert!(screen.contains("AGE"));
+        assert!(screen.contains("auth"));
+        assert!(screen.contains("Agents"));
     }
 
     #[test]
