@@ -1187,7 +1187,7 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool, usd: bool, cumulat
             crate::cost::human_tokens(total.tokens())
         );
     }
-    println!("(TOKENS = in+out+cache-write; cache-reads are the context re-read each turn — shown separately, not summed into TOKENS. $ = list-price estimate incl. reads at 10%.)");
+    println!("(TOKENS = in+out real content; cache-write/read are the caching machinery, shown separately (not summed in). $ = list-price API estimate — NOT your actual cost on a Max/Pro subscription.)");
     Ok(())
 }
 

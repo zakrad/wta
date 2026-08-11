@@ -1623,7 +1623,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     }
     if tok > 0 {
         spans.push(Span::styled(
-            format!("   Σ {} · ${:.2}", crate::cost::human_tokens(tok), usd),
+            format!("   Σ {} · ~${:.2}", crate::cost::human_tokens(tok), usd),
             Style::default().fg(Color::Yellow),
         ));
     }
@@ -1658,7 +1658,7 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Clear, area); // overlay: hide the dashboard behind it
     let max_tok = app.rows.iter().map(|r| r.cost.tokens()).max().unwrap_or(0);
     let dim = Style::default().fg(Color::DarkGray);
-    let header = TRow::new(["TASK", "REPO", "", "STATE", "BASE", "TOK", "BURN", "$", "Δ", "AC", "AGE"])
+    let header = TRow::new(["TASK", "REPO", "", "STATE", "BASE", "TOK", "BURN", "~$", "Δ", "AC", "AGE"])
         .style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD));
     let rows: Vec<TRow> = app
         .rows
@@ -1680,7 +1680,7 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
                 (String::new(), Color::DarkGray)
             };
             let tok = if r.cost.tokens() > 0 { crate::cost::human_tokens(r.cost.tokens()) } else { String::new() };
-            let usd = if r.cost.est_usd > 0.0 { format!("${:.2}", r.cost.est_usd) } else { String::new() };
+            let usd = if r.cost.est_usd > 0.0 { format!("~${:.2}", r.cost.est_usd) } else { String::new() };
             let ac = r.ac.map(|(c, t)| format!("{c}/{t}")).unwrap_or_else(|| "-".into());
             TRow::new(vec![
                 Cell::from(r.task.clone()),
