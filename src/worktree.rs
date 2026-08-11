@@ -2030,7 +2030,18 @@ pub fn editor_cmd() -> Option<String> {
             }
         }
     }
-    None
+    // Nothing configured (the dashboard often doesn't inherit your shell's $EDITOR) —
+    // fall back to the first common editor actually on PATH.
+    ["nvim", "vim", "hx", "vi", "nano", "code"]
+        .into_iter()
+        .find(|e| {
+            std::process::Command::new("sh")
+                .args(["-c", &format!("command -v {e}")])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        })
+        .map(String::from)
 }
 
 /// GUI editors fork and return immediately (open detached); terminal editors

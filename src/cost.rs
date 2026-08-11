@@ -18,14 +18,15 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// Tokens "used" — input + output + cache writes, but NOT cache reads. Claude Code
-    /// re-reads the whole cached context every turn, so summing `cache_read` across
-    /// messages counts the same context over and over and balloons into the millions
-    /// even on a short session. Excluding it keeps this close to the session's actual
-    /// footprint (cache reads are still counted in the $ estimate, where they're billed
-    /// at 0.1×).
+    /// Real content throughput — `input + output` only. The cache fields
+    /// (`cache_write`/`cache_read`) are the prompt-caching machinery: Claude Code
+    /// re-writes AND re-reads the whole context every turn, so summing them counts the
+    /// same context hundreds of times and balloons into tens of millions on a long
+    /// session — misleading as "usage". Both are still fully counted in the `$` estimate
+    /// (write at 1.25×, read at 0.10×), which stays accurate; they're just not the
+    /// headline token number. See `wta cost` for the full per-category breakdown.
     pub fn tokens(&self) -> u64 {
-        self.input + self.output + self.cache_write
+        self.input + self.output
     }
     pub fn add(&mut self, o: &Usage) {
         self.input += o.input;
@@ -209,13 +210,13 @@ pub fn timeline(wt: &Path) -> Vec<Sample> {
                 Some(v) => v,
                 None => continue,
             };
-            // skip fully-empty (synthetic) messages, but count tokens the same way as
-            // Usage::tokens() — input + output + cache writes, NOT the per-turn cache
-            // re-reads that would otherwise dominate the chart.
+            // skip fully-empty (synthetic) messages; count tokens the same way as
+            // Usage::tokens() — input + output only (the cache machinery would otherwise
+            // dominate the chart).
             if u.input_tokens + u.output_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens == 0 {
                 continue;
             }
-            let tok = u.input_tokens + u.output_tokens + u.cache_creation_input_tokens;
+            let tok = u.input_tokens + u.output_tokens;
             let d = usd(&u, &model);
             raw.push((ts, model, tok, d));
         }

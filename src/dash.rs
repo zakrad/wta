@@ -682,10 +682,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             select_to(app, app.sel.saturating_sub(app.rows.len().max(1) / 2));
         }
-        // toggle the fleet grid (k9s table) vs the list+preview split
+        // toggle the fleet-table overlay (k9s-style; esc also closes it)
         KeyCode::Char('t') => {
             app.view = if app.view == View::Split { View::Table } else { View::Split };
         }
+        KeyCode::Esc if app.view == View::Table => app.view = View::Split,
         KeyCode::Esc if app.scrollback.is_some() => {
             app.scrollback = None; // leave Preview scroll mode, back to live output
             app.scroll = 0;
@@ -1534,19 +1535,25 @@ fn ui(f: &mut Frame, app: &mut App) {
         ])
         .split(f.area());
     render_header(f, app, root[0]);
-    match app.view {
-        View::Split => {
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-                .split(root[1]);
-            render_list(f, app, cols[0]);
-            render_right(f, app, cols[1]);
-        }
-        View::Table => render_table(f, app, root[1]),
-    }
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(root[1]);
+    render_list(f, app, cols[0]);
+    render_right(f, app, cols[1]);
     render_menu(f, app, root[2]);
     render_err(f, app, root[3]);
+    // The fleet table is a full-screen OVERLAY over the split (lazygit-style; esc closes).
+    if app.view == View::Table {
+        let ta = root[1];
+        let inset = Rect {
+            x: ta.x + 2,
+            y: ta.y + 1,
+            width: ta.width.saturating_sub(4),
+            height: ta.height.saturating_sub(2),
+        };
+        render_table(f, app, inset);
+    }
     render_modal(f, app);
 }
 
@@ -1648,56 +1655,64 @@ fn short_age(updated: u64) -> String {
 /// columns, for scanning many agents at once (toggle with `t`).
 fn render_table(f: &mut Frame, app: &App, area: Rect) {
     use ratatui::widgets::{Cell, Row as TRow, Table, TableState};
+    f.render_widget(Clear, area); // overlay: hide the dashboard behind it
     let max_tok = app.rows.iter().map(|r| r.cost.tokens()).max().unwrap_or(0);
-    let header = TRow::new(["TASK", "REPO", "", "BASE", "TOKENS", "$", "Δ", "AC", "AGE"])
+    let dim = Style::default().fg(Color::DarkGray);
+    let header = TRow::new(["TASK", "REPO", "", "STATE", "BASE", "TOK", "BURN", "$", "Δ", "AC", "AGE"])
         .style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD));
     let rows: Vec<TRow> = app
         .rows
         .iter()
         .map(|r| {
-            let (glyph, gc) = match r.status {
-                Status::Running => ('◐', Color::Reset),
-                Status::Ready => ('●', GREEN),
-                Status::NeedsInput => ('▲', Color::Yellow),
-                Status::Merged => ('✓', Color::Cyan),
-                Status::Exited => ('✗', RED),
-                Status::Idle => ('·', Color::DarkGray),
+            let (glyph, word, gc) = match r.status {
+                Status::Running => ('◐', "running", Color::Reset),
+                Status::Ready => ('●', "ready", GREEN),
+                Status::NeedsInput => ('▲', "needs-you", Color::Yellow),
+                Status::Merged => ('✓', "merged", Color::Cyan),
+                Status::Exited => ('✗', "exited", RED),
+                Status::Idle => ('·', "idle", Color::DarkGray),
             };
-            let tok = if r.cost.tokens() > 0 {
-                let ratio = if max_tok > 0 { r.cost.tokens() as f64 / max_tok as f64 } else { 0.0 };
-                format!("{} {}", crate::cost::human_tokens(r.cost.tokens()), inline_bar(ratio, 4))
+            let ratio = if max_tok > 0 { r.cost.tokens() as f64 / max_tok as f64 } else { 0.0 };
+            let (burn, bcol) = if r.cost.tokens() > 0 {
+                let c = if ratio >= 0.8 { RED } else if ratio >= 0.5 { Color::Yellow } else { GREEN };
+                (inline_bar(ratio, 6), c)
             } else {
-                String::new()
+                (String::new(), Color::DarkGray)
             };
+            let tok = if r.cost.tokens() > 0 { crate::cost::human_tokens(r.cost.tokens()) } else { String::new() };
             let usd = if r.cost.est_usd > 0.0 { format!("${:.2}", r.cost.est_usd) } else { String::new() };
             let ac = r.ac.map(|(c, t)| format!("{c}/{t}")).unwrap_or_else(|| "-".into());
             TRow::new(vec![
                 Cell::from(r.task.clone()),
-                Cell::from(r.repo_name.clone()).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(r.repo_name.clone()).style(dim),
                 Cell::from(glyph.to_string()).style(Style::default().fg(gc)),
-                Cell::from(r.base.clone()).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(word).style(Style::default().fg(gc)),
+                Cell::from(r.base.clone()).style(dim),
                 Cell::from(tok).style(Style::default().fg(Color::Yellow)),
+                Cell::from(burn).style(Style::default().fg(bcol)),
                 Cell::from(usd).style(Style::default().fg(Color::Yellow)),
                 Cell::from(format!("+{}/-{}", r.added, r.removed)),
                 Cell::from(ac),
-                Cell::from(short_age(r.updated_unix)).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(short_age(r.updated_unix)).style(dim),
             ])
         })
         .collect();
     let widths = [
-        Constraint::Min(14),
-        Constraint::Length(12),
-        Constraint::Length(2),
-        Constraint::Length(10),
-        Constraint::Length(12),
-        Constraint::Length(7),
-        Constraint::Length(10),
-        Constraint::Length(5),
-        Constraint::Length(4),
+        Constraint::Length(18), // TASK
+        Constraint::Length(12), // REPO
+        Constraint::Length(2),  // glyph
+        Constraint::Length(9),  // STATE
+        Constraint::Length(10), // BASE
+        Constraint::Length(6),  // TOK
+        Constraint::Length(6),  // BURN
+        Constraint::Length(7),  // $
+        Constraint::Length(9),  // Δ
+        Constraint::Length(5),  // AC
+        Constraint::Length(4),  // AGE
     ];
     let sum = status_summary(app.rows.iter());
-    let title = if sum.is_empty() { " Agents ".to_string() } else { format!(" Agents · {sum} ") };
-    let table = Table::new(rows, widths).header(header).block(
+    let title = format!(" Agents · {} · esc to close ", if sum.is_empty() { "—" } else { &sum });
+    let table = Table::new(rows, widths).header(header).column_spacing(1).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -1730,8 +1745,6 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         );
     let inner_w = area.width.saturating_sub(2) as usize;
-    // busiest agent's token count — scales the per-row burn bars so spend reads at a glance
-    let max_tok = app.rows.iter().map(|r| r.cost.tokens()).max().unwrap_or(0);
     let mut items: Vec<ListItem> = Vec::new();
     let mut sel_visual: Option<usize> = None; // visual item index of the selected agent
     let mut last_repo: Option<String> = None;
@@ -1779,21 +1792,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         } else {
             String::new()
         };
-        // per-agent token-burn bar, relative to the busiest agent (green→amber→red)
-        let ratio = if max_tok > 0 { r.cost.tokens() as f64 / max_tok as f64 } else { 0.0 };
-        let bar = if max_tok > 0 && r.cost.tokens() > 0 {
-            format!("{} ", inline_bar(ratio, 6))
-        } else {
-            String::new()
-        };
-        let bar_color = if ratio >= 0.8 {
-            RED
-        } else if ratio >= 0.5 {
-            Color::Yellow
-        } else {
-            GREEN
-        };
-        let counts_len = format!("{bar}{tok_str}+{},-{} ", r.added, r.removed).width();
+        let counts_len = format!("{tok_str}+{},-{} ", r.added, r.removed).width();
         // Show the BASE branch each agent targets (its working branch is always
         // `agent/<task>` = the line-1 name, so it carries no extra info).
         let indent = if app.global { "     Ꮧ " } else { "   Ꮧ " };
@@ -1802,7 +1801,6 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         let line2 = Line::from(vec![
             Span::styled(bhead, Style::default().fg(Color::DarkGray)),
             Span::raw(" ".repeat(pad2)),
-            Span::styled(bar, Style::default().fg(bar_color)),
             Span::styled(tok_str, Style::default().fg(Color::Yellow)),
             Span::styled(format!("+{}", r.added), Style::default().fg(GREEN)),
             Span::styled(",", Style::default().fg(Color::DarkGray)),
