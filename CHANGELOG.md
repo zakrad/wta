@@ -4,7 +4,7 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] — 2026-08-10
+## [0.2.0] — 2026-08-11
 
 ### Added
 - **`wta wait <task>… --until idle|needs-input|exited|done`** — block until agent(s)
@@ -23,18 +23,25 @@ All notable changes to **wta** are documented here. The format is based on
 - **`wta doctor`** — health check: resolved engine/version per role, tmux/git, hooks.
 - **`--json`** on `ls`, `matrix`, and `send` (with a `submitted` field).
 - **Dashboard (k9s-style)** — a top summary band (scope · agent count · colored status
-  rollup · fleet spend); a **fleet table view** (toggle `t`) with aligned columns
-  (status/base/tokens/`$`/changes/AC/age); per-agent token-burn bars; per-repo counts;
-  rounded borders; **vim keys** (`gg`/`G`, `Ctrl-d`/`u`); and `e` opens the worktree in
-  a **new tmux window** (nvim) instead of suspending the dashboard.
+  rollup · fleet tokens); a **fleet-table overlay** (`t`, `esc`/`q` closes) with aligned
+  columns (state/model/base/tokens/burn/changes/AC/age) and the selected agent's
+  **tokens-over-time chart** panel below it (btop-style); per-repo counts; rounded
+  borders; **vim keys** (`gg`/`G`, `Ctrl-d`/`u`); and `e` opens the worktree in nvim in a
+  **new tmux window** instead of suspending the dashboard.
 
 ### Changed
 - `wta send` confirms the agent **consumed the turn** (not just that keystrokes landed)
   and fails loud otherwise.
+- **Token counts are `input + output` only.** The cache fields (`cache_write`/`read`)
+  are the prompt-caching machinery re-processing the same context every turn and inflate
+  "usage" into the tens of millions on long sessions. The `$` estimate still counts cache
+  at proper rates and now shows only in `wta cost`, labeled a list-price API estimate
+  (not your cost on a Max/Pro subscription).
 
 ### Fixed
 - **Dashboard resume** now re-spawns the exact selected agent (repo-scoped, cwd-
   independent) — fixes "nothing happens / no session" and same-named agents across repos.
+- **`wta open` / `e`** falls back to `nvim`/`vim`/… on PATH when `$EDITOR` is unset.
 
 ## [0.1.35] — 2026-07-18
 
