@@ -94,6 +94,11 @@ struct Use {
     cache_read_input_tokens: u64,
 }
 
+/// Compact model label for a table cell: `claude-opus-4-8` → `opus-4-8`.
+fn short_model(m: &str) -> String {
+    m.strip_prefix("claude-").unwrap_or(m).to_string()
+}
+
 fn encode(path: &Path) -> String {
     path.to_string_lossy()
         .chars()
@@ -101,16 +106,18 @@ fn encode(path: &Path) -> String {
         .collect()
 }
 
-/// Total usage for an agent's worktree, summed across all its Claude Code sessions.
-pub fn for_worktree(wt: &Path) -> Usage {
+/// Total usage for an agent's worktree, summed across all its Claude Code sessions,
+/// plus the most recent model it ran on (short-labeled, e.g. `opus-4-8`).
+pub fn for_worktree(wt: &Path) -> (Usage, Option<String>) {
     let mut total = Usage::default();
+    let mut last_model: Option<String> = None;
     let dir = match dirs::home_dir() {
         Some(h) => h.join(".claude/projects").join(encode(wt)),
-        None => return total,
+        None => return (total, last_model),
     };
     let rd = match std::fs::read_dir(&dir) {
         Ok(r) => r,
-        Err(_) => return total,
+        Err(_) => return (total, last_model),
     };
     for entry in rd.flatten() {
         let p = entry.path();
@@ -143,9 +150,12 @@ pub fn for_worktree(wt: &Path) -> Usage {
             total.cache_write += u.cache_creation_input_tokens;
             total.cache_read += u.cache_read_input_tokens;
             total.messages += 1;
+            if let Some(m) = model.filter(|m| !m.is_empty()) {
+                last_model = Some(short_model(&m));
+            }
         }
     }
-    total
+    (total, last_model)
 }
 
 pub fn human_tokens(n: u64) -> String {

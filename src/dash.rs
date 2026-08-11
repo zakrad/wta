@@ -143,6 +143,7 @@ struct Row {
     alive: bool,
     path: Option<PathBuf>,
     cost: crate::cost::Usage,
+    model: Option<String>,  // most recent model (short label) — for the table's MODEL column
     ac: Option<(u32, u32)>, // .wta/task.md acceptance criteria (checked, total)
     updated_unix: u64,      // last status write — for the table's AGE column
 }
@@ -176,7 +177,7 @@ struct App {
     diff_text: String,
     hashes: HashMap<String, u64>,
     diffcache: HashMap<String, (u32, u32)>, // task -> (added, removed), cadence-refreshed
-    costcache: HashMap<String, crate::cost::Usage>, // session -> token/$ usage, cadence-refreshed
+    costcache: HashMap<String, (crate::cost::Usage, Option<String>)>, // session -> (usage, model), cadence-refreshed
     mergedcache: HashMap<String, bool>,     // task -> branch merged into base, cadence-refreshed
     tick: u64,                              // refresh counter driving the diffstat cadence
     trust_seen: HashMap<String, Instant>,   // session -> first time we saw it (trust grace)
@@ -665,6 +666,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     // vim `gg`: a `g` arms the next key; any other key disarms it.
     let was_g = std::mem::replace(&mut app.pending_g, false);
     match key.code {
+        // `q` closes the table overlay first (layered, like lazygit); only quits at the base.
+        KeyCode::Char('q') if app.view == View::Table => app.view = View::Split,
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         // vim navigation: gg/G jump to ends, Ctrl-d/Ctrl-u half-page
@@ -1249,19 +1252,19 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             .or_else(|| path.as_deref().map(crate::worktree::base_branch))
             .unwrap_or_else(|| "HEAD".to_string());
 
-        // Token/$ usage, cadence-refreshed like the diffstat (parsing transcripts is
-        // heavy, so only on the periodic full sweep or for the selected agent).
-        let cost = match path.as_deref() {
+        // Token usage + model, cadence-refreshed like the diffstat (parsing transcripts
+        // is heavy, so only on the periodic full sweep or for the selected agent).
+        let (cost, model) = match path.as_deref() {
             Some(p) => {
                 if full_sweep || is_sel || !app.costcache.contains_key(&session) {
-                    let u = crate::cost::for_worktree(p);
-                    app.costcache.insert(session.clone(), u);
-                    u
+                    let cm = crate::cost::for_worktree(p);
+                    app.costcache.insert(session.clone(), cm.clone());
+                    cm
                 } else {
-                    app.costcache.get(&session).copied().unwrap_or_default()
+                    app.costcache.get(&session).cloned().unwrap_or_default()
                 }
             }
-            None => crate::cost::Usage::default(),
+            None => (crate::cost::Usage::default(), None),
         };
 
         let (added, removed) = match path.as_deref() {
@@ -1357,6 +1360,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             alive,
             path,
             cost,
+            model,
             ac,
             updated_unix,
         });
@@ -1543,16 +1547,13 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_right(f, app, cols[1]);
     render_menu(f, app, root[2]);
     render_err(f, app, root[3]);
-    // The fleet table is a full-screen OVERLAY over the split (lazygit-style; esc closes).
+    // The fleet table is an OVERLAY over the split (lazygit-style; esc/q/t close it),
+    // sized to its content so it doesn't leave a big empty box with few agents.
     if app.view == View::Table {
         let ta = root[1];
-        let inset = Rect {
-            x: ta.x + 2,
-            y: ta.y + 1,
-            width: ta.width.saturating_sub(4),
-            height: ta.height.saturating_sub(2),
-        };
-        render_table(f, app, inset);
+        let w = 101u16.min(ta.width.saturating_sub(2));
+        let h = (app.rows.len() as u16 + 3).min(ta.height); // header + 2 borders + rows
+        render_table(f, app, centered(w, h, ta));
     }
     render_modal(f, app);
 }
@@ -1601,10 +1602,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         app.rows.first().map(|r| r.repo_name.clone()).unwrap_or_else(|| "this repo".into())
     };
     let c = status_counts(app.rows.iter());
-    let (tok, usd) = app
-        .rows
-        .iter()
-        .fold((0u64, 0.0f64), |(t, u), r| (t + r.cost.tokens(), u + r.cost.est_usd));
+    let tok: u64 = app.rows.iter().map(|r| r.cost.tokens()).sum();
     let mut spans = vec![
         Span::styled("▌ wta ", Style::default().fg(GREEN_BRIGHT).add_modifier(Modifier::BOLD)),
         Span::styled(format!("· {scope} · "), muted),
@@ -1623,7 +1621,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     }
     if tok > 0 {
         spans.push(Span::styled(
-            format!("   Σ {} · ~${:.2}", crate::cost::human_tokens(tok), usd),
+            format!("   Σ {} tok", crate::cost::human_tokens(tok)),
             Style::default().fg(Color::Yellow),
         ));
     }
@@ -1658,7 +1656,7 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Clear, area); // overlay: hide the dashboard behind it
     let max_tok = app.rows.iter().map(|r| r.cost.tokens()).max().unwrap_or(0);
     let dim = Style::default().fg(Color::DarkGray);
-    let header = TRow::new(["TASK", "REPO", "", "STATE", "BASE", "TOK", "BURN", "~$", "Δ", "AC", "AGE"])
+    let header = TRow::new(["TASK", "REPO", "", "STATE", "MODEL", "BASE", "TOK", "BURN", "Δ", "AC", "AGE"])
         .style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD));
     let rows: Vec<TRow> = app
         .rows
@@ -1680,17 +1678,16 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
                 (String::new(), Color::DarkGray)
             };
             let tok = if r.cost.tokens() > 0 { crate::cost::human_tokens(r.cost.tokens()) } else { String::new() };
-            let usd = if r.cost.est_usd > 0.0 { format!("~${:.2}", r.cost.est_usd) } else { String::new() };
             let ac = r.ac.map(|(c, t)| format!("{c}/{t}")).unwrap_or_else(|| "-".into());
             TRow::new(vec![
                 Cell::from(r.task.clone()),
                 Cell::from(r.repo_name.clone()).style(dim),
                 Cell::from(glyph.to_string()).style(Style::default().fg(gc)),
                 Cell::from(word).style(Style::default().fg(gc)),
+                Cell::from(r.model.clone().unwrap_or_else(|| "-".into())).style(dim),
                 Cell::from(r.base.clone()).style(dim),
                 Cell::from(tok).style(Style::default().fg(Color::Yellow)),
                 Cell::from(burn).style(Style::default().fg(bcol)),
-                Cell::from(usd).style(Style::default().fg(Color::Yellow)),
                 Cell::from(format!("+{}/-{}", r.added, r.removed)),
                 Cell::from(ac),
                 Cell::from(short_age(r.updated_unix)).style(dim),
@@ -1702,10 +1699,10 @@ fn render_table(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(12), // REPO
         Constraint::Length(2),  // glyph
         Constraint::Length(9),  // STATE
+        Constraint::Length(10), // MODEL
         Constraint::Length(10), // BASE
         Constraint::Length(6),  // TOK
         Constraint::Length(6),  // BURN
-        Constraint::Length(7),  // $
         Constraint::Length(9),  // Δ
         Constraint::Length(5),  // AC
         Constraint::Length(4),  // AGE
@@ -2341,6 +2338,7 @@ mod tests {
             alive,
             path: Some(PathBuf::from("/tmp/x")),
             cost: crate::cost::Usage::default(),
+            model: None,
             ac: None,
             updated_unix: 0,
         }

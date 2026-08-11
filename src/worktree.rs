@@ -1156,7 +1156,7 @@ pub fn show_cost(task: Option<&str>, chart: bool, json: bool, usd: bool, cumulat
     let mut total = crate::cost::Usage::default();
     println!("{:<26} {:>9}  {:>9}  in/out/cache-write · cache-reads", "AGENT", "~USD", "TOKENS");
     for a in &agents {
-        let u = crate::cost::for_worktree(&a.path);
+        let (u, _model) = crate::cost::for_worktree(&a.path);
         total.add(&u);
         let detail = if u.is_zero() {
             "—".to_string()
@@ -1425,7 +1425,7 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
             None => {
                 println!(
                     "✓ verify passed + acceptance criteria met on attempt {attempt} — {}",
-                    crate::cost::short(&crate::cost::for_worktree(&wt))
+                    crate::cost::short(&crate::cost::for_worktree(&wt).0)
                 );
                 return Ok(());
             }
@@ -1455,7 +1455,7 @@ pub fn loop_verify(task: &str, max: u32, no_progress: u32, timeout_secs: u64, ag
             }
         }
     }
-    bail!("stopping: still failing after the {max}-attempt cap ({}) — inspect '{task}' in `wta dash`", crate::cost::short(&crate::cost::for_worktree(&wt)));
+    bail!("stopping: still failing after the {max}-attempt cap ({}) — inspect '{task}' in `wta dash`", crate::cost::short(&crate::cost::for_worktree(&wt).0));
 }
 
 /// Hash the agent's current changes (tracked diff vs HEAD + the untracked/staged
