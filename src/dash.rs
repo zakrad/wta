@@ -106,6 +106,7 @@ enum Modal {
         sel: usize,
     },
     Matrix(Vec<Line<'static>>),
+    Chart(Vec<Line<'static>>),
     QuickSend {
         task: String,
         session: String,
@@ -620,7 +621,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
-        Modal::Matrix(_) | Modal::Help => {
+        Modal::Matrix(_) | Modal::Chart(_) | Modal::Help => {
             app.modal = Modal::None;
             return Ok(false);
         }
@@ -851,6 +852,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 }
             }
         }
+        // on-demand cost chart for the selected agent (computed only when asked)
+        KeyCode::Char('c') => {
+            if let Some(path) = app.selected().and_then(|r| r.path.clone()) {
+                app.modal = Modal::Chart(chart_lines(&path));
+            }
+        }
         // quick-send one line to the selected agent, gated so we never inject
         // into a busy/streaming pane (only when it's idle at its prompt = Ready).
         KeyCode::Char('i') => match app.selected() {
@@ -873,6 +880,39 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
 
 /// Build the colored mergeability grid for the `m` overlay (calls git merge-tree
 /// pairwise; read-only, touches no working tree).
+/// Trim an ISO timestamp to `MM-DD HH:MM` for the chart's x-axis labels.
+fn short_ts(ts: &str) -> String {
+    ts.get(5..16).map(|s| s.replace('T', " ")).unwrap_or_else(|| ts.to_string())
+}
+
+/// Build the selected agent's tokens-over-time chart as overlay lines — computed on
+/// demand (one agent, one transcript pass) so the live dashboard stays cheap.
+fn chart_lines(wt: &Path) -> Vec<Line<'static>> {
+    let tl = crate::cost::timeline(wt);
+    if tl.is_empty() {
+        return vec![Line::styled("no usage recorded yet", Style::default().fg(Color::DarkGray))];
+    }
+    let vals: Vec<f64> = tl.iter().map(|s| s.delta_tokens as f64).collect();
+    let (bars, max) = crate::cost::barchart(&vals, 60, 10, false);
+    let total: u64 = tl.iter().map(|s| s.delta_tokens).sum();
+    let mut out: Vec<Line<'static>> = vec![Line::styled(
+        format!(
+            "tokens/bucket · peak {} · total {}",
+            crate::cost::human_tokens(max as u64),
+            crate::cost::human_tokens(total)
+        ),
+        Style::default().fg(Color::DarkGray),
+    )];
+    for b in bars {
+        out.push(Line::styled(b, Style::default().fg(GREEN)));
+    }
+    out.push(Line::styled(
+        format!("{}  →  {}", short_ts(&tl.first().unwrap().ts), short_ts(&tl.last().unwrap().ts)),
+        Style::default().fg(Color::DarkGray),
+    ));
+    out
+}
+
 fn matrix_lines(failing: &HashSet<String>) -> anyhow::Result<Vec<Line<'static>>> {
     let m = worktree::mergeability()?;
     let n = m.labels.len();
@@ -2234,6 +2274,22 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::Chart(lines) => {
+            let h = (lines.len() as u16 + 2).min(f.area().height);
+            let w = 66u16.min(f.area().width);
+            let area = centered(w, h, f.area());
+            f.render_widget(Clear, area);
+            f.render_widget(
+                Paragraph::new(lines.clone()).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(HL))
+                        .title(" tokens over time — this agent (any key closes) "),
+                ),
+                area,
+            );
+        }
         Modal::Help => {
             let area = centered(56, 23, f.area());
             f.render_widget(Clear, area);
@@ -2253,6 +2309,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("t", "toggle list+preview ⇄ fleet table"),
                 k("J / K", "reorder down / up"),
                 k("m", "mergeability matrix (conflict preview)"),
+                k("c", "tokens-over-time chart for this agent"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("i", "send one line to the agent (when ● ready)"),
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
