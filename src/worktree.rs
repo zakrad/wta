@@ -1653,11 +1653,50 @@ pub fn resume_at(task: &str, wt: &Path) -> Result<()> {
     resume_session(&repo, task, wt)
 }
 
-/// Resume by task name (looks up the worktree under the current repo).
+/// Resume by task name (looks up the worktree under the current repo). For an ADOPTED
+/// agent the worktree is the registered dir, not `.agents/<task>`, so use that.
 pub fn resume(task: &str) -> Result<()> {
     let root = repo_root()?;
+    let repo = repo_id_of(&root);
+    if let Some(st) = status::read_state(&repo, task) {
+        if st.adopted && !st.cwd.is_empty() {
+            return resume_session(&repo, task, Path::new(&st.cwd));
+        }
+    }
     let wt = worktrees_dir(&root).join(task);
     resume_at(task, &wt)
+}
+
+/// `wta adopt <task> [--dir <path>]` — register an EXISTING directory (where you're
+/// already running Claude) as an agent under its repo, so it joins your dashboard
+/// group. It does NOT spawn a session or touch your files; continue it inside wta with
+/// Enter in `wta dash` (or `wta resume <task>`) when you're ready — that resumes the
+/// conversation (`--continue`) in that dir under a wta-managed session.
+pub fn adopt(task: &str, dir: Option<&str>) -> Result<()> {
+    validate_task(task)?;
+    let wt = match dir {
+        Some(d) => PathBuf::from(d),
+        None => std::env::current_dir()?,
+    };
+    let wt = std::fs::canonicalize(&wt).unwrap_or(wt);
+    if !wt.exists() {
+        bail!("no such directory: {}", wt.display());
+    }
+    let root = main_root_of(&wt)
+        .context("not inside a git repo — cd into your session's dir, or pass --dir")?;
+    let repo = repo_id_of(&root);
+    if status::read_state(&repo, task).map(|s| !s.adopted).unwrap_or(false) {
+        bail!("'{task}' already exists here as a wta-managed agent — pick another name");
+    }
+    let base = current_branch(&wt).unwrap_or_else(|| base_branch(&root));
+    let idx = assign_slot(&repo);
+    status::adopt(&repo, task, &wt.to_string_lossy(), &base, idx)?;
+    println!("adopted '{task}' → {}", wt.display());
+    println!(
+        "it's in `wta dash` under {} — press Enter (or `wta resume {task}`) to continue it inside wta.",
+        repo_name(&root)
+    );
+    Ok(())
 }
 
 /// Stop an agent WITHOUT destroying anything: kills the tmux session but keeps
@@ -1767,6 +1806,16 @@ pub fn list_managed_in(root: &Path) -> Result<Vec<Worktree>> {
     if let Some(p) = cur_path.take() {
         push_if_managed(&mut result, &base_dir, p, cur_branch);
     }
+    // Adopted agents (`wta adopt`) aren't git worktrees under `.agents/` — add them from
+    // state so `ls` + the dashboard show them alongside managed agents.
+    for st in status::read_states(&repo_id_of(root)).unwrap_or_default() {
+        if st.adopted && !st.cwd.is_empty() {
+            let p = PathBuf::from(&st.cwd);
+            if p.exists() && !result.iter().any(|w| w.task == st.task) {
+                result.push(Worktree { task: st.task, path: p, branch: st.base.unwrap_or_default() });
+            }
+        }
+    }
     result.sort_by(|a, b| a.task.cmp(&b.task));
     Ok(result)
 }
@@ -1845,6 +1894,16 @@ pub fn ls(json: bool) -> Result<()> {
 pub fn rm(task: &str, force: bool) -> Result<()> {
     let root = repo_root()?;
     let repo = repo_id_of(&root);
+
+    // An ADOPTED agent is YOUR directory, not a wta worktree — `rm` only stops tracking
+    // it (kills any wta session + drops the state file), never touches your files/branch.
+    if status::read_state(&repo, task).map(|s| s.adopted).unwrap_or(false) {
+        let _ = tmux::kill(&tmux::session_name(&repo, task));
+        status::remove_state(&repo, task);
+        println!("untracked adopted '{task}' (your directory + branch are untouched)");
+        return Ok(());
+    }
+
     let branch = agent_branch(&root, task);
     let wt = worktrees_dir(&root).join(task);
     let wt_str = wt.to_string_lossy().into_owned();
@@ -1886,6 +1945,7 @@ pub fn rm(task: &str, force: bool) -> Result<()> {
     // only a stale entry with no worktree.
     status::remove_state(&repo, task);
     append_run_log(&root, task, "rm");
+    println!("removed '{task}' (session, worktree and branch)");
     Ok(())
 }
 

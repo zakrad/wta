@@ -58,6 +58,7 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("{hint}");
             }
         }
+        Command::Adopt { task, dir } => worktree::adopt(&task, dir.as_deref())?,
         Command::Ls { json } => worktree::ls(json)?,
         Command::Cost { task, chart, usd, cumulative, json } => {
             worktree::show_cost(task.as_deref(), chart, json, usd, cumulative)?
@@ -159,10 +160,7 @@ fn main() -> anyhow::Result<()> {
                 println!("removed '{task}' (landed)");
             }
         }
-        Command::Rm { task, force } => {
-            worktree::rm(&task, force)?;
-            println!("removed '{task}' (session, worktree and branch)");
-        }
+        Command::Rm { task, force } => worktree::rm(&task, force)?,
         Command::Status { state } => status::emit(&state)?,
         Command::InstallHooks { global } => status::install_hooks(global)?,
         Command::Dash { here } => dash::run(here)?,

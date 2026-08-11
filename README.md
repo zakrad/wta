@@ -68,6 +68,8 @@ out; the **global dashboard** and `wta attach` / `i` quick-send move you between
 `wta handoff <from> <new>` migrates one agent’s context into a fresh one, and `wta send`
 / `wta board` let agents coordinate. `wta wait <task> --until done|idle|needs-input`
 blocks (with exit codes) so you can sequence agents from a plain shell script or Makefile.
+Already running Claude somewhere? `wta adopt <task>` pulls that directory into the
+dashboard as an agent — resume it into wta when you’re ready, no new worktree.
 
 **Analyze the run** — `wta cost [<task>] --chart` shows per-agent tokens and an
 estimated spend with a usage-over-time chart (rate or cumulative, tokens or `$`) and a

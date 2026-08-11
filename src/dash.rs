@@ -1254,7 +1254,9 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             continue;
         }
         let p = PathBuf::from(&st.cwd);
-        if p.starts_with(&agents_dir) && p.exists() {
+        // wta-managed worktrees live under `.agents/`; ADOPTED agents (`wta adopt`) can
+        // live anywhere (the user's own dir) — include them by their recorded cwd.
+        if (st.adopted || p.starts_with(&agents_dir)) && p.exists() {
             order.push(task.clone());
             paths.insert(task.clone(), p);
         }

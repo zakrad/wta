@@ -48,6 +48,15 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,
     },
+    /// Register an EXISTING dir (an outside Claude session) as an agent under its repo,
+    /// grouped with your others — continue it inside wta later with Enter / `wta resume`
+    Adopt {
+        /// name for the adopted agent
+        task: String,
+        /// the directory to adopt (default: the current directory)
+        #[arg(long)]
+        dir: Option<String>,
+    },
     /// List wta-managed agents (worktrees) with diffstat vs the base branch
     Ls {
         /// emit a stable JSON fleet snapshot (for scripts / CI / an agent)

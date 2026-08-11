@@ -4,6 +4,16 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-08-11
+
+### Added
+- **`wta adopt <task> [--dir <path>]`** — register an EXISTING directory (a Claude
+  session you're already running outside wta) as an agent under its repo, so it joins
+  your dashboard group. It doesn't spawn a session or touch your files; press Enter in
+  the dashboard (or `wta resume <task>`) to continue that conversation (`--continue`)
+  inside a wta-managed session when you're ready. `rm` on an adopted agent only untracks
+  it — your directory and branch are left alone.
+
 ## [0.2.0] — 2026-08-11
 
 ### Added

@@ -28,6 +28,8 @@ pub struct AgentState {
     pub engine: Option<String>, // agent CLI basename (claude/codex/gemini…) for screen-manifest status detection
     #[serde(default)]
     pub last_prompt_unix: u64, // when a prompt was last delivered — makes `wait --until idle` turn-bound (ignore a stale prior-turn idle)
+    #[serde(default)]
+    pub adopted: bool, // registered from an EXISTING dir via `wta adopt` (not a wta-created worktree) — `rm` won't delete it
 }
 
 pub fn wta_dir() -> Result<PathBuf> {
@@ -136,6 +138,22 @@ pub fn record_engine(repo: &str, task: &str, engine: &str) -> Result<()> {
     st.task = task.to_string();
     st.repo = repo.to_string();
     st.engine = Some(engine.to_string());
+    save(&st)
+}
+
+/// Register an EXISTING directory (an outside Claude session's worktree/checkout) as an
+/// agent under `repo`, without a live wta session — it shows in the dashboard as a
+/// resumable (exited) agent so `wta resume` / Enter can continue its conversation.
+pub fn adopt(repo: &str, task: &str, cwd: &str, base: &str, index: u32) -> Result<()> {
+    let mut st = read_state(repo, task).unwrap_or_default();
+    st.task = task.to_string();
+    st.repo = repo.to_string();
+    st.status = "exited".to_string();
+    st.cwd = cwd.to_string();
+    st.base = Some(base.to_string());
+    st.index = index;
+    st.adopted = true;
+    st.updated_unix = now_unix();
     save(&st)
 }
 
