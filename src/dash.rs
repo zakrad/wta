@@ -1383,7 +1383,7 @@ fn poll_checks(app: &mut App) {
 /// Build the rows for ONE repo (merging managed worktrees + state agents), keyed
 /// by the globally-unique session so the global dash's caches never collide across
 /// repos that reuse a task name.
-fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
+fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out: &mut Vec<Row>) {
     let repo_name = worktree::repo_name(root);
     let states: HashMap<String, status::AgentState> = status::read_states(repo)
         .unwrap_or_default()
@@ -1492,7 +1492,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             None => false,
         };
 
-        let alive = tmux::has_session(&session);
+        let alive = live.contains(&session);
         let status = if alive {
             let text = tmux::capture(&session).unwrap_or_default();
             if auto_trust && !app.trust_done.contains(&session) {
@@ -1599,9 +1599,13 @@ fn refresh(app: &mut App) {
         Vec::new()
     };
 
+    // One `tmux list-sessions` for the whole fleet instead of a `has-session` spawn
+    // per agent every refresh — liveness is then a set lookup.
+    let live: HashSet<String> = tmux::list_sessions().into_iter().collect();
+
     let mut rows = Vec::new();
     for (repo, root) in &targets {
-        repo_rows(app, repo, root, &mut rows);
+        repo_rows(app, repo, root, &live, &mut rows);
     }
     app.rows = rows;
     app.sel = prev_sel

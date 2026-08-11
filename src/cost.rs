@@ -5,6 +5,7 @@
 //! labeled as such everywhere it's shown. Zero for non-claude agents.
 
 use serde::Deserialize;
+use std::io::BufRead;
 use std::path::Path;
 
 #[derive(Default, Clone, Copy)]
@@ -124,12 +125,14 @@ pub fn for_worktree(wt: &Path) -> (Usage, Option<String>) {
         if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
             continue;
         }
-        let content = match std::fs::read_to_string(&p) {
-            Ok(c) => c,
+        // Stream line-by-line: transcripts reach hundreds of MB, so never hold a whole
+        // file in memory (this runs on the dashboard's cost worker).
+        let file = match std::fs::File::open(&p) {
+            Ok(f) => f,
             Err(_) => continue,
         };
-        for line in content.lines() {
-            let l: Line = match serde_json::from_str(line) {
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            let l: Line = match serde_json::from_str(&line) {
                 Ok(l) => l,
                 Err(_) => continue,
             };
@@ -234,12 +237,14 @@ pub fn timeline(wt: &Path) -> Vec<Sample> {
         if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
             continue;
         }
-        let content = match std::fs::read_to_string(&p) {
-            Ok(c) => c,
+        // Stream line-by-line: transcripts reach hundreds of MB, so never hold a whole
+        // file in memory (this runs on the dashboard's cost worker).
+        let file = match std::fs::File::open(&p) {
+            Ok(f) => f,
             Err(_) => continue,
         };
-        for line in content.lines() {
-            let l: Line = match serde_json::from_str(line) {
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            let l: Line = match serde_json::from_str(&line) {
                 Ok(l) => l,
                 Err(_) => continue,
             };
