@@ -158,6 +158,37 @@ pub fn for_worktree(wt: &Path) -> (Usage, Option<String>) {
     (total, last_model)
 }
 
+/// `(transcript count, newest transcript mtime as unix secs)` for a directory's
+/// Claude Code history — lets the dashboard surface adoptable sessions per repo.
+pub fn sessions_for(wt: &Path) -> (usize, u64) {
+    let dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude/projects").join(encode(wt)),
+        None => return (0, 0),
+    };
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return (0, 0),
+    };
+    let (mut n, mut newest) = (0usize, 0u64);
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+            continue;
+        }
+        n += 1;
+        if let Ok(secs) = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map_err(|_| ())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|_| ()))
+            .map(|d| d.as_secs())
+        {
+            newest = newest.max(secs);
+        }
+    }
+    (n, newest)
+}
+
 pub fn human_tokens(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1e6)

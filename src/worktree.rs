@@ -1673,12 +1673,25 @@ pub fn resume(task: &str) -> Result<()> {
 /// Enter in `wta dash` (or `wta resume <task>`) when you're ready — that resumes the
 /// conversation (`--continue`) in that dir under a wta-managed session.
 pub fn adopt(task: &str, dir: Option<&str>) -> Result<()> {
-    validate_task(task)?;
     let wt = match dir {
         Some(d) => PathBuf::from(d),
         None => std::env::current_dir()?,
     };
+    let root = adopt_core(task, &wt)?;
     let wt = std::fs::canonicalize(&wt).unwrap_or(wt);
+    println!("adopted '{task}' → {}", wt.display());
+    println!(
+        "it's in `wta dash` under {} — press Enter (or `wta resume {task}`) to continue it inside wta.",
+        repo_name(&root)
+    );
+    Ok(())
+}
+
+/// Register `wt` as an adopted agent under its repo; returns the repo root.
+/// Shared by the CLI `adopt` and the dashboard's adopt picker (no printing).
+pub fn adopt_core(task: &str, wt: &Path) -> Result<PathBuf> {
+    validate_task(task)?;
+    let wt = std::fs::canonicalize(wt).unwrap_or_else(|_| wt.to_path_buf());
     if !wt.exists() {
         bail!("no such directory: {}", wt.display());
     }
@@ -1691,12 +1704,88 @@ pub fn adopt(task: &str, dir: Option<&str>) -> Result<()> {
     let base = current_branch(&wt).unwrap_or_else(|| base_branch(&root));
     let idx = assign_slot(&repo);
     status::adopt(&repo, task, &wt.to_string_lossy(), &base, idx)?;
-    println!("adopted '{task}' → {}", wt.display());
-    println!(
-        "it's in `wta dash` under {} — press Enter (or `wta resume {task}`) to continue it inside wta.",
-        repo_name(&root)
-    );
-    Ok(())
+    Ok(root)
+}
+
+/// A directory under `root` with Claude Code history that isn't already a
+/// wta-managed agent — an adopt candidate offered by the dashboard's `a` picker.
+pub struct AdoptCandidate {
+    pub dir: PathBuf,
+    pub label: String, // repo-relative path, or "(repo root)"
+    pub sessions: usize,
+    pub last_unix: u64,
+    pub suggested: String, // pre-filled task name
+}
+
+/// Scan a repo for adoptable Claude sessions: its root plus every git worktree
+/// that has transcripts on disk and isn't already tracked by wta. Newest first.
+pub fn adopt_candidates(root: &Path) -> Vec<AdoptCandidate> {
+    let repo = repo_id_of(root);
+    let mut dirs: Vec<PathBuf> = vec![root.to_path_buf()];
+    if let Ok(out) = run_git(&["worktree", "list", "--porcelain"], Some(root)) {
+        for line in out.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                let pb = PathBuf::from(p);
+                if !dirs.contains(&pb) {
+                    dirs.push(pb);
+                }
+            }
+        }
+    }
+    // Directories already tracked as agents (managed or adopted) — don't re-offer.
+    let taken: std::collections::HashSet<String> = status::read_states(&repo)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.cwd)
+        .collect();
+    let mut out: Vec<AdoptCandidate> = Vec::new();
+    for dir in dirs {
+        if !dir.exists() {
+            continue;
+        }
+        let canon = std::fs::canonicalize(&dir).unwrap_or(dir);
+        let key = canon.to_string_lossy().to_string();
+        if taken.contains(&key) || out.iter().any(|c| c.dir == canon) {
+            continue;
+        }
+        let (sessions, last_unix) = crate::cost::sessions_for(&canon);
+        if sessions == 0 {
+            continue;
+        }
+        let (label, suggested) = match canon.strip_prefix(root) {
+            Ok(rel) if rel.as_os_str().is_empty() => {
+                ("(repo root)".to_string(), sanitize_task(&repo_name(root)))
+            }
+            Ok(rel) => (rel.display().to_string(), sanitize_task(&rel.display().to_string())),
+            Err(_) => {
+                let base = canon
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (canon.display().to_string(), sanitize_task(&base))
+            }
+        };
+        out.push(AdoptCandidate { dir: canon, label, sessions, last_unix, suggested });
+    }
+    out.sort_by(|a, b| b.last_unix.cmp(&a.last_unix));
+    out
+}
+
+/// Coerce an arbitrary string into a valid task name (alphanumerics, `-`, `_`).
+fn sanitize_task(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let t = out.trim_matches('-').to_string();
+    if t.is_empty() {
+        "session".to_string()
+    } else {
+        t
+    }
 }
 
 /// Stop an agent WITHOUT destroying anything: kills the tmux session but keeps
@@ -2680,6 +2769,58 @@ pub fn wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_task_yields_valid_names() {
+        assert_eq!(sanitize_task("my repo"), "my-repo");
+        assert_eq!(sanitize_task("feature/api.v2"), "feature-api-v2");
+        assert_eq!(sanitize_task("--weird--"), "weird");
+        assert_eq!(sanitize_task("///"), "session");
+        assert_eq!(sanitize_task("ok_name-1"), "ok_name-1");
+    }
+
+    #[test]
+    fn adopt_candidates_finds_then_skips_taken() {
+        let base = std::env::temp_dir().join(format!("wta-adopt-{}", std::process::id()));
+        let home = base.join("home");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("f"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        let root = std::fs::canonicalize(&repo).unwrap();
+
+        // A Claude transcript for the repo root, at the encoded-path project dir.
+        std::env::set_var("HOME", &home);
+        let enc: String = root
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let proj = home.join(".claude/projects").join(&enc);
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("s.jsonl"), "{\"type\":\"user\"}\n").unwrap();
+
+        let cands = adopt_candidates(&root);
+        assert_eq!(cands.len(), 1, "root session should be a candidate");
+        assert_eq!(cands[0].label, "(repo root)");
+        assert!(cands[0].sessions >= 1);
+        assert_eq!(cands[0].dir, root);
+
+        // Once adopted, it must not be offered again.
+        adopt_core("mine", &root).unwrap();
+        assert!(adopt_candidates(&root).is_empty(), "adopted dir should be skipped");
+
+        std::env::remove_var("HOME");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn hooks_installed_matches_wta_status_command() {

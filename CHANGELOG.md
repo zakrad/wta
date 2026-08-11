@@ -13,6 +13,17 @@ All notable changes to **wta** are documented here. The format is based on
   the dashboard (or `wta resume <task>`) to continue that conversation (`--continue`)
   inside a wta-managed session when you're ready. `rm` on an adopted agent only untracks
   it — your directory and branch are left alone.
+- **Adopt from the dashboard** — press **`a`** to pick a repo, then one of *that repo's*
+  existing Claude sessions (scanned from the repo root + its git worktrees, newest
+  first), name it, and it joins the group as a resumable agent. Same effect as the CLI.
+
+### Changed
+- **Dashboard launches instantly.** Token/cost accounting now parses transcripts on a
+  background worker thread instead of on the UI thread before the first paint — with a
+  ~656 MB transcript set, launch went from a multi-second freeze to immediate. A cheap
+  mtime check re-parses a session only after it writes new output, so an idle fleet
+  does no transcript I/O (previously the full parse re-ran on every periodic sweep).
+  Diff/merge git calls no longer run across the whole fleet on the first frame either.
 
 ## [0.2.0] — 2026-08-11
 

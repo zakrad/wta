@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -118,6 +119,23 @@ enum Modal {
         sel: usize,
         prompt: bool, // carry N (new-with-prompt) through the picker
     },
+    /// Adopt: pick which repo's sessions to browse (global dash only).
+    AdoptRepoPick {
+        repos: Vec<(String, PathBuf)>,
+        filter: String,
+        sel: usize,
+    },
+    /// Adopt: pick a Claude session under the chosen repo. Enter → AdoptName.
+    AdoptPick {
+        root: PathBuf,
+        cands: Vec<worktree::AdoptCandidate>,
+        sel: usize,
+    },
+    /// Adopt: name the adopted agent, then register it.
+    AdoptName {
+        dir: PathBuf,
+        name: String,
+    },
     Help,
 }
 
@@ -192,11 +210,33 @@ struct App {
     attention: HashSet<String>,           // agents that finished / need input and haven't been viewed
     chart: Vec<Line<'static>>,            // selected agent's tokens-over-time chart (table overlay)
     chart_session: String,                // which agent `chart` was computed for (lazy recompute)
+    // Transcript parsing (cost) runs on a worker thread so a huge session never
+    // freezes the UI — jobs go out on cost_tx, results stream back on cost_rx.
+    cost_tx: Sender<(String, PathBuf)>,
+    cost_rx: Receiver<(String, (crate::cost::Usage, Option<String>))>,
+    cost_inflight: HashSet<String>, // sessions currently being parsed (dedupe jobs)
+    costmtime: HashMap<String, u64>, // session -> newest transcript mtime last parsed
 }
 
 impl App {
     fn new() -> Self {
+        // Cost worker: parses transcripts off the UI thread. Dropping the App drops
+        // cost_tx, which ends the worker's recv loop — no thread is leaked.
+        let (cost_tx, job_rx) = channel::<(String, PathBuf)>();
+        let (res_tx, cost_rx) = channel::<(String, (crate::cost::Usage, Option<String>))>();
+        std::thread::spawn(move || {
+            while let Ok((session, path)) = job_rx.recv() {
+                let cm = crate::cost::for_worktree(&path);
+                if res_tx.send((session, cm)).is_err() {
+                    break; // dashboard gone
+                }
+            }
+        });
         App {
+            cost_tx,
+            cost_rx,
+            cost_inflight: HashSet::new(),
+            costmtime: HashMap::new(),
             view: View::Split,
             pending_g: false,
             global: false,
@@ -339,6 +379,7 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
             }
         }
         poll_checks(&mut app);
+        drain_costs(&mut app);
         term.draw(|f| ui(f, &mut app))?;
 
         if event::poll(Duration::from_millis(200))? {
@@ -574,6 +615,77 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
+        Modal::AdoptRepoPick { repos, filter, sel } => {
+            let matches: Vec<(String, PathBuf)> = repos
+                .iter()
+                .filter(|(name, _)| filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase()))
+                .cloned()
+                .collect();
+            match key.code {
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Up => *sel = sel.saturating_sub(1),
+                KeyCode::Down => {
+                    if *sel + 1 < matches.len() {
+                        *sel += 1;
+                    }
+                }
+                KeyCode::Enter => match matches.get(*sel).map(|(_, r)| r.clone()) {
+                    Some(root) => open_adopt_pick(app, root),
+                    None => app.modal = Modal::None,
+                },
+                KeyCode::Backspace => {
+                    filter.pop();
+                    *sel = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    filter.push(c);
+                    *sel = 0;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::AdoptPick { cands, sel, .. } => {
+            match key.code {
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if *sel + 1 < cands.len() {
+                        *sel += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(c) = cands.get(*sel) {
+                        app.modal = Modal::AdoptName { dir: c.dir.clone(), name: c.suggested.clone() };
+                    }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::AdoptName { dir, name } => {
+            match key.code {
+                KeyCode::Enter => {
+                    let task = name.trim().to_string();
+                    let dir = dir.clone();
+                    app.modal = Modal::None;
+                    if !task.is_empty() {
+                        match worktree::adopt_core(&task, &dir) {
+                            Ok(_) => app.set_info(format!("adopted '{task}' — ↵ to resume it")),
+                            Err(e) => app.set_err(e),
+                        }
+                        refresh(app);
+                    }
+                }
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Backspace => {
+                    name.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => name.push(c),
+                _ => {}
+            }
+            return Ok(false);
+        }
         Modal::Push(task) => {
             match key.code {
                 KeyCode::Char('y') => {
@@ -743,6 +855,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
         KeyCode::Char('n') => open_new(app, false),
         KeyCode::Char('N') => open_new(app, true),
+        KeyCode::Char('a') => open_adopt(app),
         KeyCode::Char('s') => {
             if let Some(r) = app.selected() {
                 let (task, root) = (r.task.clone(), r.root.clone());
@@ -1040,6 +1153,47 @@ fn open_new(app: &mut App, prompt: bool) {
     }
 }
 
+/// `a` — adopt an existing Claude session as an agent. Pick a repo (global dash),
+/// then a session under it. Mirrors `open_new`'s repo-selection flow.
+fn open_adopt(app: &mut App) {
+    let mut list: Vec<(String, PathBuf)> = worktree::discover_repos()
+        .iter()
+        .map(|(_, root)| (worktree::repo_name(root), root.clone()))
+        .collect();
+    if !app.root.as_os_str().is_empty() && !list.iter().any(|(_, r)| r == &app.root) {
+        list.insert(0, (worktree::repo_name(&app.root), app.root.clone()));
+    }
+    if app.global && list.len() > 1 {
+        let sel = list.iter().position(|(_, r)| r == &app.root).unwrap_or(0);
+        app.modal = Modal::AdoptRepoPick { repos: list, filter: String::new(), sel };
+    } else {
+        let root = list
+            .first()
+            .map(|(_, r)| r.clone())
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_default();
+        if root.as_os_str().is_empty() {
+            app.set_err("cd into a repo to adopt a session");
+            return;
+        }
+        open_adopt_pick(app, root);
+    }
+}
+
+/// Scan `root` for adoptable Claude sessions and open the session picker (or warn).
+fn open_adopt_pick(app: &mut App, root: PathBuf) {
+    let cands = worktree::adopt_candidates(&root);
+    if cands.is_empty() {
+        app.modal = Modal::None;
+        app.set_err(format!(
+            "no un-adopted Claude sessions found in {}",
+            worktree::repo_name(&root)
+        ));
+        return;
+    }
+    app.modal = Modal::AdoptPick { root, cands, sel: 0 };
+}
+
 // ---------- git helpers ----------
 fn git_in(path: &Path, args: &[&str]) -> Option<String> {
     std::process::Command::new("git")
@@ -1293,22 +1447,29 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
 
         // Token usage + model, cadence-refreshed like the diffstat (parsing transcripts
         // is heavy, so only on the periodic full sweep or for the selected agent).
+        // Cost is parsed on the worker thread (transcripts can be hundreds of MB).
+        // A cheap stat (newest transcript mtime) gates it: only when the agent has
+        // written new output since we last parsed do we enqueue a fresh parse, so an
+        // idle fleet costs nothing and a paint never blocks on transcript reads.
         let (cost, model) = match path.as_deref() {
             Some(p) => {
-                if full_sweep || is_sel || !app.costcache.contains_key(&session) {
-                    let cm = crate::cost::for_worktree(p);
-                    app.costcache.insert(session.clone(), cm.clone());
-                    cm
-                } else {
-                    app.costcache.get(&session).cloned().unwrap_or_default()
+                let (_, mtime) = crate::cost::sessions_for(p);
+                let stale = app.costmtime.get(&session).copied() != Some(mtime);
+                if stale && app.cost_inflight.insert(session.clone()) {
+                    app.costmtime.insert(session.clone(), mtime);
+                    let _ = app.cost_tx.send((session.clone(), p.to_path_buf()));
                 }
+                app.costcache.get(&session).cloned().unwrap_or_default()
             }
             None => (crate::cost::Usage::default(), None),
         };
 
+        // Diffstat / merge check are cheap git calls; keep them synchronous but only
+        // on the periodic sweep or for the selected agent, so launch isn't a burst of
+        // git across the whole fleet (the first paint shows cached-or-zero instead).
         let (added, removed) = match path.as_deref() {
             Some(p) => {
-                if full_sweep || is_sel || !app.diffcache.contains_key(&session) {
+                if full_sweep || is_sel {
                     let v = numstat(p, &base);
                     app.diffcache.insert(session.clone(), v);
                     v
@@ -1320,7 +1481,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
         };
         let merged = match path.as_deref() {
             Some(p) => {
-                if full_sweep || is_sel || !app.mergedcache.contains_key(&session) {
+                if full_sweep || is_sel {
                     let v = is_merged(p, &base, &branch);
                     app.mergedcache.insert(session.clone(), v);
                     v
@@ -1406,6 +1567,25 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
     }
 }
 
+/// Fold in any cost results the worker finished since the last frame, updating both
+/// the cache and the already-built rows so the numbers appear without a full refresh.
+fn drain_costs(app: &mut App) {
+    let mut updated = false;
+    while let Ok((session, cm)) = app.cost_rx.try_recv() {
+        app.cost_inflight.remove(&session);
+        app.costcache.insert(session, cm);
+        updated = true;
+    }
+    if updated {
+        for r in &mut app.rows {
+            if let Some((u, m)) = app.costcache.get(&r.session) {
+                r.cost = u.clone();
+                r.model = m.clone();
+            }
+        }
+    }
+}
+
 fn refresh(app: &mut App) {
     let prev_sel = app.selected().map(|r| r.session.clone());
     app.tick = app.tick.wrapping_add(1);
@@ -1435,6 +1615,8 @@ fn refresh(app: &mut App) {
     app.diffcache.retain(|k, _| live.contains(k));
     app.costcache.retain(|k, _| live.contains(k));
     app.mergedcache.retain(|k, _| live.contains(k));
+    app.cost_inflight.retain(|k| live.contains(k));
+    app.costmtime.retain(|k, _| live.contains(k));
     app.trust_seen.retain(|k, _| live.contains(k));
     app.trust_done.retain(|k| live.contains(k));
 
@@ -2300,6 +2482,86 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::AdoptRepoPick { repos, filter, sel } => {
+            let area = centered(58, 16, f.area());
+            f.render_widget(Clear, area);
+            let matches: Vec<&(String, PathBuf)> = repos
+                .iter()
+                .filter(|(name, _)| filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase()))
+                .collect();
+            let mut lines = vec![Line::from(vec![
+                Span::styled("repo: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{filter}▏")),
+            ])];
+            let h = area.height.saturating_sub(3) as usize;
+            if matches.is_empty() {
+                lines.push(Line::styled("  no matching repos", Style::default().fg(Color::DarkGray)));
+            } else {
+                let start = if *sel >= h { *sel + 1 - h } else { 0 };
+                for (off, (name, _)) in matches.iter().skip(start).take(h).enumerate() {
+                    let idx = start + off;
+                    let style = if idx == *sel {
+                        Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(GREEN_SOFT)
+                    };
+                    lines.push(Line::styled(format!(" {name}"), style));
+                }
+            }
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(HL))
+                        .title(" adopt — pick a repo (↑↓ Enter, Esc) "),
+                ),
+                area,
+            );
+        }
+        Modal::AdoptPick { root, cands, sel } => {
+            let area = centered(66, 16, f.area());
+            f.render_widget(Clear, area);
+            let mut lines = vec![Line::from(vec![
+                Span::styled("sessions in ", Style::default().fg(Color::DarkGray)),
+                Span::styled(worktree::repo_name(root), Style::default().fg(GREEN_SOFT)),
+            ])];
+            let h = area.height.saturating_sub(3) as usize;
+            let start = if *sel >= h { *sel + 1 - h } else { 0 };
+            for (off, c) in cands.iter().skip(start).take(h).enumerate() {
+                let idx = start + off;
+                let style = if idx == *sel {
+                    Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(GREEN_SOFT)
+                };
+                let plural = if c.sessions == 1 { "" } else { "s" };
+                let meta = format!("{} session{} · {} ago", c.sessions, plural, short_age(c.last_unix));
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {:<30}", c.label), style),
+                    Span::styled(format!("  {meta}"), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(HL))
+                        .title(" adopt a Claude session (↑↓ Enter, Esc) "),
+                ),
+                area,
+            );
+        }
+        Modal::AdoptName { name, .. } => {
+            let area = centered(50, 3, f.area());
+            f.render_widget(Clear, area);
+            let p = Paragraph::new(format!("{name}▏")).block(
+                Block::default()
+                    .borders(Borders::ALL).border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(GREEN))
+                    .title(" name this agent (Enter adopts, Esc cancels) "),
+            );
+            f.render_widget(p, area);
+        }
         Modal::Matrix(lines) => {
             let h = (lines.len() as u16 + 2).min(f.area().height);
             let w = 78u16.min(f.area().width);
@@ -2316,7 +2578,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             );
         }
         Modal::Help => {
-            let area = centered(56, 23, f.area());
+            let area = centered(56, 24, f.area());
             f.render_widget(Clear, area);
             let k = |key: &str, desc: &str| {
                 Line::from(vec![
@@ -2343,6 +2605,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("Shift+↑↓", "scroll Preview / Diff"),
                 k("n", "new agent"),
                 k("N", "new agent with an initial prompt"),
+                k("a", "adopt an existing Claude session as an agent"),
                 k("s", "stop (keep worktree — resume later)"),
                 k("glyphs", "⠋ running · ● ready · ▲ needs input · ✓ merged · ✗ exited"),
                 k("D", "kill (destroy worktree + branch)"),
