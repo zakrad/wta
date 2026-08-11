@@ -1463,42 +1463,95 @@ fn ui(f: &mut Frame, app: &mut App) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1), // top summary band (k9s-style)
             Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(1), // keybar
+            Constraint::Length(1), // status/err line
         ])
         .split(f.area());
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(root[0]);
+        .split(root[1]);
+    render_header(f, app, root[0]);
     render_list(f, app, cols[0]);
     render_right(f, app, cols[1]);
-    render_menu(f, app, root[1]);
-    render_err(f, app, root[2]);
+    render_menu(f, app, root[2]);
+    render_err(f, app, root[3]);
     render_modal(f, app);
 }
 
-/// A compact glyph rollup of a set of agents by status (`◐3 ●2 ▲1 ✗1`) — the fleet's
-/// at-a-glance health line. Only non-zero buckets are shown; empty when there are none.
-fn status_summary<'a>(rows: impl Iterator<Item = &'a Row>) -> String {
-    let (mut run, mut rdy, mut need, mut merged, mut exit) = (0u32, 0u32, 0u32, 0u32, 0u32);
+/// Agent counts by status: `[running, ready, needs-input, merged, exited]` (idle ignored).
+fn status_counts<'a>(rows: impl Iterator<Item = &'a Row>) -> [u32; 5] {
+    let mut c = [0u32; 5];
     for r in rows {
         match r.status {
-            Status::Running => run += 1,
-            Status::Ready => rdy += 1,
-            Status::NeedsInput => need += 1,
-            Status::Merged => merged += 1,
-            Status::Exited => exit += 1,
+            Status::Running => c[0] += 1,
+            Status::Ready => c[1] += 1,
+            Status::NeedsInput => c[2] += 1,
+            Status::Merged => c[3] += 1,
+            Status::Exited => c[4] += 1,
             Status::Idle => {}
         }
     }
-    [(run, '◐'), (rdy, '●'), (need, '▲'), (merged, '✓'), (exit, '✗')]
+    c
+}
+
+/// A compact glyph rollup by status (`◐3 ●2 ▲1 ✗1`) — the fleet's at-a-glance health
+/// line. Only non-zero buckets are shown; empty when there are none.
+fn status_summary<'a>(rows: impl Iterator<Item = &'a Row>) -> String {
+    let c = status_counts(rows);
+    [(c[0], '◐'), (c[1], '●'), (c[2], '▲'), (c[3], '✓'), (c[4], '✗')]
         .into_iter()
         .filter(|(n, _)| *n > 0)
         .map(|(n, g)| format!("{g}{n}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A tiny in-row bar (`████░░`) for a 0..1 ratio — used to show each agent's token
+/// burn relative to the fleet's busiest, so the big spenders read at a glance.
+fn inline_bar(ratio: f64, width: usize) -> String {
+    let filled = (ratio.clamp(0.0, 1.0) * width as f64).round() as usize;
+    (0..width).map(|i| if i < filled { '█' } else { '░' }).collect()
+}
+
+/// k9s-style top band: scope, agent count, a colored status rollup, and fleet spend.
+fn render_header(f: &mut Frame, app: &App, area: Rect) {
+    let muted = Style::default().fg(Color::DarkGray);
+    let scope = if app.global {
+        "all repos".to_string()
+    } else {
+        app.rows.first().map(|r| r.repo_name.clone()).unwrap_or_else(|| "this repo".into())
+    };
+    let c = status_counts(app.rows.iter());
+    let (tok, usd) = app
+        .rows
+        .iter()
+        .fold((0u64, 0.0f64), |(t, u), r| (t + r.cost.tokens(), u + r.cost.est_usd));
+    let mut spans = vec![
+        Span::styled("▌ wta ", Style::default().fg(GREEN_BRIGHT).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("· {scope} · "), muted),
+        Span::styled(format!("{} agents", app.rows.len()), Style::default().fg(Color::Reset)),
+    ];
+    for (n, glyph, color) in [
+        (c[0], '◐', Color::Reset),
+        (c[1], '●', GREEN),
+        (c[2], '▲', Color::Yellow),
+        (c[3], '✓', Color::Cyan),
+        (c[4], '✗', RED),
+    ] {
+        if n > 0 {
+            spans.push(Span::styled(format!("  {glyph}{n}"), Style::default().fg(color)));
+        }
+    }
+    if tok > 0 {
+        spans.push(Span::styled(
+            format!("   Σ {} · ${:.2}", crate::cost::human_tokens(tok), usd),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_list(f: &mut Frame, app: &App, area: Rect) {
@@ -1516,6 +1569,8 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         );
     let inner_w = area.width.saturating_sub(2) as usize;
+    // busiest agent's token count — scales the per-row burn bars so spend reads at a glance
+    let max_tok = app.rows.iter().map(|r| r.cost.tokens()).max().unwrap_or(0);
     let mut items: Vec<ListItem> = Vec::new();
     let mut sel_visual: Option<usize> = None; // visual item index of the selected agent
     let mut last_repo: Option<String> = None;
@@ -1563,7 +1618,21 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         } else {
             String::new()
         };
-        let counts_len = format!("{tok_str}+{},-{} ", r.added, r.removed).width();
+        // per-agent token-burn bar, relative to the busiest agent (green→amber→red)
+        let ratio = if max_tok > 0 { r.cost.tokens() as f64 / max_tok as f64 } else { 0.0 };
+        let bar = if max_tok > 0 && r.cost.tokens() > 0 {
+            format!("{} ", inline_bar(ratio, 6))
+        } else {
+            String::new()
+        };
+        let bar_color = if ratio >= 0.8 {
+            RED
+        } else if ratio >= 0.5 {
+            Color::Yellow
+        } else {
+            GREEN
+        };
+        let counts_len = format!("{bar}{tok_str}+{},-{} ", r.added, r.removed).width();
         // Show the BASE branch each agent targets (its working branch is always
         // `agent/<task>` = the line-1 name, so it carries no extra info).
         let indent = if app.global { "     Ꮧ " } else { "   Ꮧ " };
@@ -1572,6 +1641,7 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         let line2 = Line::from(vec![
             Span::styled(bhead, Style::default().fg(Color::DarkGray)),
             Span::raw(" ".repeat(pad2)),
+            Span::styled(bar, Style::default().fg(bar_color)),
             Span::styled(tok_str, Style::default().fg(Color::Yellow)),
             Span::styled(format!("+{}", r.added), Style::default().fg(GREEN)),
             Span::styled(",", Style::default().fg(Color::DarkGray)),
@@ -1727,6 +1797,8 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" edit  │  ", muted),
             Span::styled("tab", action),
             Span::styled(" switch  ", muted),
+            Span::styled("⇧↕", action),
+            Span::styled(" scroll  ", muted),
             Span::styled("?", action),
             Span::styled(" help  ", muted),
             Span::styled("q", action),
@@ -2108,6 +2180,14 @@ mod tests {
             path: Some(PathBuf::from("/tmp/x")),
             cost: crate::cost::Usage::default(),
         }
+    }
+
+    #[test]
+    fn inline_bar_fills_by_ratio() {
+        assert_eq!(inline_bar(1.0, 6), "██████");
+        assert_eq!(inline_bar(0.0, 6), "░░░░░░");
+        assert_eq!(inline_bar(0.5, 6), "███░░░");
+        assert_eq!(inline_bar(2.0, 4), "████"); // clamped
     }
 
     #[test]

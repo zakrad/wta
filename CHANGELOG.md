@@ -22,8 +22,9 @@ All notable changes to **wta** are documented here. The format is based on
   new worktree.
 - **`wta doctor`** — health check: resolved engine/version per role, tmux/git, hooks.
 - **`--json`** on `ls`, `matrix`, and `send` (with a `submitted` field).
-- **Dashboard** — a fleet-health rollup in the sidebar title + per-repo counts; rounded
-  borders.
+- **Dashboard (k9s-style)** — a top summary band (scope · agent count · colored status
+  rollup · fleet spend), per-agent token-burn bars, a status rollup in the sidebar title
+  + per-repo counts, and rounded borders.
 
 ### Changed
 - `wta send` confirms the agent **consumed the turn** (not just that keystrokes landed)
