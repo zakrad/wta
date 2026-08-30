@@ -18,13 +18,16 @@ All notable changes to **wta** are documented here. The format is based on
 - **`wta resume <task> --fresh`** — re-spawn without `--continue` (new conversation,
   same worktree). The CLI error for a dead resume now prints the pane's last output
   plus both recovery commands.
-- **Prefix-free scrollback while attached: `Alt-k` / `Shift-↑`** open tmux copy mode
-  on the agent's pane one page up (repeat to keep paging; `Shift-↑/↓` page inside copy
-  mode too, then your own `mode-keys` apply). This fixes keyboard scrolling when wta
-  runs inside your own tmux (WezTerm → tmux → wta): the outer server eats `Ctrl-b`, so
-  `Ctrl-b [` was scrolling the outer pane's shell history instead of the agent's chat.
-  Unbound Alt/Shift keys pass straight through. The attached status bar now reads
-  `Ctrl-q ↩ wta · Alt-k scroll`. Documented in the manual.
+- **Prefix-free keyboard scrollback while attached: `PgUp`/`PgDn`, `Alt-k`, `Shift-↑`.**
+  This fixes scrolling when wta runs inside your own tmux (WezTerm → tmux → wta): the
+  outer server eats `Ctrl-b`, so `Ctrl-b [` opened copy mode on the outer pane — the
+  shell's history, not the agent's chat. The keys are bound on wta's own server and
+  decide per keypress via `#{alternate_on}`: an alternate-screen agent (Claude Code
+  ≥ 2.1's fullscreen renderer, which scrolls its own buffer — tmux history is empty)
+  gets the key forwarded so it scrolls natively; a classic/plain-output agent gets tmux
+  copy mode one page up (repeat to keep paging, `Shift-↑/↓` page inside copy mode, then
+  your own `mode-keys`). The attached status bar reads `Ctrl-q ↩ wta · PgUp scroll`.
+  The manual shows the `~/.claude/keybindings.json` `Scroll` bindings for vim-style keys.
 
 ## [0.3.0] — 2026-08-11
 

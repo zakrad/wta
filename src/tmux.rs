@@ -130,7 +130,7 @@ fn ensure_hint_bar(name: &str) {
         ("status", "on"),
         ("status-style", "bg=default,fg=green"),
         ("status-left", ""),
-        ("status-right", " #[bold]Ctrl-q#[nobold] ↩ wta · #[bold]Alt-k#[nobold] scroll "),
+        ("status-right", " #[bold]Ctrl-q#[nobold] ↩ wta · #[bold]PgUp#[nobold] scroll "),
         ("status-right-length", "40"),
     ] {
         let _ = tmux().args(["set-option", "-g", opt, val]).status();
@@ -168,16 +168,25 @@ pub fn new_session(name: &str, cwd: &Path, program: &str, extra: &[String]) -> R
 /// Prefix-free scrollback keys on our dedicated server. When wta itself runs inside
 /// the user's tmux (WezTerm → tmux → wta → agent), the OUTER server eats `Ctrl-b`, so
 /// `Ctrl-b [` opens copy mode on the outer pane — whose history is the shell that
-/// launched wta, not the agent's chat (that lives in OUR pane). Unbound Alt/Shift keys
-/// pass straight through an outer tmux, so `Alt-k` / `Shift-↑` reach us and open copy
-/// mode one page up (repeat to keep paging); then the user's own mode-keys (vi: j/k,
-/// Ctrl-u/d, g/G, /, q) take over. Shift-↑ mirrors the dashboard's own scroll key.
+/// launched wta, not the agent's chat. Unbound Alt/Shift/PageUp keys pass straight
+/// through an outer tmux, so they reach us.
+///
+/// Two kinds of agent screen, handled per keypress via `#{alternate_on}`:
+/// - Claude Code ≥2.1's fullscreen renderer (and nvim, less…) runs in the ALTERNATE
+///   screen and scrolls its own buffer — tmux history is empty, copy mode would only
+///   show the current screen. Forward the key so the app scrolls (Claude: PageUp/Down
+///   natively; Alt-k/j etc. via ~/.claude/keybindings.json `Scroll` context).
+/// - classic renderers / plain output live in tmux history: open copy mode one page
+///   up (repeat to keep paging); the user's own mode-keys take over from there.
 fn ensure_scroll_keys() {
     if !dedicated() {
         return;
     }
-    for key in ["M-k", "S-Up"] {
-        let _ = tmux().args(["bind-key", "-n", key, "copy-mode", "-u"]).status();
+    for key in ["PPage", "M-k", "S-Up"] {
+        let fwd = format!("send-keys {key}");
+        let _ = tmux()
+            .args(["bind-key", "-n", key, "if-shell", "-F", "#{alternate_on}", &fwd, "copy-mode -u"])
+            .status();
     }
     // inside copy mode keep Shift-↑/↓ paging (same as the entry key), in both key tables
     for table in ["copy-mode", "copy-mode-vi"] {

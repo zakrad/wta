@@ -128,15 +128,24 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
 - **Attach** — `Enter`/`o` (or `wta attach <task>`) drops you into the agent's
   real terminal. Type normally. **`Ctrl-q` detaches** back to wta (not tmux's
   `Ctrl-b d`).
-- **Scrolling the agent's chat with the keyboard** — press **`Alt-k`** (or
-  **`Shift-↑`**) while attached: it opens tmux copy mode on the agent's pane one page
-  up, and repeats keep paging. From there your tmux `mode-keys` apply (vi: `j`/`k`,
-  `Ctrl-u`/`Ctrl-d`, `g`/`G`, `/` `?` search, `q` to leave; `Shift-↑/↓` page in
-  either mode). These keys need no prefix, which matters **if you run wta inside your
-  own tmux** (WezTerm → tmux → wta): the outer tmux eats `Ctrl-b`, so `Ctrl-b [` scrolls
-  the *outer* pane's history — your shell, not the agent's chat. (`Ctrl-b Ctrl-b [`
-  forwards the prefix by hand if you prefer; and `--server default` puts agents on your
-  own tmux server, so there's no nesting at all.) Mouse wheel works either way.
+- **Scrolling the agent's chat with the keyboard** — press **`PgUp`/`PgDn`** (Mac:
+  `Fn+↑/↓`) while attached. No prefix is needed, which matters **if you run wta inside
+  your own tmux** (WezTerm → tmux → wta): the outer tmux eats `Ctrl-b`, so `Ctrl-b [`
+  would open copy mode on the *outer* pane — your shell's history, not the agent's chat.
+  What the key does depends on how the agent draws:
+  - **Claude Code ≥ 2.1 (fullscreen renderer)** runs in the terminal's alternate screen
+    and scrolls its own buffer (tmux history is empty there, so copy mode can't help).
+    wta passes the key through and Claude scrolls natively (`PgUp`/`PgDn`,
+    `Ctrl+Home`/`Ctrl+End`). For vim-style keys, bind Claude's `Scroll` context in
+    `~/.claude/keybindings.json`, e.g. `alt+k`/`alt+j` → `scroll:lineUp`/`lineDown`,
+    `alt+shift+k`/`alt+shift+j` → `scroll:halfPageUp`/`halfPageDown`, `alt+g`/`alt+shift+g`
+    → `scroll:top`/`bottom` — wta forwards `Alt-k` too. (Or switch Claude to the classic
+    renderer with `/tui default`, which puts the chat in tmux history.)
+  - **Classic renderers / plain output** (`/tui default`, other agent CLIs): the chat is
+    in tmux history, so `PgUp` / `Alt-k` / `Shift-↑` open tmux copy mode one page up
+    (repeat to keep paging); your tmux `mode-keys` apply from there (vi: `j`/`k`,
+    `Ctrl-u`/`Ctrl-d`, `/`, `q` to leave; `Shift-↑/↓` page in either mode).
+  Mouse wheel works in both cases. `--server default` avoids nesting entirely.
 - **Resume** — `Enter` on an exited agent re-spawns it with `--continue`. If the
   session dies right after launch (typically Claude's *"No conversation found to
   continue"* — nothing saved for that worktree), wta shows what it printed and offers
