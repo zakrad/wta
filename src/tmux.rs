@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Which tmux server to use. Default is a dedicated socket ("wta") so wta is
 /// fully isolated from the user's own tmux. `WTA_TMUX_SOCKET=default` (or the
@@ -98,7 +98,9 @@ pub fn list_sessions() -> Vec<String> {
 fn configure(name: &str) {
     // Session-scoped (`-t <session>`): safe on any server — only affects our sessions.
     for (opt, val) in [("mouse", "on"), ("history-limit", "10000")] {
-        let _ = tmux().args(["set-option", "-t", name, opt, val]).status();
+        // stderr silenced: a program that dies instantly takes the session with it,
+        // and tmux's "no such session" would leak into the caller's terminal
+        let _ = tmux().args(["set-option", "-t", name, opt, val]).stderr(Stdio::null()).status();
     }
     if dedicated() {
         // We own this socket, so set server-globals: zero escape latency + Ctrl-q
@@ -123,12 +125,13 @@ fn ensure_hint_bar(name: &str) {
     }
     // Drop any stale per-session `status` override so the session inherits the bar.
     let _ = tmux().args(["set-option", "-u", "-t", name, "status"]).status();
+    ensure_scroll_keys();
     for (opt, val) in [
         ("status", "on"),
         ("status-style", "bg=default,fg=green"),
         ("status-left", ""),
-        ("status-right", " #[bold]Ctrl-q#[nobold] ↩ return to wta "),
-        ("status-right-length", "28"),
+        ("status-right", " #[bold]Ctrl-q#[nobold] ↩ wta · #[bold]Alt-k#[nobold] scroll "),
+        ("status-right-length", "40"),
     ] {
         let _ = tmux().args(["set-option", "-g", opt, val]).status();
     }
@@ -160,6 +163,76 @@ pub fn new_session(name: &str, cwd: &Path, program: &str, extra: &[String]) -> R
     }
     configure(name);
     Ok(())
+}
+
+/// Prefix-free scrollback keys on our dedicated server. When wta itself runs inside
+/// the user's tmux (WezTerm → tmux → wta → agent), the OUTER server eats `Ctrl-b`, so
+/// `Ctrl-b [` opens copy mode on the outer pane — whose history is the shell that
+/// launched wta, not the agent's chat (that lives in OUR pane). Unbound Alt/Shift keys
+/// pass straight through an outer tmux, so `Alt-k` / `Shift-↑` reach us and open copy
+/// mode one page up (repeat to keep paging); then the user's own mode-keys (vi: j/k,
+/// Ctrl-u/d, g/G, /, q) take over. Shift-↑ mirrors the dashboard's own scroll key.
+fn ensure_scroll_keys() {
+    if !dedicated() {
+        return;
+    }
+    for key in ["M-k", "S-Up"] {
+        let _ = tmux().args(["bind-key", "-n", key, "copy-mode", "-u"]).status();
+    }
+    // inside copy mode keep Shift-↑/↓ paging (same as the entry key), in both key tables
+    for table in ["copy-mode", "copy-mode-vi"] {
+        let _ = tmux().args(["bind-key", "-T", table, "S-Up", "send-keys", "-X", "page-up"]).status();
+        let _ = tmux().args(["bind-key", "-T", table, "S-Down", "send-keys", "-X", "page-down"]).status();
+    }
+}
+
+/// Watch a just-spawned session for `grace`: if its program dies inside that window
+/// (classic case: `claude --continue` with no saved conversation → "No conversation
+/// found to continue" and exit 1), return what the pane printed and kill the session,
+/// so the caller can explain the failure instead of showing a bare "exited" row.
+/// `None` means it's still running (the pane is left exactly as spawned).
+///
+/// Works by holding the pane open with `remain-on-exit` for the grace period, which
+/// keeps the dying program's last screen readable via capture-pane.
+pub fn watch_early_exit(name: &str, grace: Duration) -> Option<String> {
+    let set_remain = |val: &str| {
+        let _ = tmux()
+            .args(["set-option", "-w", "-t", name, "remain-on-exit", val])
+            .stderr(Stdio::null())
+            .status();
+    };
+    set_remain("on");
+    let start = Instant::now();
+    loop {
+        if !has_session(name) {
+            // died before we could hold the pane — nothing to read back
+            return Some(String::new());
+        }
+        let dead = tmux()
+            .args(["display-message", "-p", "-t", name, "#{pane_dead}"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+            .unwrap_or(false);
+        if dead {
+            let text = capture(name).unwrap_or_default();
+            let _ = kill(name);
+            // last few non-blank lines: the error is at the bottom of the pane
+            let tail: Vec<&str> = text
+                .lines()
+                .map(str::trim_end)
+                // drop blanks and tmux's own remain-on-exit banner ("Pane is dead …")
+                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Pane is dead"))
+                .collect();
+            let keep = tail.len().saturating_sub(4);
+            return Some(tail[keep..].join("\n"));
+        }
+        if start.elapsed() >= grace {
+            break;
+        }
+        sleep(Duration::from_millis(150));
+    }
+    set_remain("off");
+    None
 }
 
 /// Visible pane text of a session (plain, no escapes) — for hashing + status/trust

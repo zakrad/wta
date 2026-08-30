@@ -1628,43 +1628,112 @@ fn repo_of_worktree(wt: &Path) -> Option<String> {
 /// — no dependence on the current directory, so the session name + WTA_REPO + state
 /// exactly match what the dashboard row already tracks (fixes resume across repos and
 /// for duplicate task names).
-pub fn resume_session(repo: &str, task: &str, wt: &Path) -> Result<()> {
+///
+/// `fresh` drops the continue flag: a brand-new conversation in the existing worktree
+/// (branch + uncommitted work kept) — the dashboard's "start fresh" choice and
+/// `wta resume --fresh`.
+pub fn resume_session(repo: &str, task: &str, wt: &Path, fresh: bool) -> Result<()> {
+    let tail = if fresh { Vec::new() } else { resume_args() };
+    resume_session_with(repo, task, wt, &tail)
+}
+
+/// A resumed session that died right after launch. Carries the pane's last output so
+/// the CLI/dashboard can say WHY (typically Claude's "No conversation found to
+/// continue") and offer a way out, instead of a row that just flips back to ✗.
+#[derive(Debug)]
+pub struct ResumeDied {
+    pub task: String,
+    pub output: String,
+}
+
+impl std::fmt::Display for ResumeDied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let why = if self.output.trim().is_empty() {
+            "(no output)".to_string()
+        } else {
+            self.output.clone()
+        };
+        write!(
+            f,
+            "'{t}' exited right after launch:\n  {why}\n\
+             start a fresh conversation in the same worktree: `wta resume {t} --fresh`\n\
+             or recreate it from scratch: `wta rm {t} && wta new {t}`",
+            t = self.task,
+            why = why.replace('\n', "\n  "),
+        )
+    }
+}
+impl std::error::Error for ResumeDied {}
+
+/// How long we watch a resumed session for an immediate death before calling it
+/// running. `claude --continue` fails within ~1s; this only delays the SUCCESS path.
+const RESUME_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
+
+fn resume_session_with(repo: &str, task: &str, wt: &Path, tail: &[String]) -> Result<()> {
     if !wt.exists() {
         bail!("no worktree at {} to resume", wt.display());
     }
     let idx = status::read_state(repo, task).map(|s| s.index).unwrap_or_else(|| assign_slot(repo));
+    // Cheap, deterministic pre-check: `claude --continue` looks for a transcript under
+    // ~/.claude/projects/<encoded cwd>; with none it prints "No conversation found to
+    // continue" and exits 1. Don't even spawn — report it as the same typed failure.
+    let wants_continue = tail.iter().any(|a| a == "--continue" || a == "-c");
+    let is_claude = agent_cmd()
+        .split_whitespace()
+        .next()
+        .map(crate::roles::is_claude)
+        .unwrap_or(false);
+    if wants_continue && is_claude && !crate::cost::has_transcript(wt) {
+        return Err(ResumeDied {
+            task: task.to_string(),
+            output: format!(
+                "No conversation found to continue (no Claude transcript for {})",
+                wt.display()
+            ),
+        }
+        .into());
+    }
     preseed_claude_trust(wt);
     let session = tmux::session_name(repo, task);
-    let (prog, extra) = agent_argv(repo, task, idx, &resume_args());
+    let (prog, extra) = agent_argv(repo, task, idx, tail);
     tmux::new_session(&session, wt, &prog, &extra)?;
+    // Record BEFORE the grace watch: the agent's hooks may already write a newer state
+    // (needs_input) inside the window, and a later "running" would clobber it.
     let _ = status::record(repo, task, "running", &wt.to_string_lossy());
+    // Generic backstop for any engine/flag: if the pane dies inside the grace window,
+    // surface what it printed rather than letting the row silently flip back to ✗.
+    if let Some(out) = tmux::watch_early_exit(&session, RESUME_GRACE) {
+        let _ = status::record(repo, task, "exited", &wt.to_string_lossy());
+        return Err(ResumeDied { task: task.to_string(), output: out }.into());
+    }
     Ok(())
 }
 
 /// Resume the agent living at worktree `wt`, resolving its repo id from the worktree
 /// (falling back to the cwd repo). Used by CLI resume-by-path.
-pub fn resume_at(task: &str, wt: &Path) -> Result<()> {
+pub fn resume_at(task: &str, wt: &Path, fresh: bool) -> Result<()> {
     if !wt.exists() {
         bail!("no worktree at {} to resume", wt.display());
     }
     let repo = repo_of_worktree(wt)
         .or_else(|| repo_id().ok())
         .context("cannot resolve the repo for this worktree")?;
-    resume_session(&repo, task, wt)
+    resume_session(&repo, task, wt, fresh)
 }
 
 /// Resume by task name (looks up the worktree under the current repo). For an ADOPTED
 /// agent the worktree is the registered dir, not `.agents/<task>`, so use that.
-pub fn resume(task: &str) -> Result<()> {
+/// `fresh` drops the continue flag (new conversation, same worktree).
+pub fn resume(task: &str, fresh: bool) -> Result<()> {
     let root = repo_root()?;
     let repo = repo_id_of(&root);
     if let Some(st) = status::read_state(&repo, task) {
         if st.adopted && !st.cwd.is_empty() {
-            return resume_session(&repo, task, Path::new(&st.cwd));
+            return resume_session(&repo, task, Path::new(&st.cwd), fresh);
         }
     }
     let wt = worktrees_dir(&root).join(task);
-    resume_at(task, &wt)
+    resume_at(task, &wt, fresh)
 }
 
 /// `wta adopt <task> [--dir <path>]` — register an EXISTING directory (where you're

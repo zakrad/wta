@@ -4,6 +4,28 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-08-30
+
+### Added
+- **Resume failures explain themselves.** Resuming an agent whose session dies right
+  after launch (the classic case: `claude --continue` in a worktree with no saved
+  conversation → *"No conversation found to continue"*, exit 1) used to just flip the
+  row back to ✗ with no clue why. wta now pre-checks for a Claude transcript before
+  spawning, and otherwise watches the new pane for ~2s and captures what it printed.
+  The dashboard opens a **resume failed** modal with the reason and two ways out:
+  **`f`** start a fresh conversation in the same worktree (branch + uncommitted work
+  kept), or **`r`** recreate from scratch (`rm` + `new` under the same name and base).
+- **`wta resume <task> --fresh`** — re-spawn without `--continue` (new conversation,
+  same worktree). The CLI error for a dead resume now prints the pane's last output
+  plus both recovery commands.
+- **Prefix-free scrollback while attached: `Alt-k` / `Shift-↑`** open tmux copy mode
+  on the agent's pane one page up (repeat to keep paging; `Shift-↑/↓` page inside copy
+  mode too, then your own `mode-keys` apply). This fixes keyboard scrolling when wta
+  runs inside your own tmux (WezTerm → tmux → wta): the outer server eats `Ctrl-b`, so
+  `Ctrl-b [` was scrolling the outer pane's shell history instead of the agent's chat.
+  Unbound Alt/Shift keys pass straight through. The attached status bar now reads
+  `Ctrl-q ↩ wta · Alt-k scroll`. Documented in the manual.
+
 ## [0.3.0] — 2026-08-11
 
 ### Added

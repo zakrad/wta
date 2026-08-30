@@ -144,9 +144,10 @@ fn main() -> anyhow::Result<()> {
             worktree::stop(&task)?;
             println!("stopped '{task}' — worktree kept; resume with `wta resume {task}`");
         }
-        Command::Resume { task } => {
-            worktree::resume(&task)?;
-            println!("resumed '{task}' — attach with `wta attach {task}`");
+        Command::Resume { task, fresh } => {
+            worktree::resume(&task, fresh)?;
+            let how = if fresh { "fresh conversation" } else { "continued" };
+            println!("resumed '{task}' ({how}) — attach with `wta attach {task}`");
         }
         Command::Push { task, pr } => {
             let summary = worktree::push(&task, pr)?;

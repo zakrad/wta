@@ -267,7 +267,13 @@ pub enum Command {
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later
     Stop { task: String },
     /// Resume a stopped agent — re-spawn its session in the existing worktree
-    Resume { task: String },
+    Resume {
+        task: String,
+        /// start a NEW conversation in the same worktree (skip `--continue`) — for when
+        /// there's nothing to continue, or you want a clean context
+        #[arg(long)]
+        fresh: bool,
+    },
     /// Commit + push the agent's branch; with --pr, also open a PR via gh
     Push {
         task: String,

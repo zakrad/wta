@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -100,6 +100,17 @@ enum Modal {
     Confirm(String),
     ForceKill { task: String, unpushed: u32 },
     Resume { task: String, repo: String, path: PathBuf },
+    /// Resume died right after launch (e.g. `claude --continue` with nothing to
+    /// continue). Shows WHY and offers: `f` fresh conversation in the same worktree,
+    /// `r` recreate — rm the worktree + `wta new` under the same name and base.
+    ResumeFailed {
+        task: String,
+        repo: String,
+        path: PathBuf,
+        root: PathBuf,
+        base: String,
+        reason: String,
+    },
     Push(String),
     BranchPick {
         branches: Vec<String>,
@@ -528,8 +539,74 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 KeyCode::Char('y') => {
                     let (task, repo, path) = (task.clone(), repo.clone(), path.clone());
                     app.modal = Modal::None;
-                    if let Err(e) = worktree::resume_session(&repo, &task, &path) {
-                        app.set_err(e);
+                    if let Err(e) = worktree::resume_session(&repo, &task, &path, false) {
+                        match e.downcast_ref::<worktree::ResumeDied>() {
+                            // died on launch → explain + offer fresh / recreate
+                            Some(d) => {
+                                let (root, base) = app
+                                    .rows
+                                    .iter()
+                                    .find(|r| r.task == task && r.repo == repo)
+                                    .map(|r| (r.root.clone(), r.base.clone()))
+                                    .unwrap_or_default();
+                                app.modal = Modal::ResumeFailed {
+                                    task,
+                                    repo,
+                                    path,
+                                    root,
+                                    base,
+                                    reason: d.output.clone(),
+                                };
+                            }
+                            None => app.set_err(e),
+                        }
+                    }
+                    refresh(app);
+                    load_detail(app);
+                }
+                KeyCode::Char('n') | KeyCode::Esc => app.modal = Modal::None,
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::ResumeFailed { task, repo, path, root, base, .. } => {
+            match key.code {
+                // fresh conversation, same worktree (branch + uncommitted work kept)
+                KeyCode::Char('f') => {
+                    let (task, repo, path) = (task.clone(), repo.clone(), path.clone());
+                    app.modal = Modal::None;
+                    match worktree::resume_session(&repo, &task, &path, true) {
+                        Ok(_) => app.set_info(format!("'{task}' restarted with a fresh conversation")),
+                        Err(e) => app.set_err(e),
+                    }
+                    refresh(app);
+                    load_detail(app);
+                }
+                // clean slate: rm worktree + branch, then `wta new` with the same name/base.
+                // Only when nothing can be lost — otherwise point at D (which warns properly).
+                KeyCode::Char('r') => {
+                    let (task, repo, path, root, base) =
+                        (task.clone(), repo.clone(), path.clone(), root.clone(), base.clone());
+                    app.modal = Modal::None;
+                    match recreate_guard(&repo, &task, &path, &base) {
+                        Err(why) => app.set_err(why),
+                        Ok(()) => {
+                            // force: the guard proved the worktree is clean and the branch
+                            // fully merged, and a plain rm would leave an unmerged branch
+                            // behind that makes the `new --base` below bail.
+                            let res = in_repo(&root, || {
+                                worktree::rm(&task, true).context("rm failed")?;
+                                if base.is_empty() {
+                                    worktree::new(&task, &[])
+                                } else {
+                                    worktree::new_with_base(&task, &[], &base)
+                                }
+                            });
+                            match res {
+                                Ok(_) => app.set_info(format!("recreated '{task}' from scratch")),
+                                Err(e) => app.set_err(format!("{e:#}")),
+                            }
+                        }
                     }
                     refresh(app);
                     load_detail(app);
@@ -1245,6 +1322,37 @@ fn untracked_adds(path: &Path, rel: &str) -> u32 {
     }
 }
 /// Commits on HEAD not present on any remote — work that a force-kill would destroy.
+/// Is "recreate from scratch" safe for this agent? Refuses (with the reason) when it
+/// would destroy anything: an adopted agent (its dir isn't a wta worktree — `rm` only
+/// untracks it, and `new` would build an unrelated one), uncommitted changes, or
+/// commits not yet in the base branch.
+fn recreate_guard(repo: &str, task: &str, path: &Path, base: &str) -> Result<(), String> {
+    if crate::status::read_state(repo, task).map(|s| s.adopted).unwrap_or(false) {
+        return Err(format!(
+            "'{task}' is an adopted session (not a wta worktree) — use f, or rm + new manually"
+        ));
+    }
+    if !path.exists() {
+        return Err(format!("no worktree at {} — press D, then n", path.display()));
+    }
+    let dirty = git_in(path, &["status", "--porcelain"]).map(|s| !s.trim().is_empty()).unwrap_or(true);
+    if dirty {
+        return Err(format!("'{task}' has uncommitted changes — kill it with D first, then n"));
+    }
+    if !base.is_empty() {
+        let range = format!("{base}..HEAD");
+        let ahead: u32 = git_in(path, &["rev-list", "--count", &range])
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        if ahead > 0 {
+            return Err(format!(
+                "'{task}' has {ahead} commit(s) not in {base} — push/land them, or D to discard"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn unpushed_count(path: &Path) -> u32 {
     git_in(path, &["rev-list", "--count", "HEAD", "--not", "--remotes"])
         .and_then(|s| s.trim().parse().ok())
@@ -2367,6 +2475,49 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::ResumeFailed { task, reason, .. } => {
+            let why: Vec<&str> = reason.lines().filter(|l| !l.trim().is_empty()).collect();
+            let width = 72.min(f.area().width.saturating_sub(2)).max(40);
+            let inner = width.saturating_sub(4) as usize;
+            let mut body = vec![Line::styled(
+                format!("'{task}' exited right after launch:"),
+                Style::default().fg(RED),
+            )];
+            for l in why.iter().take(4) {
+                let mut t: String = l.trim().chars().take(inner).collect();
+                if l.trim().chars().count() > inner {
+                    t.push('…');
+                }
+                body.push(Line::styled(format!("  {t}"), Style::default().fg(Color::DarkGray)));
+            }
+            if why.is_empty() {
+                body.push(Line::styled("  (no output)", Style::default().fg(Color::DarkGray)));
+            }
+            body.push(Line::from(""));
+            body.push(Line::from(vec![
+                Span::styled("f", Style::default().fg(GREEN)),
+                Span::raw("  fresh conversation in the same worktree (keeps branch + changes)"),
+            ]));
+            body.push(Line::from(vec![
+                Span::styled("r", Style::default().fg(GREEN)),
+                Span::raw("  recreate from scratch (rm worktree + new agent, same name)"),
+            ]));
+            body.push(Line::from(vec![
+                Span::styled("esc", Style::default().fg(RED)),
+                Span::raw("  leave it"),
+            ]));
+            let area = centered(width, body.len() as u16 + 2, f.area());
+            f.render_widget(Clear, area);
+            f.render_widget(
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(RED))
+                        .title(" resume failed "),
+                ),
+                area,
+            );
+        }
         Modal::Push(task) => {
             let area = centered(58, 5, f.area());
             f.render_widget(Clear, area);
@@ -2930,6 +3081,56 @@ mod tests {
         println!("\n{screen}\n");
         assert!(screen.contains('✗'));
         assert!(screen.contains("resume"));
+    }
+
+    #[test]
+    fn resume_failed_modal_shows_reason_and_choices() {
+        let mut app = App::new();
+        app.rows = vec![row("gone", Status::Exited, false, 1, 0)];
+        app.sel = 0;
+        app.modal = Modal::ResumeFailed {
+            task: "gone".into(),
+            repo: "r".into(),
+            path: PathBuf::from("/tmp/gone"),
+            root: PathBuf::from("/tmp"),
+            base: "main".into(),
+            reason: "No conversation found to continue".into(),
+        };
+        let screen = render_to_string(&mut app, 100, 16);
+        println!("\n{screen}\n");
+        assert!(screen.contains("resume failed"));
+        assert!(screen.contains("No conversation found to continue"));
+        assert!(screen.contains("fresh conversation"));
+        assert!(screen.contains("recreate from scratch"));
+    }
+
+    #[test]
+    fn recreate_guard_refuses_dirty_or_unmerged_and_allows_clean() {
+        let dir = std::env::temp_dir().join(format!("wta-recreate-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = |args: &[&str]| {
+            let o = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        g(&["init", "-q", "-b", "main"]);
+        g(&["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"]);
+        g(&["checkout", "-q", "-b", "feat"]);
+        // clean + fully merged into main → allowed (task "zz-guard" has no wta state → not adopted)
+        assert_eq!(recreate_guard("r", "zz-guard", &dir, "main"), Ok(()));
+        // a commit not in main → refused
+        g(&["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "work"]);
+        let e = recreate_guard("r", "zz-guard", &dir, "main").unwrap_err();
+        assert!(e.contains("1 commit(s) not in main"), "{e}");
+        // uncommitted file → refused
+        g(&["reset", "-q", "--hard", "main"]);
+        std::fs::write(dir.join("x.txt"), "x").unwrap();
+        let e = recreate_guard("r", "zz-guard", &dir, "main").unwrap_err();
+        assert!(e.contains("uncommitted"), "{e}");
+        // missing worktree → refused
+        let e = recreate_guard("r", "zz-guard", &dir.join("nope"), "main").unwrap_err();
+        assert!(e.contains("no worktree"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

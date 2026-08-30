@@ -128,6 +128,21 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
 - **Attach** — `Enter`/`o` (or `wta attach <task>`) drops you into the agent's
   real terminal. Type normally. **`Ctrl-q` detaches** back to wta (not tmux's
   `Ctrl-b d`).
+- **Scrolling the agent's chat with the keyboard** — press **`Alt-k`** (or
+  **`Shift-↑`**) while attached: it opens tmux copy mode on the agent's pane one page
+  up, and repeats keep paging. From there your tmux `mode-keys` apply (vi: `j`/`k`,
+  `Ctrl-u`/`Ctrl-d`, `g`/`G`, `/` `?` search, `q` to leave; `Shift-↑/↓` page in
+  either mode). These keys need no prefix, which matters **if you run wta inside your
+  own tmux** (WezTerm → tmux → wta): the outer tmux eats `Ctrl-b`, so `Ctrl-b [` scrolls
+  the *outer* pane's history — your shell, not the agent's chat. (`Ctrl-b Ctrl-b [`
+  forwards the prefix by hand if you prefer; and `--server default` puts agents on your
+  own tmux server, so there's no nesting at all.) Mouse wheel works either way.
+- **Resume** — `Enter` on an exited agent re-spawns it with `--continue`. If the
+  session dies right after launch (typically Claude's *"No conversation found to
+  continue"* — nothing saved for that worktree), wta shows what it printed and offers
+  **`f`** a fresh conversation in the same worktree (branch + changes kept) or **`r`**
+  recreate from scratch (`rm` + `new` under the same name and base). CLI equivalents:
+  `wta resume <task> --fresh` / `wta rm <task> && wta new <task>`.
 - **Quick-send** — press `i`, type one line, `Enter`. It's injected into the
   agent without attaching. Gated to when the agent is `●` ready and idle, so you
   never inject mid-stream.
@@ -479,6 +494,7 @@ exited status is detected automatically for any agent, with or without hooks.
 ```sh
 wta stop fix-auth      # kill the tmux session, KEEP the worktree (resumable)
 wta resume fix-auth    # re-spawn the session in the existing worktree (claude --continue)
+wta resume fix-auth --fresh   # same worktree, NEW conversation (when there's nothing to continue)
 wta rm fix-auth        # destroy: session + worktree + branch
 wta rm fix-auth --force # also discard uncommitted work / an unmerged branch
 ```
