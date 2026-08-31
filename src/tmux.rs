@@ -126,12 +126,13 @@ fn ensure_hint_bar(name: &str) {
     // Drop any stale per-session `status` override so the session inherits the bar.
     let _ = tmux().args(["set-option", "-u", "-t", name, "status"]).status();
     ensure_scroll_keys();
+    ensure_copy_key();
     for (opt, val) in [
         ("status", "on"),
         ("status-style", "bg=default,fg=green"),
         ("status-left", ""),
-        ("status-right", " #[bold]Ctrl-q#[nobold] ↩ wta · #[bold]PgUp#[nobold] scroll "),
-        ("status-right-length", "40"),
+        ("status-right", " #[bold]Ctrl-q#[nobold] ↩ wta · #[bold]PgUp#[nobold] scroll · #[bold]Alt-y#[nobold] copy "),
+        ("status-right-length", "52"),
     ] {
         let _ = tmux().args(["set-option", "-g", opt, val]).status();
     }
@@ -195,6 +196,34 @@ fn ensure_scroll_keys() {
     }
 }
 
+/// `Alt-y` while attached: wta's own vim-style copy mode in a tmux popup over the agent
+/// (see `copyview`). Works for any agent regardless of how it draws — and passes through
+/// an outer tmux, since it's an unbound Alt key there. The popup runs THIS binary
+/// (`current_exe`) so it doesn't depend on `wta` being on the pane's PATH.
+///
+/// Goes through `run-shell` because `display-popup` does NOT expand formats in its
+/// command, while `run-shell` does — that's how one server-wide binding learns which
+/// agent (`#{session_name}`) and which client (`#{client_name}`) the key fired in.
+fn ensure_copy_key() {
+    if !dedicated() {
+        return;
+    }
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "wta".into());
+    let sh_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let cmd = format!(
+        "tmux -L {sock} display-popup -c '#{{client_name}}' -E -w 96% -h 96% -T ' copy mode · q closes ' \
+         {exe} copy --session '#{{session_name}}'",
+        sock = socket_name(),
+        exe = sh_quote(&exe),
+    );
+    let _ = tmux()
+        .args(["bind-key", "-n", "M-y", "run-shell", "-b", &cmd])
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// Watch a just-spawned session for `grace`: if its program dies inside that window
 /// (classic case: `claude --continue` with no saved conversation → "No conversation
 /// found to continue" and exit 1), return what the pane printed and kill the session,
@@ -249,6 +278,19 @@ pub fn watch_early_exit(name: &str, grace: Duration) -> Option<String> {
 pub fn capture(name: &str) -> Option<String> {
     let out = tmux()
         .args(["capture-pane", "-p", "-t", name])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The pane's FULL history as plain text (`-S -`), for wta's copy mode when there's no
+/// transcript to read. Empty for alternate-screen apps (their history isn't tmux's).
+pub fn capture_full(name: &str) -> Option<String> {
+    let out = tmux()
+        .args(["capture-pane", "-p", "-S", "-", "-t", name])
         .output()
         .ok()?;
     if !out.status.success() {

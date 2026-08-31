@@ -146,6 +146,18 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
     (repeat to keep paging); your tmux `mode-keys` apply from there (vi: `j`/`k`,
     `Ctrl-u`/`Ctrl-d`, `/`, `q` to leave; `Shift-↑/↓` page in either mode).
   Mouse wheel works in both cases. `--server default` avoids nesting entirely.
+- **Copy mode (wta's own, vim-style)** — press **`c`** on an agent in the dashboard,
+  **`Alt-y` while attached** (opens over the agent in a tmux popup — passes through an
+  outer tmux), or run `wta copy <task>`. It's a keyboard-only, agent-agnostic view of the
+  conversation: it doesn't matter whether the agent draws in the alternate screen
+  (Claude's fullscreen renderer), classic scrollback, or is a different CLI entirely.
+  wta reads the agent's **transcript** when it knows the format (Claude Code JSONL:
+  `you ›` / `claude ›` messages, tool calls summarized, results folded) and otherwise the
+  session's **full tmux scrollback**. Keys: `j`/`k` move, `Ctrl-u`/`Ctrl-d` half page,
+  `PgUp`/`PgDn` page, `g`/`G` top/bottom, **`[`/`]` previous/next message**, `/` search
+  then `n`/`N`, **`v` start a line selection, move, `y` yank** to the clipboard (`pbcopy`
+  / `wl-copy` / `xclip` / `xsel`, else OSC 52), `Y` yank the current line, `Esc` clear,
+  `q` quit. Selections are line-wise, like `V` in vim.
 - **Resume** — `Enter` on an exited agent re-spawns it with `--continue`. If the
   session dies right after launch (typically Claude's *"No conversation found to
   continue"* — nothing saved for that worktree), wta shows what it printed and offers
@@ -504,6 +516,7 @@ exited status is detected automatically for any agent, with or without hooks.
 wta stop fix-auth      # kill the tmux session, KEEP the worktree (resumable)
 wta resume fix-auth    # re-spawn the session in the existing worktree (claude --continue)
 wta resume fix-auth --fresh   # same worktree, NEW conversation (when there's nothing to continue)
+wta copy fix-auth      # vim-style copy mode over the agent's conversation (also: c in the dash, Alt-y attached)
 wta rm fix-auth        # destroy: session + worktree + branch
 wta rm fix-auth --force # also discard uncommitted work / an unmerged branch
 ```

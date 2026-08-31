@@ -7,6 +7,16 @@ All notable changes to **wta** are documented here. The format is based on
 ## [0.3.1] — 2026-08-30
 
 ### Added
+- **wta copy mode — vim-style, keyboard-only, agent-agnostic.** `c` on an agent in the
+  dashboard, **`Alt-y` while attached** (a tmux popup over the agent, works through an
+  outer tmux), or `wta copy <task>`. tmux's own copy mode only sees tmux history, which
+  is empty for alternate-screen renderers (Claude Code ≥ 2.1 fullscreen), and every agent
+  CLI has a different (or no) keyboard-selection story — so wta builds the text itself:
+  the agent's transcript when it knows the format (Claude Code JSONL, rendered as
+  `you ›` / `claude ›` messages with tool calls summarized and results folded), else the
+  session's full tmux scrollback. Keys: `j`/`k`, `Ctrl-u`/`Ctrl-d`, `PgUp`/`PgDn`,
+  `g`/`G`, `[`/`]` message jumps, `/` `n` `N` search, `v` line selection, `y` yank to
+  the clipboard (pbcopy / wl-copy / xclip / xsel, else OSC 52), `Y` current line, `q`.
 - **Resume failures explain themselves.** Resuming an agent whose session dies right
   after launch (the classic case: `claude --continue` in a worktree with no saved
   conversation → *"No conversation found to continue"*, exit 1) used to just flip the

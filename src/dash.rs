@@ -214,6 +214,7 @@ struct App {
     spin: usize,
     msg: Option<(String, bool, Instant)>, // (text, is_error, when)
     attach: Option<String>,               // session to attach to after this frame
+    copy: Option<(String, String)>,       // (repo, task) to open copy mode on after this frame
     open: Option<(String, PathBuf)>,      // (editor cmd, worktree) to open inline after this frame
     scroll: u16,                          // preview/diff scroll offset
     scrollback: Option<String>,           // Some => Preview scroll mode: full (colored) history snapshot
@@ -271,6 +272,7 @@ impl App {
             spin: 0,
             msg: None,
             attach: None,
+            copy: None,
             open: None,
             scroll: 0,
             scrollback: None,
@@ -356,6 +358,19 @@ fn in_repo<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     r
 }
 
+/// Suspend the TUI, run wta's copy mode over the agent's conversation, resume on `q`.
+fn copy_inline(term: &mut Term, repo: &str, task: &str, app: &mut App) {
+    disable_raw_mode().ok();
+    execute!(term.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show).ok();
+    let res = crate::copyview::run(crate::copyview::source_for(repo, task));
+    enable_raw_mode().ok();
+    execute!(term.backend_mut(), EnterAlternateScreen, crossterm::cursor::Hide).ok();
+    let _ = term.clear();
+    if let Err(e) = res {
+        app.set_err(e);
+    }
+}
+
 /// Suspend the TUI, attach to the tmux session inline, resume on detach.
 fn attach_inline(term: &mut Term, session: &str) {
     disable_raw_mode().ok();
@@ -405,6 +420,11 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
             attach_inline(term, &session);
             refresh(&mut app);
             load_detail(&mut app);
+            last_tick = Instant::now();
+        }
+
+        if let Some((repo, task)) = app.copy.take() {
+            copy_inline(term, &repo, &task, &mut app);
             last_tick = Instant::now();
         }
 
@@ -928,6 +948,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 } else {
                     app.set_err("no session and no worktree to resume");
                 }
+            }
+        }
+        // wta's own vim-style copy mode over the agent's conversation (any renderer);
+        // runs after this frame, like attach, since it takes over the terminal
+        KeyCode::Char('c') => {
+            if let Some((repo, task)) = app.selected().map(|r| (r.repo.clone(), r.task.clone())) {
+                app.copy = Some((repo, task));
             }
         }
         KeyCode::Char('n') => open_new(app, false),
@@ -2753,6 +2780,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("m", "mergeability matrix (conflict preview)"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("i", "send one line to the agent (when ● ready)"),
+                k("c", "copy mode: vi-style scroll/search/select/yank of the conversation (Alt-y while attached)"),
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
                 k("e", "open the worktree in nvim (new tmux window) / $EDITOR"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
