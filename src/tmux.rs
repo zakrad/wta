@@ -134,11 +134,12 @@ fn ensure_hint_bar(name: &str) {
     let chip = |bg: &str, key: &str, label: &str| {
         format!("#[fg=black,bg={bg},bold] {key} #[fg={bg},bg=default,nobold] {label} ")
     };
+    // all green: one hue reads calmer and matches wta's identity (and the left chip)
     let right = format!(
         "{}{}{}",
-        chip("blue", "PgUp", "scroll"),
-        chip("yellow", alt_y, "copy"),
-        chip("red", ctrl_q, "back"),
+        chip("green", "PgUp", "scroll"),
+        chip("green", alt_y, "copy"),
+        chip("green", ctrl_q, "back"),
     );
     for (opt, val) in [
         ("status", "on"),
