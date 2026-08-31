@@ -123,6 +123,11 @@ fn ensure_hint_bar(name: &str) {
     if !dedicated() {
         return;
     }
+    // Opt out once the keys are muscle memory: no bar at all while attached.
+    if std::env::var("WTA_HINT_BAR").map(|v| v == "0").unwrap_or(false) {
+        let _ = tmux().args(["set-option", "-g", "status", "off"]).status();
+        return;
+    }
     // Drop any stale per-session `status` override so the session inherits the bar.
     let _ = tmux().args(["set-option", "-u", "-t", name, "status"]).status();
     ensure_scroll_keys();
@@ -146,9 +151,11 @@ fn ensure_hint_bar(name: &str) {
         ("status-style", "bg=default,fg=default"),
         // left: which agent you're in — `repo › task` as a green chip (set per session by
         // `set_label`; sessions from before that option existed fall back to the name)
+        // …with the agent's live state glyph (set by `set_status_chip`); the chip turns
+        // yellow when the agent needs you
         (
             "status-left",
-            "#[fg=black,bg=green,bold] #{?@wta_label,#{@wta_label},#{session_name}} #[default]",
+            "#[fg=black,bg=#{?#{@wta_attn},yellow,green},bold] #{?@wta_label,#{@wta_label},#{session_name}} #{@wta_glyph}#[default]",
         ),
         ("status-left-length", "48"),
         ("status-right", right.as_str()),
@@ -194,6 +201,31 @@ pub fn set_label(name: &str, repo_name: &str, task: &str) {
         .args(["set-option", "-t", name, "@wta_label", &label])
         .stderr(Stdio::null())
         .status();
+}
+
+/// Reflect an agent's state in its status-bar chip: a glyph after `repo › task`, and a
+/// yellow chip while it needs you. Same vocabulary as the dashboard. Called by the
+/// dashboard on every status change and by the `wta status` hook, so it's live whether
+/// or not a dashboard is open.
+pub fn set_status_chip(name: &str, status: &str) {
+    if !dedicated() {
+        return;
+    }
+    let (glyph, attn) = match status {
+        "running" => ("⟳", false),
+        "ready" | "waiting" => ("●", false),
+        "needs_input" => ("▲", true),
+        "merged" => ("✓", false),
+        "exited" | "idle" => ("✗", false),
+        _ => ("", false),
+    };
+    for (opt, val) in [("@wta_glyph", glyph), ("@wta_attn", if attn { "1" } else { "" })] {
+        let _ = tmux()
+            .args(["set-option", "-t", name, opt, val])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status();
+    }
 }
 
 /// Prefix-free scrollback keys on our dedicated server. When wta itself runs inside
@@ -314,6 +346,20 @@ pub fn capture(name: &str) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The current working directory of a session's active pane — the agent's real cwd,
+/// which is where its transcript is keyed. `None` if the session is gone.
+pub fn pane_path(name: &str) -> Option<String> {
+    let out = tmux()
+        .args(["display-message", "-p", "-t", name, "#{pane_current_path}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
 }
 
 /// The pane's FULL history as plain text (`-S -`), for wta's copy mode when there's no

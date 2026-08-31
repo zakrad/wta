@@ -16,7 +16,15 @@ All notable changes to **wta** are documented here. The format is based on
   `you ›` / `claude ›` messages with tool calls summarized and results folded), else the
   session's full tmux scrollback. Keys: `j`/`k`, `Ctrl-u`/`Ctrl-d`, `PgUp`/`PgDn`,
   `g`/`G`, `[`/`]` message jumps, `/` `n` `N` search, `v` line selection, `y` yank to
-  the clipboard (pbcopy / wl-copy / xclip / xsel, else OSC 52), `Y` current line, `q`.
+  the clipboard (pbcopy / wl-copy / xclip / xsel, else OSC 52), `Y` current line, **`m`
+  yank the whole message**, **`⏎` fold/unfold** a long tool result, **`?`** key card, `q`.
+  Long tool results fold to 6 lines behind a `… (+N lines) ⏎ unfold` marker. The
+  transcript dir is resolved from the agent's real cwd (the tmux pane path), so it's
+  found even when the recorded state cwd is the repo root.
+- **Attached status bar shows the agent's live state.** The left `repo › task` chip now
+  carries a state glyph (`⟳` working · `●` ready · `▲` needs you) and turns yellow when
+  the agent needs you — updated by both the dashboard and the `wta status` hook, so it's
+  live with or without a dashboard open. `WTA_HINT_BAR=0` hides the bar entirely.
 - **Resume failures explain themselves.** Resuming an agent whose session dies right
   after launch (the classic case: `claude --continue` in a worktree with no saved
   conversation → *"No conversation found to continue"*, exit 1) used to just flip the

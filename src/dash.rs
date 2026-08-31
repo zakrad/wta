@@ -1785,6 +1785,21 @@ fn refresh(app: &mut App) {
             invalidate.push(r.session.clone());
         }
     }
+    // mirror status changes into the attached status-bar chip (only on change, so a
+    // quiet fleet costs no tmux calls)
+    for r in app.rows.iter().filter(|r| r.alive) {
+        if app.prev_status.get(&r.session) != Some(&r.status) {
+            let s = match r.status {
+                Status::Running => "running",
+                Status::Ready => "ready",
+                Status::NeedsInput => "needs_input",
+                Status::Merged => "merged",
+                Status::Exited => "exited",
+                Status::Idle => "idle",
+            };
+            tmux::set_status_chip(&r.session, s);
+        }
+    }
     app.prev_status = app.rows.iter().map(|r| (r.session.clone(), r.status)).collect();
     app.attention.retain(|s| live.contains(s));
     app.checks.retain(|s, c| {

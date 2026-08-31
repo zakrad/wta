@@ -196,6 +196,8 @@ pub fn emit(state: &str) -> Result<()> {
         let prev = read_state(&repo, &task).map(|s| s.status).unwrap_or_default();
         let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         record(&repo, &task, state, &cwd)?;
+        // keep the attached status bar's chip live even with no dashboard open
+        crate::tmux::set_status_chip(&crate::tmux::session_name(&repo, &task), state);
         // Edge-triggered: an agent going idle (Stop → "waiting" / Notification →
         // "needs_input") notifies exactly once. Claude fires both events — and re-fires
         // the idle Notification — for the same idle moment, so a level-triggered notify

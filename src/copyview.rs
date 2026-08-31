@@ -16,7 +16,8 @@
 //! Keys (vi): `j`/`k` move, `Ctrl-d`/`Ctrl-u` half page, `PgUp`/`PgDn` page, `g`/`G`
 //! top/bottom, `[`/`]` previous/next message, `/` search then `n`/`N`, `v` start/stop a
 //! line selection, `y` yank the selection (or current line) to the clipboard, `Y` yank
-//! the current line, `Esc` clear, `q` quit. Entirely keyboard-driven.
+//! the current line, `m` yank the whole message under the cursor, `Enter` fold/unfold a
+//! tool result, `?` help, `Esc` clear, `q` quit. Entirely keyboard-driven.
 //!
 //! Entry points: `c` in the dashboard, `wta copy <task>`, and `Alt-y` while attached
 //! (a tmux popup over the agent — passes through an outer tmux too).
@@ -28,12 +29,13 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -52,15 +54,25 @@ pub enum Kind {
     Text,
 }
 
+/// Membership of a line in a foldable tool result: which result, its position, the total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fold {
+    pub id: u32,
+    pub idx: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrcLine {
     pub text: String,
     pub kind: Kind,
+    /// set on every line of a tool result, so the viewer can fold it past `RESULT_FOLD`
+    pub fold: Option<Fold>,
 }
 
 impl SrcLine {
     fn new(text: impl Into<String>, kind: Kind) -> Self {
-        Self { text: text.into(), kind }
+        Self { text: text.into(), kind, fold: None }
     }
     fn text(t: impl Into<String>) -> Self {
         Self::new(t, Kind::Text)
@@ -80,13 +92,23 @@ pub struct Source {
 /// full tmux scrollback of its session.
 pub fn source_for(repo: &str, task: &str) -> Source {
     let st = crate::status::read_state(repo, task);
-    let cwd = st.as_ref().map(|s| s.cwd.clone()).filter(|c| !c.is_empty());
-    if let Some(cwd) = cwd.as_deref() {
+    let session = crate::tmux::session_name(repo, task);
+    // Where does the agent's transcript live? Claude keys it on the dir it actually RUNS
+    // in. For a wta worktree agent that's the worktree, but the state file's `cwd` can be
+    // the repo root instead (a hook fired from there), so it's not reliable. The tmux
+    // pane's current path IS the agent's real cwd — try it first, then the state cwd.
+    let mut cands: Vec<String> = Vec::new();
+    if let Some(p) = crate::tmux::pane_path(&session) {
+        cands.push(p);
+    }
+    if let Some(c) = st.as_ref().map(|s| s.cwd.clone()).filter(|c| !c.is_empty()) {
+        cands.push(c);
+    }
+    for cwd in &cands {
         if let Some(lines) = claude_transcript(Path::new(cwd)) {
             return Source { title: task.to_string(), origin: "transcript".into(), lines };
         }
     }
-    let session = crate::tmux::session_name(repo, task);
     let text = crate::tmux::capture_full(&session).unwrap_or_default();
     let mut lines: Vec<SrcLine> = text.lines().map(|l| SrcLine::text(l.trim_end())).collect();
     while lines.last().map(|l| l.text.is_empty()).unwrap_or(false) {
@@ -146,6 +168,7 @@ pub fn render_claude_jsonl(text: &str) -> Vec<SrcLine> {
     // who spoke last, so consecutive assistant records (Claude writes one per content
     // block) and tool-result-only user records don't repeat headers
     let mut last: Option<Kind> = None;
+    let mut fold_id: u32 = 0;
     for raw in text.lines() {
         let v: Value = match serde_json::from_str(raw) {
             Ok(v) => v,
@@ -184,7 +207,10 @@ pub fn render_claude_jsonl(text: &str) -> Vec<SrcLine> {
                             }
                         }
                         Some("tool_use") => tools.push(tool_use_lines(b)),
-                        Some("tool_result") => tools.push(tool_result_lines(b)),
+                        Some("tool_result") => {
+                            tools.push(tool_result_lines(b, fold_id));
+                            fold_id += 1;
+                        }
                         _ => {} // thinking, images, …
                     }
                 }
@@ -239,8 +265,9 @@ fn tool_use_lines(b: &Value) -> Vec<SrcLine> {
     vec![SrcLine::new(format!("  ⚙ {name}  {detail}").trim_end().to_string(), Kind::Tool)]
 }
 
-/// `  ↳ …` — a tool result folded to its first few lines.
-fn tool_result_lines(b: &Value) -> Vec<SrcLine> {
+/// `  ↳ …` — a tool result, every line tagged with its `Fold` so the viewer can show the
+/// first `RESULT_FOLD` lines and unfold the rest on demand.
+fn tool_result_lines(b: &Value, id: u32) -> Vec<SrcLine> {
     let mut body = String::new();
     match b.get("content") {
         Some(Value::String(s)) => body.push_str(s),
@@ -257,14 +284,14 @@ fn tool_result_lines(b: &Value) -> Vec<SrcLine> {
         _ => {}
     }
     let lines: Vec<&str> = body.lines().collect();
+    let total = lines.len();
     let mut out = Vec::new();
-    for (i, l) in lines.iter().take(RESULT_FOLD).enumerate() {
+    for (i, l) in lines.iter().enumerate() {
         let pre = if i == 0 { "  ↳ " } else { "  │ " };
-        let l: String = l.trim_end().chars().take(200).collect();
-        out.push(SrcLine::new(format!("{pre}{l}"), Kind::Tool));
-    }
-    if lines.len() > RESULT_FOLD {
-        out.push(SrcLine::new(format!("  │ … (+{} lines)", lines.len() - RESULT_FOLD), Kind::Tool));
+        let l: String = l.trim_end().chars().take(400).collect();
+        let mut sl = SrcLine::new(format!("{pre}{l}"), Kind::Tool);
+        sl.fold = Some(Fold { id, idx: i, total });
+        out.push(sl);
     }
     if out.is_empty() {
         out.push(SrcLine::new("  ↳ (empty result)", Kind::Tool));
@@ -331,7 +358,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<&'static str> {
 
 // ───────────────────────────── viewer ─────────────────────────────
 
-/// One wrapped display row.
+/// One wrapped display row (`line` indexes the VISIBLE line list).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub line: usize,
@@ -339,11 +366,11 @@ pub struct Row {
 }
 
 /// Greedy wrap by display width (tabs → 4 spaces, wide chars counted). Public for tests.
-pub fn wrap_rows(lines: &[SrcLine], width: usize) -> Vec<Row> {
+pub fn wrap_rows(lines: &[&str], width: usize) -> Vec<Row> {
     let width = width.max(1);
     let mut rows = Vec::new();
     for (i, l) in lines.iter().enumerate() {
-        let text = l.text.replace('\t', "    ");
+        let text = l.replace('\t', "    ");
         if text.is_empty() {
             rows.push(Row { line: i, text: String::new() });
             continue;
@@ -364,43 +391,87 @@ pub fn wrap_rows(lines: &[SrcLine], width: usize) -> Vec<Row> {
     rows
 }
 
+/// A line as currently shown: a source line, or the synthetic `… (+N lines)` marker
+/// standing in for a folded tail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Vis {
+    pub text: String,
+    pub kind: Kind,
+    pub fold: Option<Fold>,
+    /// synthetic fold marker (not yanked, `Enter` unfolds)
+    pub marker: bool,
+}
+
+/// The visible line list for a source given which folds are expanded. Public for tests.
+pub fn visible_lines(src: &[SrcLine], expanded: &HashSet<u32>) -> Vec<Vis> {
+    let mut out = Vec::with_capacity(src.len());
+    for l in src {
+        match l.fold {
+            Some(f) if f.total > RESULT_FOLD && f.idx >= RESULT_FOLD && !expanded.contains(&f.id) => {
+                if f.idx == RESULT_FOLD {
+                    out.push(Vis {
+                        text: format!("  │ … (+{} lines) ⏎ unfold", f.total - RESULT_FOLD),
+                        kind: Kind::Tool,
+                        fold: Some(f),
+                        marker: true,
+                    });
+                }
+            }
+            _ => out.push(Vis { text: l.text.clone(), kind: l.kind, fold: l.fold, marker: false }),
+        }
+    }
+    out
+}
+
 struct View {
     src: Source,
+    expanded: HashSet<u32>,
+    vis: Vec<Vis>,
     rows: Vec<Row>,
     width: usize,
+    dirty: bool,
     cursor: usize, // row
     top: usize,    // first visible row
     anchor: Option<usize>, // selection anchor row (line-wise selection)
     search: Option<String>,
     input: Option<String>, // '/' being typed
     msg: Option<String>,
+    help: bool,
 }
 
 impl View {
     fn new(src: Source) -> Self {
+        let vis = visible_lines(&src.lines, &HashSet::new());
         Self {
             src,
+            expanded: HashSet::new(),
+            vis,
             rows: Vec::new(),
             width: 0,
+            dirty: true,
             cursor: 0,
             top: 0,
             anchor: None,
             search: None,
             input: None,
             msg: None,
+            help: false,
         }
     }
 
     fn rewrap(&mut self, width: usize, start_at_end: bool) {
-        if width == self.width && !self.rows.is_empty() {
+        if width == self.width && !self.dirty {
             return;
         }
+        let first_time = self.rows.is_empty();
         let keep_line = self.rows.get(self.cursor).map(|r| r.line);
         self.width = width;
-        self.rows = wrap_rows(&self.src.lines, width);
+        self.dirty = false;
+        let texts: Vec<&str> = self.vis.iter().map(|v| v.text.as_str()).collect();
+        self.rows = wrap_rows(&texts, width);
         self.cursor = match keep_line {
             Some(l) => self.rows.iter().position(|r| r.line == l).unwrap_or(0),
-            None if start_at_end => self.rows.len().saturating_sub(1),
+            None if first_time && start_at_end => self.rows.len().saturating_sub(1),
             None => 0,
         };
         if let Some(a) = self.anchor {
@@ -423,32 +494,119 @@ impl View {
         self.cursor = (self.cursor as isize + d).clamp(0, (n - 1).max(0)) as usize;
     }
 
-    /// Selected logical-line range (inclusive), if a selection is active.
+    fn cur_line(&self) -> usize {
+        self.rows.get(self.cursor).map(|r| r.line).unwrap_or(0)
+    }
+
+    /// Selected visible-line range (inclusive), if a selection is active.
     fn selection(&self) -> Option<(usize, usize)> {
         let a = self.rows.get(self.anchor?)?.line;
-        let c = self.rows.get(self.cursor)?.line;
+        let c = self.cur_line();
         Some((a.min(c), a.max(c)))
+    }
+
+    /// Yank visible lines `lo..=hi` (fold markers excluded) to the clipboard.
+    fn yank_range(&mut self, lo: usize, hi: usize, what: &str) {
+        let text: Vec<&str> = self.vis[lo..=hi.min(self.vis.len().saturating_sub(1))]
+            .iter()
+            .filter(|v| !v.marker)
+            .map(|v| v.text.as_str())
+            .collect();
+        let n = text.len();
+        match copy_to_clipboard(&text.join("\n")) {
+            Ok(how) => {
+                self.msg = Some(format!("yanked {what}{n} line{} → clipboard ({how})", if n == 1 { "" } else { "s" }))
+            }
+            Err(e) => self.msg = Some(format!("clipboard failed: {e}")),
+        }
+        self.anchor = None;
     }
 
     fn yank(&mut self, whole_selection: bool) {
         let (lo, hi) = match (whole_selection, self.selection()) {
             (true, Some(r)) => r,
             _ => {
-                let l = self.rows.get(self.cursor).map(|r| r.line).unwrap_or(0);
+                let l = self.cur_line();
                 (l, l)
             }
         };
-        let text: Vec<&str> = self.src.lines[lo..=hi].iter().map(|l| l.text.as_str()).collect();
-        let n = text.len();
-        match copy_to_clipboard(&text.join("\n")) {
-            Ok(how) => self.msg = Some(format!("yanked {n} line{} → clipboard ({how})", if n == 1 { "" } else { "s" })),
-            Err(e) => self.msg = Some(format!("clipboard failed: {e}")),
+        self.yank_range(lo, hi, "");
+    }
+
+    /// The message containing visible line `at`: from its `you ›`/`claude ›` header
+    /// (exclusive) to just before the next header, trailing blanks dropped. Without
+    /// headers (plain scrollback) it's the blank-line-delimited paragraph. Public for tests.
+    fn message_range(&self, at: usize) -> Option<(usize, usize)> {
+        let is_hdr = |v: &Vis| matches!(v.kind, Kind::User | Kind::Agent);
+        let has_headers = self.vis.iter().any(is_hdr);
+        let n = self.vis.len();
+        if n == 0 {
+            return None;
         }
+        let (mut lo, mut hi);
+        if has_headers {
+            let hdr = (0..=at).rev().find(|&i| is_hdr(&self.vis[i]))?;
+            lo = hdr + 1;
+            hi = (hdr + 1..n).find(|&i| is_hdr(&self.vis[i])).unwrap_or(n).saturating_sub(1);
+        } else {
+            if self.vis[at].text.trim().is_empty() {
+                return None;
+            }
+            lo = at;
+            while lo > 0 && !self.vis[lo - 1].text.trim().is_empty() {
+                lo -= 1;
+            }
+            hi = at;
+            while hi + 1 < n && !self.vis[hi + 1].text.trim().is_empty() {
+                hi += 1;
+            }
+        }
+        while hi > lo && self.vis[hi].text.trim().is_empty() {
+            hi -= 1;
+        }
+        (lo <= hi).then_some((lo, hi))
+    }
+
+    fn yank_message(&mut self) {
+        match self.message_range(self.cur_line()) {
+            Some((lo, hi)) => self.yank_range(lo, hi, "message: "),
+            None => self.msg = Some("no message here".into()),
+        }
+    }
+
+    /// `Enter`: fold/unfold the tool result under the cursor.
+    fn toggle_fold(&mut self) {
+        let Some(f) = self.vis.get(self.cur_line()).and_then(|v| v.fold) else {
+            self.msg = Some("not a tool result (⏎ folds/unfolds results)".into());
+            return;
+        };
+        if f.total <= RESULT_FOLD {
+            self.msg = Some("this result is already fully shown".into());
+            return;
+        }
+        let opening = !self.expanded.contains(&f.id);
+        if opening {
+            self.expanded.insert(f.id);
+        } else {
+            self.expanded.remove(&f.id);
+        }
+        self.vis = visible_lines(&self.src.lines, &self.expanded);
+        self.dirty = true;
+        // land on the fold's first hidden/marker line so the toggle is visible
+        let target = self
+            .vis
+            .iter()
+            .position(|v| v.fold.map(|g| g.id == f.id && g.idx == RESULT_FOLD).unwrap_or(false))
+            .unwrap_or(0);
+        let texts: Vec<&str> = self.vis.iter().map(|v| v.text.as_str()).collect();
+        self.rows = wrap_rows(&texts, self.width.max(1));
+        self.dirty = false;
+        self.cursor = self.rows.iter().position(|r| r.line == target).unwrap_or(0);
         self.anchor = None;
     }
 
     fn jump_message(&mut self, forward: bool) {
-        let is_hdr = |r: &Row| matches!(self.src.lines[r.line].kind, Kind::User | Kind::Agent);
+        let is_hdr = |r: &Row| matches!(self.vis[r.line].kind, Kind::User | Kind::Agent);
         let found = if forward {
             self.rows.iter().enumerate().skip(self.cursor + 1).find(|(_, r)| is_hdr(r)).map(|(i, _)| i)
         } else {
@@ -483,6 +641,11 @@ impl View {
             return false;
         }
         self.msg = None;
+        if self.help {
+            // any key closes help; `q` still quits
+            self.help = false;
+            return matches!(k.code, KeyCode::Char('q'));
+        }
         // search prompt swallows keys
         if let Some(buf) = self.input.as_mut() {
             match k.code {
@@ -507,6 +670,7 @@ impl View {
         let page = height.max(1) as isize;
         match (k.code, ctrl) {
             (KeyCode::Char('q'), _) | (KeyCode::Char('c'), true) => return true,
+            (KeyCode::Char('?'), false) => self.help = true,
             (KeyCode::Char('j'), false) | (KeyCode::Down, _) => self.move_by(1),
             (KeyCode::Char('k'), false) | (KeyCode::Up, _) => self.move_by(-1),
             (KeyCode::Char('d'), true) => self.move_by(half),
@@ -522,6 +686,8 @@ impl View {
             }
             (KeyCode::Char('y'), false) => self.yank(true),
             (KeyCode::Char('Y'), false) => self.yank(false),
+            (KeyCode::Char('m'), false) => self.yank_message(),
+            (KeyCode::Enter, _) | (KeyCode::Char('z'), false) => self.toggle_fold(),
             (KeyCode::Char('/'), false) => self.input = Some(String::new()),
             (KeyCode::Char('n'), false) => self.find(true),
             (KeyCode::Char('N'), false) => self.find(false),
@@ -552,10 +718,10 @@ impl View {
             None => String::new(),
         };
         let title = Line::from(vec![
-            Span::styled(" copy mode ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" copy mode ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
             Span::styled(
                 format!(" {} · {} · {} lines{} ", self.src.title, self.src.origin, self.src.lines.len(), sel_note),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(Color::Green),
             ),
         ]);
         f.render_widget(Paragraph::new(title), chunks[0]);
@@ -566,21 +732,22 @@ impl View {
         let mut lines: Vec<Line> = Vec::with_capacity(height);
         for i in self.top..(self.top + height).min(self.rows.len()) {
             let r = &self.rows[i];
-            let kind = self.src.lines[r.line].kind;
+            let v = &self.vis[r.line];
             let selected = sel.map(|(lo, hi)| r.line >= lo && r.line <= hi).unwrap_or(false);
             let gutter = match (i == self.cursor, selected) {
-                (true, _) => Span::styled("▌ ", Style::default().fg(Color::Yellow)),
-                (false, true) => Span::styled("┃ ", Style::default().fg(Color::Magenta)),
+                (true, _) => Span::styled("▌ ", Style::default().fg(Color::Green)),
+                (false, true) => Span::styled("┃ ", Style::default().fg(Color::Green)),
                 _ => Span::raw("  "),
             };
-            let mut base = match kind {
+            let mut base = match v.kind {
                 Kind::User => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 Kind::Agent => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Kind::Tool if v.marker => Style::default().fg(Color::Yellow),
                 Kind::Tool => Style::default().fg(Color::DarkGray),
                 Kind::Text => Style::default(),
             };
             if selected {
-                base = base.bg(Color::Rgb(60, 40, 80));
+                base = base.bg(Color::Rgb(30, 60, 40));
             }
             let mut spans = vec![gutter];
             spans.extend(highlight(&r.text, pat.as_deref(), base));
@@ -598,13 +765,60 @@ impl View {
             Line::from(vec![
                 Span::styled(format!(" {pct:>3}% "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    "j/k move · ^d/^u half · PgUp/PgDn · g/G · [ ] message · / n N search · v select · y yank · Y line · q quit",
+                    "j/k · v y yank · m message · ⏎ fold · / search · ? help · q",
                     Style::default().fg(Color::DarkGray),
                 ),
             ])
         };
         f.render_widget(Paragraph::new(status), chunks[2]);
+
+        if self.help {
+            draw_help(f, area);
+        }
     }
+}
+
+/// The `?` overlay: every key on one card.
+fn draw_help(f: &mut ratatui::Frame, area: Rect) {
+    let k = |key: &str, what: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {key:<12}"), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(what.to_string()),
+        ])
+    };
+    let body = vec![
+        k("j / k  ↑ ↓", "move one row"),
+        k("^d / ^u", "half page down / up"),
+        k("PgDn / PgUp", "page down / up  (also ^f / ^b)"),
+        k("g / G", "top / bottom"),
+        k("] / [", "next / previous message"),
+        k("/  n  N", "search (case-insensitive), next, previous"),
+        k("v", "start / stop a line selection"),
+        k("y", "yank selection (or current line) → clipboard"),
+        k("Y", "yank current line"),
+        k("m", "yank the whole message under the cursor"),
+        k("⏎ / z", "unfold / fold a tool result"),
+        k("Esc", "clear selection, then search"),
+        k("q", "quit copy mode"),
+        Line::from(""),
+        Line::styled("  any key closes this card", Style::default().fg(Color::DarkGray)),
+    ];
+    let w = 62u16.min(area.width.saturating_sub(2)).max(30);
+    let h = (body.len() as u16 + 2).min(area.height);
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let card = Rect { x, y, width: w, height: h };
+    f.render_widget(Clear, card);
+    f.render_widget(
+        Paragraph::new(body).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Green))
+                .title(" copy mode keys "),
+        ),
+        card,
+    );
 }
 
 /// Split `text` into spans, highlighting case-insensitive matches of `pat`.
@@ -675,17 +889,18 @@ pub fn run_cli(task: Option<&str>, session: Option<&str>) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn src(lines: Vec<SrcLine>) -> Source {
+        Source { title: "t".into(), origin: "test".into(), lines }
+    }
+
     #[test]
     fn wrap_respects_width_and_keeps_line_index() {
-        let lines = vec![SrcLine::text("abcdefghij"), SrcLine::text(""), SrcLine::text("xy")];
-        let rows = wrap_rows(&lines, 4);
+        let rows = wrap_rows(&["abcdefghij", "", "xy"], 4);
         let got: Vec<(usize, &str)> = rows.iter().map(|r| (r.line, r.text.as_str())).collect();
         assert_eq!(got, vec![(0, "abcd"), (0, "efgh"), (0, "ij"), (1, ""), (2, "xy")]);
     }
 
-    #[test]
-    fn renders_claude_jsonl_into_conversation() {
-        let jsonl = r#"
+    const JSONL: &str = r#"
 {"type":"user","timestamp":"2026-08-30T14:40:58.987Z","message":{"role":"user","content":"hi there <system-reminder>secret hook noise</system-reminder>"}}
 {"type":"assistant","timestamp":"2026-08-30T14:41:01.000Z","message":{"id":"m1","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"Hello!\nSecond line."}]}}
 {"type":"assistant","timestamp":"2026-08-30T14:41:02.000Z","message":{"id":"m1","content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test","description":"run tests"}}]}}
@@ -694,7 +909,10 @@ mod tests {
 {"type":"user","isMeta":true,"message":{"content":"meta"}}
 {"type":"user","message":{"content":[{"type":"text","text":"thanks"}]}}
 "#;
-        let lines = render_claude_jsonl(jsonl);
+
+    #[test]
+    fn renders_claude_jsonl_into_conversation() {
+        let lines = render_claude_jsonl(JSONL);
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts[0], "▎you › 14:40");
         assert_eq!(texts[1], "hi there"); // system-reminder stripped
@@ -704,7 +922,8 @@ mod tests {
         assert_eq!(texts[5], "Second line.");
         assert_eq!(texts[6], "  ⚙ Bash  cargo test"); // no second header for the same speaker
         assert_eq!(texts[7], "  ↳ l1");
-        assert_eq!(texts[7 + RESULT_FOLD], "  │ … (+2 lines)");
+        assert_eq!(texts[14], "  │ l8"); // ALL result lines are kept in the source…
+        assert_eq!(lines[7].fold, Some(Fold { id: 0, idx: 0, total: 8 }));
         assert!(!texts.iter().any(|t| t.contains("subagent") || t.contains("meta")));
         assert_eq!(*texts.last().unwrap(), "thanks");
         assert_eq!(lines[0].kind, Kind::User);
@@ -713,13 +932,31 @@ mod tests {
     }
 
     #[test]
+    fn folds_long_tool_results_and_unfolds_on_enter() {
+        let lines = render_claude_jsonl(JSONL);
+        // …but the VIEW folds them past RESULT_FOLD behind a marker
+        let vis = visible_lines(&lines, &HashSet::new());
+        let texts: Vec<&str> = vis.iter().map(|v| v.text.as_str()).collect();
+        assert_eq!(texts[7 + RESULT_FOLD - 1], "  │ l6");
+        assert!(texts[7 + RESULT_FOLD].starts_with("  │ … (+2 lines)"));
+        assert!(vis[7 + RESULT_FOLD].marker);
+        assert_eq!(texts[7 + RESULT_FOLD + 1], "");
+        // Enter on the marker (or any line of that result) reveals everything
+        let mut v = View::new(src(lines));
+        v.rewrap(80, false);
+        v.cursor = v.rows.iter().position(|r| v.vis[r.line].marker).unwrap();
+        v.toggle_fold();
+        let texts: Vec<&str> = v.vis.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts[7 + RESULT_FOLD], "  │ l7");
+        assert_eq!(texts[7 + RESULT_FOLD + 1], "  │ l8");
+        assert_eq!(v.vis[v.cur_line()].text, "  │ l7", "cursor lands on the first revealed line");
+        v.toggle_fold();
+        assert!(v.vis[v.cur_line()].marker, "folding again lands back on the marker");
+    }
+
+    #[test]
     fn selection_yank_range_is_line_wise_over_wrapped_rows() {
-        let src = Source {
-            title: "t".into(),
-            origin: "test".into(),
-            lines: vec![SrcLine::text("aaaaaaaa"), SrcLine::text("b"), SrcLine::text("c")],
-        };
-        let mut v = View::new(src);
+        let mut v = View::new(src(vec![SrcLine::text("aaaaaaaa"), SrcLine::text("b"), SrcLine::text("c")]));
         v.rewrap(4, false); // "aaaaaaaa" → 2 rows
         assert_eq!(v.rows.len(), 4);
         v.cursor = 1; // second row of line 0
@@ -731,18 +968,37 @@ mod tests {
     }
 
     #[test]
+    fn message_range_covers_body_without_header_and_without_trailing_blank() {
+        let mut v = View::new(src(render_claude_jsonl(JSONL)));
+        v.rewrap(80, false);
+        // cursor on "Second line." (vis 5) → claude's message: lines 4..=last tool line
+        let (lo, hi) = v.message_range(5).unwrap();
+        assert_eq!(v.vis[lo].text, "Hello!");
+        assert!(v.vis[hi].marker || v.vis[hi].text.starts_with("  │"), "{}", v.vis[hi].text);
+        assert!(!v.vis[hi].text.is_empty(), "trailing blank dropped");
+        // cursor on the first user message → just "hi there"
+        assert_eq!(v.message_range(1), Some((1, 1)));
+        // plain scrollback (no headers): paragraph between blank lines
+        let mut p = View::new(src(vec![
+            SrcLine::text("a"),
+            SrcLine::text("b"),
+            SrcLine::text(""),
+            SrcLine::text("c"),
+        ]));
+        p.rewrap(80, false);
+        assert_eq!(p.message_range(1), Some((0, 1)));
+        assert_eq!(p.message_range(3), Some((3, 3)));
+        assert_eq!(p.message_range(2), None);
+    }
+
+    #[test]
     fn message_jumps_land_on_headers() {
-        let src = Source {
-            title: "t".into(),
-            origin: "test".into(),
-            lines: vec![
-                SrcLine::new("▎you ›", Kind::User),
-                SrcLine::text("q"),
-                SrcLine::new("▎claude ›", Kind::Agent),
-                SrcLine::text("a"),
-            ],
-        };
-        let mut v = View::new(src);
+        let mut v = View::new(src(vec![
+            SrcLine::new("▎you ›", Kind::User),
+            SrcLine::text("q"),
+            SrcLine::new("▎claude ›", Kind::Agent),
+            SrcLine::text("a"),
+        ]));
         v.rewrap(80, false);
         v.jump_message(true);
         assert_eq!(v.cursor, 2);

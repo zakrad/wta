@@ -127,8 +127,10 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
 
 - **Attach** — `Enter`/`o` (or `wta attach <task>`) drops you into the agent's
   real terminal. Type normally. **`Ctrl-q` detaches** back to wta (not tmux's
-  `Ctrl-b d`). A thin status bar shows `repo › task` on the left and key chips on the
-  right: `PgUp scroll · ⌥y copy · ^q back`. On macOS `⌥` is the **left** Option key
+  `Ctrl-b d`). A thin status bar shows `repo › task` **plus the agent's live state glyph**
+  (`⟳` working · `●` ready · `▲` needs you — the chip turns yellow) on the left, and key
+  chips on the right: `PgUp scroll · ⌥y copy · ^q back`. Set `WTA_HINT_BAR=0` to hide the
+  bar entirely. On macOS `⌥` is the **left** Option key
   (WezTerm/iTerm send it as Alt; the right one composes accents).
 - **Scrolling the agent's chat with the keyboard** — press **`PgUp`/`PgDn`** (Mac:
   `Fn+↑/↓`) while attached. No prefix is needed, which matters **if you run wta inside
@@ -158,8 +160,9 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
   session's **full tmux scrollback**. Keys: `j`/`k` move, `Ctrl-u`/`Ctrl-d` half page,
   `PgUp`/`PgDn` page, `g`/`G` top/bottom, **`[`/`]` previous/next message**, `/` search
   then `n`/`N`, **`v` start a line selection, move, `y` yank** to the clipboard (`pbcopy`
-  / `wl-copy` / `xclip` / `xsel`, else OSC 52), `Y` yank the current line, `Esc` clear,
-  `q` quit. Selections are line-wise, like `V` in vim.
+  / `wl-copy` / `xclip` / `xsel`, else OSC 52), `Y` yank the current line, **`m` yank the
+  whole message** under the cursor, **`⏎` fold/unfold** a long tool result, **`?`** for a
+  key card, `Esc` clear, `q` quit. Selections are line-wise, like `V` in vim.
 - **Resume** — `Enter` on an exited agent re-spawns it with `--continue`. If the
   session dies right after launch (typically Claude's *"No conversation found to
   continue"* — nothing saved for that worktree), wta shows what it printed and offers
