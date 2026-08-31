@@ -127,7 +127,8 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
 
 - **Attach** — `Enter`/`o` (or `wta attach <task>`) drops you into the agent's
   real terminal. Type normally. **`Ctrl-q` detaches** back to wta (not tmux's
-  `Ctrl-b d`).
+  `Ctrl-b d`). A thin status bar shows `repo › task` on the left and the keys on the
+  right (`PgUp/PgDn scroll · Alt-y copy mode · Ctrl-q ↩ wta`).
 - **Scrolling the agent's chat with the keyboard** — press **`PgUp`/`PgDn`** (Mac:
   `Fn+↑/↓`) while attached. No prefix is needed, which matters **if you run wta inside
   your own tmux** (WezTerm → tmux → wta): the outer tmux eats `Ctrl-b`, so `Ctrl-b [`

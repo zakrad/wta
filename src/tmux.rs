@@ -130,9 +130,16 @@ fn ensure_hint_bar(name: &str) {
     for (opt, val) in [
         ("status", "on"),
         ("status-style", "bg=default,fg=green"),
-        ("status-left", ""),
-        ("status-right", " #[bold]Ctrl-q#[nobold] ↩ wta · #[bold]PgUp#[nobold] scroll · #[bold]Alt-y#[nobold] copy "),
-        ("status-right-length", "52"),
+        // left: which agent you're in — `repo › task` (set per session by `set_label`;
+        // sessions from before that option existed fall back to the session name)
+        ("status-left", " #[bold]#{?@wta_label,#{@wta_label},#{session_name}}#[nobold] "),
+        ("status-left-length", "48"),
+        // right: the keys that matter while attached
+        (
+            "status-right",
+            " #[bold]PgUp/PgDn#[nobold] scroll · #[bold]Alt-y#[nobold] copy mode · #[bold]Ctrl-q#[nobold] ↩ wta ",
+        ),
+        ("status-right-length", "64"),
     ] {
         let _ = tmux().args(["set-option", "-g", opt, val]).status();
     }
@@ -164,6 +171,16 @@ pub fn new_session(name: &str, cwd: &Path, program: &str, extra: &[String]) -> R
     }
     configure(name);
     Ok(())
+}
+
+/// Label a session `repo › task` for the attached status bar's left side (a tmux user
+/// option on the session, read by the `status-left` format).
+pub fn set_label(name: &str, repo_name: &str, task: &str) {
+    let label = format!("{repo_name} › {task}");
+    let _ = tmux()
+        .args(["set-option", "-t", name, "@wta_label", &label])
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Prefix-free scrollback keys on our dedicated server. When wta itself runs inside

@@ -36,7 +36,8 @@ All notable changes to **wta** are documented here. The format is based on
   ≥ 2.1's fullscreen renderer, which scrolls its own buffer — tmux history is empty)
   gets the key forwarded so it scrolls natively; a classic/plain-output agent gets tmux
   copy mode one page up (repeat to keep paging, `Shift-↑/↓` page inside copy mode, then
-  your own `mode-keys`). The attached status bar reads `Ctrl-q ↩ wta · PgUp scroll`.
+  your own `mode-keys`). The attached status bar now shows **`repo › task`** on the left and the keys on the
+  right: `PgUp/PgDn scroll · Alt-y copy mode · Ctrl-q ↩ wta`.
   The manual shows the `~/.claude/keybindings.json` `Scroll` bindings for vim-style keys.
 
 ## [0.3.0] — 2026-08-11

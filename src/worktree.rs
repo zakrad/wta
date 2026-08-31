@@ -587,6 +587,7 @@ fn new_impl(task: &str, agent_args: &[String], base: Option<&str>, seed: Option<
     let session = tmux::session_name(&repo, task);
     let (prog, extra) = agent_argv(&repo, task, idx, agent_args);
     tmux::new_session(&session, &wt, &prog, &extra)?;
+    tmux::set_label(&session, &repo_name(&root), task);
     let _ = status::record(&repo, task, "running", &wt_str);
     Ok(())
 }
@@ -1697,6 +1698,9 @@ fn resume_session_with(repo: &str, task: &str, wt: &Path, tail: &[String]) -> Re
     let session = tmux::session_name(repo, task);
     let (prog, extra) = agent_argv(repo, task, idx, tail);
     tmux::new_session(&session, wt, &prog, &extra)?;
+    if let Some(root) = main_root_of(wt) {
+        tmux::set_label(&session, &repo_name(&root), task);
+    }
     // Record BEFORE the grace watch: the agent's hooks may already write a newer state
     // (needs_input) inside the window, and a later "running" would clobber it.
     let _ = status::record(repo, task, "running", &wt.to_string_lossy());
