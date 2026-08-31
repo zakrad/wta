@@ -127,8 +127,9 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
 
 - **Attach** — `Enter`/`o` (or `wta attach <task>`) drops you into the agent's
   real terminal. Type normally. **`Ctrl-q` detaches** back to wta (not tmux's
-  `Ctrl-b d`). A thin status bar shows `repo › task` on the left and the keys on the
-  right (`PgUp/PgDn scroll · Alt-y copy mode · Ctrl-q ↩ wta`).
+  `Ctrl-b d`). A thin status bar shows `repo › task` on the left and key chips on the
+  right: `PgUp scroll · ⌥y copy · ^q back`. On macOS `⌥` is the **left** Option key
+  (WezTerm/iTerm send it as Alt; the right one composes accents).
 - **Scrolling the agent's chat with the keyboard** — press **`PgUp`/`PgDn`** (Mac:
   `Fn+↑/↓`) while attached. No prefix is needed, which matters **if you run wta inside
   your own tmux** (WezTerm → tmux → wta): the outer tmux eats `Ctrl-b`, so `Ctrl-b [`
@@ -148,7 +149,7 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
     `Ctrl-u`/`Ctrl-d`, `/`, `q` to leave; `Shift-↑/↓` page in either mode).
   Mouse wheel works in both cases. `--server default` avoids nesting entirely.
 - **Copy mode (wta's own, vim-style)** — press **`c`** on an agent in the dashboard,
-  **`Alt-y` while attached** (opens over the agent in a tmux popup — passes through an
+  **`Alt-y` (macOS: left `⌥y`) while attached** (opens over the agent in a tmux popup — passes through an
   outer tmux), or run `wta copy <task>`. It's a keyboard-only, agent-agnostic view of the
   conversation: it doesn't matter whether the agent draws in the alternate screen
   (Claude's fullscreen renderer), classic scrollback, or is a different CLI entirely.

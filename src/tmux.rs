@@ -127,19 +127,31 @@ fn ensure_hint_bar(name: &str) {
     let _ = tmux().args(["set-option", "-u", "-t", name, "status"]).status();
     ensure_scroll_keys();
     ensure_copy_key();
+    // macOS shows ⌥/^ (WezTerm/iTerm/Terminal all send left-Option as Alt/Meta);
+    // elsewhere tmux's own M-/C- spelling.
+    let (alt_y, ctrl_q) = if cfg!(target_os = "macos") { ("⌥y", "^q") } else { ("M-y", "C-q") };
+    // One "chip" per key: the key on a colored block, a one-word label after it.
+    let chip = |bg: &str, key: &str, label: &str| {
+        format!("#[fg=black,bg={bg},bold] {key} #[fg={bg},bg=default,nobold] {label} ")
+    };
+    let right = format!(
+        "{}{}{}",
+        chip("blue", "PgUp", "scroll"),
+        chip("yellow", alt_y, "copy"),
+        chip("red", ctrl_q, "back"),
+    );
     for (opt, val) in [
         ("status", "on"),
-        ("status-style", "bg=default,fg=green"),
-        // left: which agent you're in — `repo › task` (set per session by `set_label`;
-        // sessions from before that option existed fall back to the session name)
-        ("status-left", " #[bold]#{?@wta_label,#{@wta_label},#{session_name}}#[nobold] "),
-        ("status-left-length", "48"),
-        // right: the keys that matter while attached
+        ("status-style", "bg=default,fg=default"),
+        // left: which agent you're in — `repo › task` as a green chip (set per session by
+        // `set_label`; sessions from before that option existed fall back to the name)
         (
-            "status-right",
-            " #[bold]PgUp/PgDn#[nobold] scroll · #[bold]Alt-y#[nobold] copy mode · #[bold]Ctrl-q#[nobold] ↩ wta ",
+            "status-left",
+            "#[fg=black,bg=green,bold] #{?@wta_label,#{@wta_label},#{session_name}} #[default]",
         ),
-        ("status-right-length", "64"),
+        ("status-left-length", "48"),
+        ("status-right", right.as_str()),
+        ("status-right-length", "48"),
     ] {
         let _ = tmux().args(["set-option", "-g", opt, val]).status();
     }
