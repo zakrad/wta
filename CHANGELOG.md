@@ -7,6 +7,14 @@ All notable changes to **wta** are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **Resume finds the conversation even when the agent's directory moved or the row's path
+  is wrong.** `claude --continue` keys the transcript on the directory it ran in, so an
+  adopted/main-checkout agent (or a repo you renamed, e.g. `sooth-solana` → `soo`) could
+  report "No conversation found to continue" because resume looked in the worktree path
+  instead of where the conversation actually lives. Resume now prefers a directory that
+  has a Claude transcript — the passed worktree, else the agent's recorded cwd — and
+  `wta resume <task>` from the wrong directory now locates the agent in whatever repo owns
+  it (erroring only if the name is ambiguous across repos) instead of failing outright.
 - **Dashboard `stop` (s) and `kill` (D) now act on the exact agent the row tracks.** They
   used to recompute the repo id from the path (`repo_id_of(repo_root())`); when an agent's
   live session runs under a non-canonical ("phantom") repo id — e.g. an adopted or

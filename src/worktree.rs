@@ -1680,20 +1680,37 @@ impl std::error::Error for ResumeDied {}
 const RESUME_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 
 fn resume_session_with(repo: &str, task: &str, wt: &Path, tail: &[String]) -> Result<()> {
-    if !wt.exists() {
-        bail!("no worktree at {} to resume", wt.display());
-    }
-    let idx = status::read_state(repo, task).map(|s| s.index).unwrap_or_else(|| assign_slot(repo));
-    // Cheap, deterministic pre-check: `claude --continue` looks for a transcript under
-    // ~/.claude/projects/<encoded cwd>; with none it prints "No conversation found to
-    // continue" and exits 1. Don't even spawn — report it as the same typed failure.
+    let st = status::read_state(repo, task);
+    let idx = st.as_ref().map(|s| s.index).unwrap_or_else(|| assign_slot(repo));
     let wants_continue = tail.iter().any(|a| a == "--continue" || a == "-c");
     let is_claude = agent_cmd()
         .split_whitespace()
         .next()
         .map(crate::roles::is_claude)
         .unwrap_or(false);
-    if wants_continue && is_claude && !crate::cost::has_transcript(wt) {
+    // Where does the conversation actually live? `claude --continue` keys on the cwd it
+    // runs in. Prefer a dir that HAS a transcript: the passed worktree, else the agent's
+    // recorded cwd. An adopted / main-checkout agent runs outside `.agents/`, and a
+    // dashboard row can carry the worktree path while the conversation was recorded under
+    // the repo root — resuming in the worktree would falsely report "no conversation".
+    let wt: PathBuf = if !wants_continue || !is_claude {
+        wt.to_path_buf()
+    } else if crate::cost::has_transcript(wt) {
+        wt.to_path_buf()
+    } else if let Some(cwd) = st.as_ref().map(|s| PathBuf::from(&s.cwd)).filter(|c| {
+        !c.as_os_str().is_empty() && c.as_path() != wt && crate::cost::has_transcript(c)
+    }) {
+        cwd
+    } else {
+        wt.to_path_buf()
+    };
+    if !wt.exists() {
+        bail!("no worktree at {} to resume", wt.display());
+    }
+    // Cheap, deterministic pre-check: `claude --continue` looks for a transcript under
+    // ~/.claude/projects/<encoded cwd>; with none it prints "No conversation found to
+    // continue" and exits 1. Don't even spawn — report it as the same typed failure.
+    if wants_continue && is_claude && !crate::cost::has_transcript(&wt) {
         return Err(ResumeDied {
             task: task.to_string(),
             output: format!(
@@ -1703,6 +1720,7 @@ fn resume_session_with(repo: &str, task: &str, wt: &Path, tail: &[String]) -> Re
         }
         .into());
     }
+    let wt = wt.as_path();
     preseed_claude_trust(wt);
     let session = tmux::session_name(repo, task);
     let (prog, extra) = agent_argv(repo, task, idx, tail);
@@ -1743,6 +1761,27 @@ pub fn resume(task: &str, fresh: bool) -> Result<()> {
     if let Some(st) = status::read_state(&repo, task) {
         if st.adopted && !st.cwd.is_empty() {
             return resume_session(&repo, task, Path::new(&st.cwd), fresh);
+        }
+    } else {
+        // The current dir's repo has no such agent — it may live in another repo (you ran
+        // `wta resume <task>` from the wrong dir). If exactly one repo has this task, use
+        // it, so resume-by-name isn't hostage to which directory you happen to be in.
+        let matches: Vec<status::AgentState> = status::read_all_states()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.task == task)
+            .collect();
+        if matches.len() == 1 {
+            let st = &matches[0];
+            let wt = if !st.cwd.is_empty() {
+                PathBuf::from(&st.cwd)
+            } else {
+                worktrees_dir(&root).join(task)
+            };
+            return resume_session(&st.repo, task, &wt, fresh);
+        } else if matches.len() > 1 {
+            let repos: Vec<String> = matches.iter().map(|s| s.repo.clone()).collect();
+            bail!("'{task}' exists in several repos ({}) — resume it from that repo's directory or via `wta dash`", repos.join(", "));
         }
     }
     let wt = worktrees_dir(&root).join(task);
