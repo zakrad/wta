@@ -195,6 +195,15 @@ fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
 }
 
 pub fn repo_root() -> Result<PathBuf> {
+    // The MAIN repo root, even when invoked from a linked worktree — so the repo id
+    // (and thus tmux session names + the state dir) is identical no matter where wta is
+    // run. `--show-toplevel` returns the WORKTREE's own root inside a worktree, which
+    // hashed to a DIFFERENT ("phantom") repo id: the global dashboard then listed that
+    // root's agents under two groups and they flickered as the tied sort reordered them.
+    let cwd = std::env::current_dir().context("no current dir")?;
+    if let Some(root) = main_root_of(&cwd) {
+        return Ok(root);
+    }
     let out = run_git(&["rev-parse", "--show-toplevel"], None).context("not inside a git repo")?;
     Ok(PathBuf::from(out.trim()))
 }
@@ -1671,20 +1680,37 @@ impl std::error::Error for ResumeDied {}
 const RESUME_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 
 fn resume_session_with(repo: &str, task: &str, wt: &Path, tail: &[String]) -> Result<()> {
-    if !wt.exists() {
-        bail!("no worktree at {} to resume", wt.display());
-    }
-    let idx = status::read_state(repo, task).map(|s| s.index).unwrap_or_else(|| assign_slot(repo));
-    // Cheap, deterministic pre-check: `claude --continue` looks for a transcript under
-    // ~/.claude/projects/<encoded cwd>; with none it prints "No conversation found to
-    // continue" and exits 1. Don't even spawn — report it as the same typed failure.
+    let st = status::read_state(repo, task);
+    let idx = st.as_ref().map(|s| s.index).unwrap_or_else(|| assign_slot(repo));
     let wants_continue = tail.iter().any(|a| a == "--continue" || a == "-c");
     let is_claude = agent_cmd()
         .split_whitespace()
         .next()
         .map(crate::roles::is_claude)
         .unwrap_or(false);
-    if wants_continue && is_claude && !crate::cost::has_transcript(wt) {
+    // Where does the conversation actually live? `claude --continue` keys on the cwd it
+    // runs in. Prefer a dir that HAS a transcript: the passed worktree, else the agent's
+    // recorded cwd. An adopted / main-checkout agent runs outside `.agents/`, and a
+    // dashboard row can carry the worktree path while the conversation was recorded under
+    // the repo root — resuming in the worktree would falsely report "no conversation".
+    let wt: PathBuf = if !wants_continue || !is_claude {
+        wt.to_path_buf()
+    } else if crate::cost::has_transcript(wt) {
+        wt.to_path_buf()
+    } else if let Some(cwd) = st.as_ref().map(|s| PathBuf::from(&s.cwd)).filter(|c| {
+        !c.as_os_str().is_empty() && c.as_path() != wt && crate::cost::has_transcript(c)
+    }) {
+        cwd
+    } else {
+        wt.to_path_buf()
+    };
+    if !wt.exists() {
+        bail!("no worktree at {} to resume", wt.display());
+    }
+    // Cheap, deterministic pre-check: `claude --continue` looks for a transcript under
+    // ~/.claude/projects/<encoded cwd>; with none it prints "No conversation found to
+    // continue" and exits 1. Don't even spawn — report it as the same typed failure.
+    if wants_continue && is_claude && !crate::cost::has_transcript(&wt) {
         return Err(ResumeDied {
             task: task.to_string(),
             output: format!(
@@ -1694,6 +1720,7 @@ fn resume_session_with(repo: &str, task: &str, wt: &Path, tail: &[String]) -> Re
         }
         .into());
     }
+    let wt = wt.as_path();
     preseed_claude_trust(wt);
     let session = tmux::session_name(repo, task);
     let (prog, extra) = agent_argv(repo, task, idx, tail);
@@ -1734,6 +1761,27 @@ pub fn resume(task: &str, fresh: bool) -> Result<()> {
     if let Some(st) = status::read_state(&repo, task) {
         if st.adopted && !st.cwd.is_empty() {
             return resume_session(&repo, task, Path::new(&st.cwd), fresh);
+        }
+    } else {
+        // The current dir's repo has no such agent — it may live in another repo (you ran
+        // `wta resume <task>` from the wrong dir). If exactly one repo has this task, use
+        // it, so resume-by-name isn't hostage to which directory you happen to be in.
+        let matches: Vec<status::AgentState> = status::read_all_states()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.task == task)
+            .collect();
+        if matches.len() == 1 {
+            let st = &matches[0];
+            let wt = if !st.cwd.is_empty() {
+                PathBuf::from(&st.cwd)
+            } else {
+                worktrees_dir(&root).join(task)
+            };
+            return resume_session(&st.repo, task, &wt, fresh);
+        } else if matches.len() > 1 {
+            let repos: Vec<String> = matches.iter().map(|s| s.repo.clone()).collect();
+            bail!("'{task}' exists in several repos ({}) — resume it from that repo's directory or via `wta dash`", repos.join(", "));
         }
     }
     let wt = worktrees_dir(&root).join(task);
@@ -1865,14 +1913,27 @@ fn sanitize_task(s: &str) -> String {
 /// the worktree (and uncommitted work) so it can be resumed later. Contrast with
 /// `rm`, which also removes the worktree and branch.
 pub fn stop(task: &str) -> Result<()> {
-    let root = repo_root()?;
-    let repo = repo_id_of(&root);
-    tmux::kill(&tmux::session_name(&repo, task))?;
+    stop_session(&repo_id()?, task)
+}
+
+/// Stop an agent identified by its EXACT repo id (what the dashboard row tracks), not
+/// one recomputed from the current directory. This matters when the live session runs
+/// under a non-canonical ("phantom") repo id: recomputing would target a different
+/// session name and silently no-op, so the agent never actually stopped.
+pub fn stop_session(repo: &str, task: &str) -> Result<()> {
+    tmux::kill(&tmux::session_name(repo, task))?;
     // mark exited so the dashboard AND the Telegram bridge stop reporting it as
-    // running (the bridge reads state without checking tmux liveness).
-    let wt = worktrees_dir(&root).join(task);
-    let _ = status::record(&repo, task, "exited", &wt.to_string_lossy());
-    append_run_log(&root, task, "stop");
+    // running (the bridge reads state without checking tmux liveness). Preserve the
+    // agent's real cwd rather than assuming the standard worktree path — an adopted or
+    // main-checkout agent lives elsewhere, and clobbering its cwd would break resume.
+    let cwd = status::read_state(repo, task)
+        .map(|s| s.cwd)
+        .filter(|c| !c.is_empty())
+        .unwrap_or_default();
+    let _ = status::record(repo, task, "exited", &cwd);
+    if let Ok(root) = repo_root() {
+        append_run_log(&root, task, "stop");
+    }
     Ok(())
 }
 
@@ -1920,29 +1981,78 @@ pub fn repo_name(root: &Path) -> String {
 /// (`~/.wta/state/<repo>/`), each agent's `cwd` giving `<root>/<subdir>/<task>`.
 /// Returns `(repo_id, repo_root)`, sorted by path. Used by the global dashboard.
 pub fn discover_repos() -> Vec<(String, PathBuf)> {
-    let mut map: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
-    for st in status::read_all_states().unwrap_or_default() {
-        if st.cwd.is_empty() || map.contains_key(&st.repo) {
-            continue; // one correct root per repo id is enough
+    use std::collections::HashMap;
+    let states = status::read_all_states().unwrap_or_default();
+    let live: std::collections::HashSet<String> = tmux::list_sessions().into_iter().collect();
+
+    // repo id → its root, plus a score used to pick a winner when several ids resolve to
+    // the SAME physical root (a "phantom" id from an older wta run that hashed a worktree's
+    // own toplevel — see `repo_root`). Score = (# live sessions, freshest activity,
+    // is-canonical): the group the user is actually running always wins, deterministically,
+    // so the row can't double or flicker between two ids for one repo.
+    let mut id_root: HashMap<String, PathBuf> = HashMap::new();
+    let mut id_score: HashMap<String, (usize, u64)> = HashMap::new();
+    for st in &states {
+        if st.cwd.is_empty() {
+            continue;
         }
-        let cwd = PathBuf::from(&st.cwd);
-        // Cheap path: `<root>/<subdir>/<task>` → two hops up, accepted only if it's a
-        // MAIN repo (a real `.git` DIR — a linked worktree's `.git` is a file). Falls
-        // back to git for a worktree-subdirectory cwd or a nested worktree layout.
-        let root = cwd
-            .parent()
-            .and_then(|p| p.parent())
-            .filter(|r| r.join(".git").is_dir())
-            .map(|r| r.to_path_buf())
-            .or_else(|| main_root_of(&cwd));
-        if let Some(root) = root {
-            if root.exists() {
-                map.insert(st.repo.clone(), root);
+        if !id_root.contains_key(&st.repo) {
+            let cwd = PathBuf::from(&st.cwd);
+            // Cheap path: `<root>/<subdir>/<task>` → two hops up, accepted only if it's a
+            // MAIN repo (a real `.git` DIR — a linked worktree's `.git` is a file). Falls
+            // back to git for a worktree-subdirectory cwd or a nested worktree layout.
+            let root = cwd
+                .parent()
+                .and_then(|p| p.parent())
+                .filter(|r| r.join(".git").is_dir())
+                .map(|r| r.to_path_buf())
+                .or_else(|| main_root_of(&cwd));
+            if let Some(root) = root {
+                if root.exists() {
+                    id_root.insert(st.repo.clone(), root);
+                }
             }
         }
+        let e = id_score.entry(st.repo.clone()).or_insert((0, 0));
+        if live.contains(&tmux::session_name(&st.repo, &st.task)) {
+            e.0 += 1;
+        }
+        e.1 = e.1.max(st.updated_unix);
     }
-    let mut v: Vec<(String, PathBuf)> = map.into_iter().collect();
-    v.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let items: Vec<(String, PathBuf, (usize, u64, bool))> = id_root
+        .into_iter()
+        .map(|(id, root)| {
+            let canon = std::fs::canonicalize(&root).unwrap_or(root);
+            let (lc, upd) = id_score.get(&id).copied().unwrap_or((0, 0));
+            let score = (lc, upd, id == repo_id_of(&canon));
+            (id, canon, score)
+        })
+        .collect();
+    dedupe_repos_by_root(items)
+}
+
+/// Collapse candidate `(repo id, canonical root, score)` triples to one id per root, the
+/// highest score winning (ties → smaller id), then sort by root path. Score is
+/// `(live-session count, freshest activity, is-canonical-id)` so the group the user is
+/// actually running wins deterministically — no doubled or flickering rows. Pure, for tests.
+fn dedupe_repos_by_root(
+    items: Vec<(String, PathBuf, (usize, u64, bool))>,
+) -> Vec<(String, PathBuf)> {
+    use std::collections::HashMap;
+    let mut best: HashMap<PathBuf, (String, (usize, u64, bool))> = HashMap::new();
+    for (id, canon, score) in items {
+        let win = match best.get(&canon) {
+            None => true,
+            Some((cur_id, cur)) => score > *cur || (score == *cur && id < *cur_id),
+        };
+        if win {
+            best.insert(canon, (id, score));
+        }
+    }
+    let mut v: Vec<(String, PathBuf)> =
+        best.into_iter().map(|(root, (id, _))| (id, root)).collect();
+    v.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     v
 }
 
@@ -2117,18 +2227,33 @@ pub fn ls(json: bool) -> Result<()> {
 pub fn rm(task: &str, force: bool) -> Result<()> {
     let root = repo_root()?;
     let repo = repo_id_of(&root);
+    rm_in(&repo, &root, task, force)
+}
+
+/// `rm`, but for an EXPLICIT repo id + root (what the dashboard row tracks) rather than
+/// values recomputed from the current directory — so the session kill and state removal
+/// hit the agent you actually selected, even when it runs under a non-canonical repo id.
+pub fn rm_in(repo: &str, root: &Path, task: &str, force: bool) -> Result<()> {
+    let repo = repo.to_string();
+    let root = root.to_path_buf();
+    // Only touch a worktree/branch when the agent actually lives at the standard worktree
+    // path. An adopted or main-checkout agent (cwd = your own dir / the repo root) is only
+    // UNTRACKED — never delete files that aren't a wta worktree.
+    let wt = worktrees_dir(&root).join(task);
+    let is_wta_worktree = status::read_state(&repo, task)
+        .map(|s| !s.adopted && !s.cwd.is_empty() && Path::new(&s.cwd) == wt)
+        .unwrap_or(false);
 
     // An ADOPTED agent is YOUR directory, not a wta worktree — `rm` only stops tracking
     // it (kills any wta session + drops the state file), never touches your files/branch.
-    if status::read_state(&repo, task).map(|s| s.adopted).unwrap_or(false) {
+    if !is_wta_worktree {
         let _ = tmux::kill(&tmux::session_name(&repo, task));
         status::remove_state(&repo, task);
-        println!("untracked adopted '{task}' (your directory + branch are untouched)");
+        println!("untracked '{task}' (your directory + branch are untouched)");
         return Ok(());
     }
 
     let branch = agent_branch(&root, task);
-    let wt = worktrees_dir(&root).join(task);
     let wt_str = wt.to_string_lossy().into_owned();
 
     let _ = tmux::kill(&tmux::session_name(&repo, task));
@@ -2903,6 +3028,36 @@ pub fn wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dedupe_repos_prefers_live_then_fresh_then_smaller_id() {
+        let soo = PathBuf::from("/repos/soo");
+        let rust = PathBuf::from("/repos/rust");
+        // two ids for /repos/soo: the live one (0 canonical, 1 live) must beat the dead
+        // one (canonical, 0 live) — the running agent's group wins.
+        let out = dedupe_repos_by_root(vec![
+            ("dead".into(), soo.clone(), (0, 100, true)),
+            ("live".into(), soo.clone(), (1, 50, false)),
+            ("rustid".into(), rust.clone(), (1, 10, true)),
+        ]);
+        assert_eq!(out, vec![("rustid".into(), rust), ("live".into(), soo)]); // sorted by root path
+    }
+
+    #[test]
+    fn dedupe_repos_tie_breaks_deterministically() {
+        let r = PathBuf::from("/repos/x");
+        // identical scores → smaller id wins, regardless of input order (no flicker)
+        let a = dedupe_repos_by_root(vec![
+            ("bbb".into(), r.clone(), (0, 0, false)),
+            ("aaa".into(), r.clone(), (0, 0, false)),
+        ]);
+        let b = dedupe_repos_by_root(vec![
+            ("aaa".into(), r.clone(), (0, 0, false)),
+            ("bbb".into(), r.clone(), (0, 0, false)),
+        ]);
+        assert_eq!(a, vec![("aaa".into(), r.clone())]);
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn sanitize_task_yields_valid_names() {

@@ -197,6 +197,7 @@ struct App {
     repo: String, // launch repo id (current-repo mode + the "current" repo default)
     root: PathBuf, // launch repo root
     op_root: PathBuf, // repo root for the pending modal action (kill/push/resume/new)
+    op_repo: String,  // repo id for the pending modal action — the EXACT id the row tracks
     checks: HashMap<String, Check>, // session -> verification result/run
     rows: Vec<Row>,
     sel: usize,
@@ -255,6 +256,7 @@ impl App {
             repo: worktree::repo_id().unwrap_or_default(),
             root: worktree::repo_root().unwrap_or_default(),
             op_root: PathBuf::new(),
+            op_repo: String::new(),
             checks: HashMap::new(),
             rows: Vec::new(),
             sel: 0,
@@ -512,8 +514,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 KeyCode::Char('y') => {
                     let task = task.clone();
                     app.modal = Modal::None;
-                    let root = app.op_root.clone();
-                    match in_repo(&root, || worktree::rm(&task, false)) {
+                    let (repo, root) = (app.op_repo.clone(), app.op_root.clone());
+                    match worktree::rm_in(&repo, &root, &task, false) {
                         Ok(_) => {
                             refresh(app);
                             load_detail(app);
@@ -542,8 +544,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 KeyCode::Char('y') => {
                     let task = task.clone();
                     app.modal = Modal::None;
-                    let root = app.op_root.clone();
-                    if let Err(e) = in_repo(&root, || worktree::rm(&task, true)) {
+                    let (repo, root) = (app.op_repo.clone(), app.op_root.clone());
+                    if let Err(e) = worktree::rm_in(&repo, &root, &task, true) {
                         app.set_err(e);
                     }
                     refresh(app);
@@ -614,14 +616,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                             // force: the guard proved the worktree is clean and the branch
                             // fully merged, and a plain rm would leave an unmerged branch
                             // behind that makes the `new --base` below bail.
-                            let res = in_repo(&root, || {
-                                worktree::rm(&task, true).context("rm failed")?;
-                                if base.is_empty() {
-                                    worktree::new(&task, &[])
-                                } else {
-                                    worktree::new_with_base(&task, &[], &base)
-                                }
-                            });
+                            let res = (|| -> anyhow::Result<()> {
+                                worktree::rm_in(&repo, &root, &task, true).context("rm failed")?;
+                                in_repo(&root, || {
+                                    if base.is_empty() {
+                                        worktree::new(&task, &[])
+                                    } else {
+                                        worktree::new_with_base(&task, &[], &base)
+                                    }
+                                })
+                            })();
                             match res {
                                 Ok(_) => app.set_info(format!("recreated '{task}' from scratch")),
                                 Err(e) => app.set_err(format!("{e:#}")),
@@ -962,8 +966,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('a') => open_adopt(app),
         KeyCode::Char('s') => {
             if let Some(r) = app.selected() {
-                let (task, root) = (r.task.clone(), r.root.clone());
-                if let Err(e) = in_repo(&root, || worktree::stop(&task)) {
+                let (repo, task) = (r.repo.clone(), r.task.clone());
+                if let Err(e) = worktree::stop_session(&repo, &task) {
                     app.set_err(e);
                 }
                 refresh(app);
@@ -971,8 +975,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
         }
         KeyCode::Char('D') => {
-            if let Some((task, root)) = app.selected().map(|r| (r.task.clone(), r.root.clone())) {
+            if let Some((task, root, repo)) =
+                app.selected().map(|r| (r.task.clone(), r.root.clone(), r.repo.clone()))
+            {
                 app.op_root = root;
+                app.op_repo = repo;
                 app.modal = Modal::Confirm(task);
             }
         }

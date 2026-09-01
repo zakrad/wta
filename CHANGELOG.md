@@ -4,6 +4,36 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] — 2026-09-02
+
+### Fixed
+- **Resume finds the conversation even when the agent's directory moved or the row's path
+  is wrong.** `claude --continue` keys the transcript on the directory it ran in, so an
+  adopted/main-checkout agent (or a repo you renamed, e.g. `sooth-solana` → `soo`) could
+  report "No conversation found to continue" because resume looked in the worktree path
+  instead of where the conversation actually lives. Resume now prefers a directory that
+  has a Claude transcript — the passed worktree, else the agent's recorded cwd — and
+  `wta resume <task>` from the wrong directory now locates the agent in whatever repo owns
+  it (erroring only if the name is ambiguous across repos) instead of failing outright.
+- **Dashboard `stop` (s) and `kill` (D) now act on the exact agent the row tracks.** They
+  used to recompute the repo id from the path (`repo_id_of(repo_root())`); when an agent's
+  live session runs under a non-canonical ("phantom") repo id — e.g. an adopted or
+  main-checkout agent, or one created by an older wta from inside a worktree — the
+  recomputed id named a different, dead session, so `stop`/`kill` silently no-op'd and the
+  agent kept running. Both now use the row's actual repo id (`stop_session` / `rm_in`), and
+  `stop` preserves the agent's real cwd instead of assuming the worktree path (which had
+  also broken resume for such agents). `rm` on a non-worktree agent (adopted / main
+  checkout) only untracks it, never deleting an unrelated worktree.
+- **Global dashboard no longer doubles/flickers a stopped or running agent.** Running
+  `wta` from inside a linked worktree used `git rev-parse --show-toplevel`, which returns
+  the *worktree's* root, hashing to a different ("phantom") repo id for the same physical
+  repo. The global dashboard then listed that repo's agents under two groups whose tied
+  sort reordered every refresh, so a row appeared to duplicate and flash. `repo_root()`
+  now resolves the MAIN repo root (via `git-common-dir`) regardless of where wta runs, so
+  the repo id is stable; and `discover_repos()` collapses any lingering duplicate ids for
+  one physical root, keeping the id whose agents are actually live (then freshest, then
+  canonical) — deterministically, so nothing flickers even before old state is cleaned up.
+
 ## [0.3.2] — 2026-09-01
 
 ### Added
