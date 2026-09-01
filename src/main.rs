@@ -1,6 +1,7 @@
 #[cfg(feature = "telegram")]
 mod bridge;
 mod cli;
+mod copyview;
 mod cost;
 mod cron;
 mod dash;
@@ -144,9 +145,12 @@ fn main() -> anyhow::Result<()> {
             worktree::stop(&task)?;
             println!("stopped '{task}' — worktree kept; resume with `wta resume {task}`");
         }
-        Command::Resume { task } => {
-            worktree::resume(&task)?;
-            println!("resumed '{task}' — attach with `wta attach {task}`");
+        Command::Copy { task, session } => copyview::run_cli(task.as_deref(), session.as_deref())?,
+        Command::Switch { client, session, dir } => worktree::switch_session(&client, &session, &dir)?,
+        Command::Resume { task, fresh } => {
+            worktree::resume(&task, fresh)?;
+            let how = if fresh { "fresh conversation" } else { "continued" };
+            println!("resumed '{task}' ({how}) — attach with `wta attach {task}`");
         }
         Command::Push { task, pr } => {
             let summary = worktree::push(&task, pr)?;

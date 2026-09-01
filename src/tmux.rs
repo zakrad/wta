@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Which tmux server to use. Default is a dedicated socket ("wta") so wta is
 /// fully isolated from the user's own tmux. `WTA_TMUX_SOCKET=default` (or the
@@ -98,7 +98,9 @@ pub fn list_sessions() -> Vec<String> {
 fn configure(name: &str) {
     // Session-scoped (`-t <session>`): safe on any server — only affects our sessions.
     for (opt, val) in [("mouse", "on"), ("history-limit", "10000")] {
-        let _ = tmux().args(["set-option", "-t", name, opt, val]).status();
+        // stderr silenced: a program that dies instantly takes the session with it,
+        // and tmux's "no such session" would leak into the caller's terminal
+        let _ = tmux().args(["set-option", "-t", name, opt, val]).stderr(Stdio::null()).status();
     }
     if dedicated() {
         // We own this socket, so set server-globals: zero escape latency + Ctrl-q
@@ -121,14 +123,46 @@ fn ensure_hint_bar(name: &str) {
     if !dedicated() {
         return;
     }
+    // Opt out once the keys are muscle memory: no bar at all while attached.
+    if std::env::var("WTA_HINT_BAR").map(|v| v == "0").unwrap_or(false) {
+        let _ = tmux().args(["set-option", "-g", "status", "off"]).status();
+        return;
+    }
     // Drop any stale per-session `status` override so the session inherits the bar.
     let _ = tmux().args(["set-option", "-u", "-t", name, "status"]).status();
+    ensure_scroll_keys();
+    ensure_copy_key();
+    ensure_switch_keys();
+    // macOS shows ⌥/^ (WezTerm/iTerm/Terminal all send left-Option as Alt/Meta);
+    // elsewhere tmux's own M-/C- spelling.
+    let (alt_y, ctrl_q) = if cfg!(target_os = "macos") { ("⌥y", "^q") } else { ("M-y", "C-q") };
+    // One "chip" per key: the key on a colored block, a one-word label after it.
+    let chip = |bg: &str, key: &str, label: &str| {
+        format!("#[fg=black,bg={bg},bold] {key} #[fg={bg},bg=default,nobold] {label} ")
+    };
+    // all green: one hue reads calmer and matches wta's identity (and the left chip)
+    let next_key = if cfg!(target_os = "macos") { "⌥]" } else { "M-]" };
+    let right = format!(
+        "{}{}{}{}",
+        chip("green", "PgUp", "scroll"),
+        chip("green", next_key, "next"),
+        chip("green", alt_y, "copy"),
+        chip("green", ctrl_q, "back"),
+    );
     for (opt, val) in [
         ("status", "on"),
-        ("status-style", "bg=default,fg=green"),
-        ("status-left", ""),
-        ("status-right", " #[bold]Ctrl-q#[nobold] ↩ return to wta "),
-        ("status-right-length", "28"),
+        ("status-style", "bg=default,fg=default"),
+        // left: which agent you're in — `repo › task` as a green chip (set per session by
+        // `set_label`; sessions from before that option existed fall back to the name)
+        // …with the agent's live state glyph (set by `set_status_chip`); the chip turns
+        // yellow when the agent needs you
+        (
+            "status-left",
+            "#[fg=black,bg=#{?#{@wta_attn},yellow,green},bold] #{?@wta_label,#{@wta_label},#{session_name}} #{@wta_glyph}#[default]",
+        ),
+        ("status-left-length", "48"),
+        ("status-right", right.as_str()),
+        ("status-right-length", "60"),
     ] {
         let _ = tmux().args(["set-option", "-g", opt, val]).status();
     }
@@ -162,11 +196,238 @@ pub fn new_session(name: &str, cwd: &Path, program: &str, extra: &[String]) -> R
     Ok(())
 }
 
+/// Label a session `repo › task` for the attached status bar's left side (a tmux user
+/// option on the session, read by the `status-left` format).
+pub fn set_label(name: &str, repo_name: &str, task: &str) {
+    let label = format!("{repo_name} › {task}");
+    let _ = tmux()
+        .args(["set-option", "-t", name, "@wta_label", &label])
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Move a client to another session on our server (the switch keys' primitive).
+pub fn switch_client(client: &str, target: &str) -> Result<()> {
+    let out = tmux()
+        .args(["switch-client", "-c", client, "-t", target])
+        .output()
+        .context("tmux switch-client failed")?;
+    if !out.status.success() {
+        bail!("switch-client: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// Flash a one-line message in a client's status area (the switch/where-am-I toast).
+pub fn client_message(client: &str, text: &str) {
+    let _ = tmux()
+        .args(["display-message", "-c", client, text])
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// A session's `repo › task` label (the @wta_label we set at spawn), if any.
+pub fn session_label(name: &str) -> Option<String> {
+    let out = tmux()
+        .args(["show-options", "-v", "-t", name, "@wta_label"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// Reflect an agent's state in its status-bar chip: a glyph after `repo › task`, and a
+/// yellow chip while it needs you. Same vocabulary as the dashboard. Called by the
+/// dashboard on every status change and by the `wta status` hook, so it's live whether
+/// or not a dashboard is open.
+pub fn set_status_chip(name: &str, status: &str) {
+    if !dedicated() {
+        return;
+    }
+    let (glyph, attn) = match status {
+        "running" => ("⟳", false),
+        "ready" | "waiting" => ("●", false),
+        "needs_input" => ("▲", true),
+        "merged" => ("✓", false),
+        "exited" | "idle" => ("✗", false),
+        _ => ("", false),
+    };
+    for (opt, val) in [("@wta_glyph", glyph), ("@wta_attn", if attn { "1" } else { "" })] {
+        let _ = tmux()
+            .args(["set-option", "-t", name, opt, val])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status();
+    }
+}
+
+/// Prefix-free scrollback keys on our dedicated server. When wta itself runs inside
+/// the user's tmux (WezTerm → tmux → wta → agent), the OUTER server eats `Ctrl-b`, so
+/// `Ctrl-b [` opens copy mode on the outer pane — whose history is the shell that
+/// launched wta, not the agent's chat. Unbound Alt/Shift/PageUp keys pass straight
+/// through an outer tmux, so they reach us.
+///
+/// Two kinds of agent screen, handled per keypress via `#{alternate_on}`:
+/// - Claude Code ≥2.1's fullscreen renderer (and nvim, less…) runs in the ALTERNATE
+///   screen and scrolls its own buffer — tmux history is empty, copy mode would only
+///   show the current screen. Forward the key so the app scrolls (Claude: PageUp/Down
+///   natively; Alt-k/j etc. via ~/.claude/keybindings.json `Scroll` context).
+/// - classic renderers / plain output live in tmux history: open copy mode one page
+///   up (repeat to keep paging); the user's own mode-keys take over from there.
+fn ensure_scroll_keys() {
+    if !dedicated() {
+        return;
+    }
+    for key in ["PPage", "M-k", "S-Up"] {
+        let fwd = format!("send-keys {key}");
+        let _ = tmux()
+            .args(["bind-key", "-n", key, "if-shell", "-F", "#{alternate_on}", &fwd, "copy-mode -u"])
+            .status();
+    }
+    // inside copy mode keep Shift-↑/↓ paging (same as the entry key), in both key tables
+    for table in ["copy-mode", "copy-mode-vi"] {
+        let _ = tmux().args(["bind-key", "-T", table, "S-Up", "send-keys", "-X", "page-up"]).status();
+        let _ = tmux().args(["bind-key", "-T", table, "S-Down", "send-keys", "-X", "page-down"]).status();
+    }
+}
+
+/// `Alt-]` / `Alt-[` / `Alt-o` while attached: jump straight to the next / previous /
+/// last live agent, no dashboard round-trip. Prefix-free (so they pass through an outer
+/// tmux) and NOT among the outer config's own Alt bindings (M-n/M-p/M-c/M--/M-\\). Order
+/// matches the dashboard (see `worktree::fleet_sessions`). Runs THIS binary so it doesn't
+/// need `wta` on PATH.
+fn ensure_switch_keys() {
+    if !dedicated() {
+        return;
+    }
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "wta".into());
+    let sh = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    for (key, dir) in [("M-]", "next"), ("M-[", "prev"), ("M-o", "last")] {
+        let cmd = format!(
+            "{exe} switch -c '#{{client_name}}' -s '#{{session_name}}' -d {dir}",
+            exe = sh(&exe),
+        );
+        let _ = tmux()
+            .args(["bind-key", "-n", key, "run-shell", "-b", &cmd])
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// `Alt-y` while attached: wta's own vim-style copy mode in a tmux popup over the agent
+/// (see `copyview`). Works for any agent regardless of how it draws — and passes through
+/// an outer tmux, since it's an unbound Alt key there. The popup runs THIS binary
+/// (`current_exe`) so it doesn't depend on `wta` being on the pane's PATH.
+///
+/// Goes through `run-shell` because `display-popup` does NOT expand formats in its
+/// command, while `run-shell` does — that's how one server-wide binding learns which
+/// agent (`#{session_name}`) and which client (`#{client_name}`) the key fired in.
+fn ensure_copy_key() {
+    if !dedicated() {
+        return;
+    }
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "wta".into());
+    let sh_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let cmd = format!(
+        "tmux -L {sock} display-popup -c '#{{client_name}}' -E -w 96% -h 96% -T ' copy mode · q closes ' \
+         {exe} copy --session '#{{session_name}}'",
+        sock = socket_name(),
+        exe = sh_quote(&exe),
+    );
+    let _ = tmux()
+        .args(["bind-key", "-n", "M-y", "run-shell", "-b", &cmd])
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Watch a just-spawned session for `grace`: if its program dies inside that window
+/// (classic case: `claude --continue` with no saved conversation → "No conversation
+/// found to continue" and exit 1), return what the pane printed and kill the session,
+/// so the caller can explain the failure instead of showing a bare "exited" row.
+/// `None` means it's still running (the pane is left exactly as spawned).
+///
+/// Works by holding the pane open with `remain-on-exit` for the grace period, which
+/// keeps the dying program's last screen readable via capture-pane.
+pub fn watch_early_exit(name: &str, grace: Duration) -> Option<String> {
+    let set_remain = |val: &str| {
+        let _ = tmux()
+            .args(["set-option", "-w", "-t", name, "remain-on-exit", val])
+            .stderr(Stdio::null())
+            .status();
+    };
+    set_remain("on");
+    let start = Instant::now();
+    loop {
+        if !has_session(name) {
+            // died before we could hold the pane — nothing to read back
+            return Some(String::new());
+        }
+        let dead = tmux()
+            .args(["display-message", "-p", "-t", name, "#{pane_dead}"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+            .unwrap_or(false);
+        if dead {
+            let text = capture(name).unwrap_or_default();
+            let _ = kill(name);
+            // last few non-blank lines: the error is at the bottom of the pane
+            let tail: Vec<&str> = text
+                .lines()
+                .map(str::trim_end)
+                // drop blanks and tmux's own remain-on-exit banner ("Pane is dead …")
+                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Pane is dead"))
+                .collect();
+            let keep = tail.len().saturating_sub(4);
+            return Some(tail[keep..].join("\n"));
+        }
+        if start.elapsed() >= grace {
+            break;
+        }
+        sleep(Duration::from_millis(150));
+    }
+    set_remain("off");
+    None
+}
+
 /// Visible pane text of a session (plain, no escapes) — for hashing + status/trust
 /// matching, which must see clean text.
 pub fn capture(name: &str) -> Option<String> {
     let out = tmux()
         .args(["capture-pane", "-p", "-t", name])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The current working directory of a session's active pane — the agent's real cwd,
+/// which is where its transcript is keyed. `None` if the session is gone.
+pub fn pane_path(name: &str) -> Option<String> {
+    let out = tmux()
+        .args(["display-message", "-p", "-t", name, "#{pane_current_path}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+/// The pane's FULL history as plain text (`-S -`), for wta's copy mode when there's no
+/// transcript to read. Empty for alternate-screen apps (their history isn't tmux's).
+pub fn capture_full(name: &str) -> Option<String> {
+    let out = tmux()
+        .args(["capture-pane", "-p", "-S", "-", "-t", name])
         .output()
         .ok()?;
     if !out.status.success() {

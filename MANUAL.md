@@ -127,7 +127,55 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
 
 - **Attach** — `Enter`/`o` (or `wta attach <task>`) drops you into the agent's
   real terminal. Type normally. **`Ctrl-q` detaches** back to wta (not tmux's
-  `Ctrl-b d`).
+  `Ctrl-b d`). A thin status bar shows `repo › task` **plus the agent's live state glyph**
+  (`⟳` working · `●` ready · `▲` needs you — the chip turns yellow) on the left, and key
+  chips on the right: `PgUp scroll · ⌥y copy · ^q back`. Set `WTA_HINT_BAR=0` to hide the
+  bar entirely. On macOS `⌥` is the **left** Option key
+  (WezTerm/iTerm send it as Alt; the right one composes accents).
+- **Scrolling the agent's chat with the keyboard** — press **`PgUp`/`PgDn`** (Mac:
+  `Fn+↑/↓`) while attached. No prefix is needed, which matters **if you run wta inside
+  your own tmux** (WezTerm → tmux → wta): the outer tmux eats `Ctrl-b`, so `Ctrl-b [`
+  would open copy mode on the *outer* pane — your shell's history, not the agent's chat.
+  What the key does depends on how the agent draws:
+  - **Claude Code ≥ 2.1 (fullscreen renderer)** runs in the terminal's alternate screen
+    and scrolls its own buffer (tmux history is empty there, so copy mode can't help).
+    wta passes the key through and Claude scrolls natively (`PgUp`/`PgDn`,
+    `Ctrl+Home`/`Ctrl+End`). For vim-style keys, bind Claude's `Scroll` context in
+    `~/.claude/keybindings.json`, e.g. `alt+k`/`alt+j` → `scroll:lineUp`/`lineDown`,
+    `alt+shift+k`/`alt+shift+j` → `scroll:halfPageUp`/`halfPageDown`, `alt+g`/`alt+shift+g`
+    → `scroll:top`/`bottom` — wta forwards `Alt-k` too. (Or switch Claude to the classic
+    renderer with `/tui default`, which puts the chat in tmux history.)
+  - **Classic renderers / plain output** (`/tui default`, other agent CLIs): the chat is
+    in tmux history, so `PgUp` / `Alt-k` / `Shift-↑` open tmux copy mode one page up
+    (repeat to keep paging); your tmux `mode-keys` apply from there (vi: `j`/`k`,
+    `Ctrl-u`/`Ctrl-d`, `/`, `q` to leave; `Shift-↑/↓` page in either mode).
+  Mouse wheel works in both cases. `--server default` avoids nesting entirely.
+- **Copy mode (wta's own, vim-style)** — press **`c`** on an agent in the dashboard,
+  **`Alt-y` (macOS: left `⌥y`) while attached** (opens over the agent in a tmux popup — passes through an
+  outer tmux), or run `wta copy <task>`. It's a keyboard-only, agent-agnostic view of the
+  conversation: it doesn't matter whether the agent draws in the alternate screen
+  (Claude's fullscreen renderer), classic scrollback, or is a different CLI entirely.
+  wta reads the agent's **transcript** when it knows the format (Claude Code JSONL:
+  `you ›` / `claude ›` messages, tool calls summarized, results folded) and otherwise the
+  session's **full tmux scrollback**. Keys: `j`/`k` move, `Ctrl-u`/`Ctrl-d` half page,
+  `PgUp`/`PgDn` page, `g`/`G` top/bottom, **`[`/`]` previous/next message**, `/` search
+  then `n`/`N`, **`v` start a line selection, move, `y` yank** to the clipboard (`pbcopy`
+  / `wl-copy` / `xclip` / `xsel`, else OSC 52), `Y` yank the current line, **`m` yank the
+  whole message** under the cursor, **`⏎` fold/unfold** a long tool result, **`?`** for a
+  key card, `Esc` clear, `q` quit. Selections are line-wise, like `V` in vim.
+- **Resume** — `Enter` on an exited agent re-spawns it with `--continue`. If the
+  session dies right after launch (typically Claude's *"No conversation found to
+  continue"* — nothing saved for that worktree), wta shows what it printed and offers
+  **`f`** a fresh conversation in the same worktree (branch + changes kept) or **`r`**
+  recreate from scratch (`rm` + `new` under the same name and base). CLI equivalents:
+  `wta resume <task> --fresh` / `wta rm <task> && wta new <task>`.
+- **Switch agents without the dashboard** — while attached, **`⌥]`** / **`⌥[`** (macOS
+  Option; `M-]`/`M-[` elsewhere) jump to the next / previous live agent, and **`⌥o`**
+  toggles to the *last* agent you were on (Alt-Tab style — one key to bounce between two).
+  The cycle is every live agent in the same order the global dashboard lists them (repos
+  by path, then your `J`/`K` order), across all repos. A brief `‹2/5› repo › task` toast
+  shows where you landed. Keys are prefix-free, so they work even with wta running inside
+  your own tmux.
 - **Quick-send** — press `i`, type one line, `Enter`. It's injected into the
   agent without attaching. Gated to when the agent is `●` ready and idle, so you
   never inject mid-stream.
@@ -479,6 +527,8 @@ exited status is detected automatically for any agent, with or without hooks.
 ```sh
 wta stop fix-auth      # kill the tmux session, KEEP the worktree (resumable)
 wta resume fix-auth    # re-spawn the session in the existing worktree (claude --continue)
+wta resume fix-auth --fresh   # same worktree, NEW conversation (when there's nothing to continue)
+wta copy fix-auth      # vim-style copy mode over the agent's conversation (also: c in the dash, Alt-y attached)
 wta rm fix-auth        # destroy: session + worktree + branch
 wta rm fix-auth --force # also discard uncommitted work / an unmerged branch
 ```

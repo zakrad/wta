@@ -587,6 +587,7 @@ fn new_impl(task: &str, agent_args: &[String], base: Option<&str>, seed: Option<
     let session = tmux::session_name(&repo, task);
     let (prog, extra) = agent_argv(&repo, task, idx, agent_args);
     tmux::new_session(&session, &wt, &prog, &extra)?;
+    tmux::set_label(&session, &repo_name(&root), task);
     let _ = status::record(&repo, task, "running", &wt_str);
     Ok(())
 }
@@ -1628,43 +1629,115 @@ fn repo_of_worktree(wt: &Path) -> Option<String> {
 /// — no dependence on the current directory, so the session name + WTA_REPO + state
 /// exactly match what the dashboard row already tracks (fixes resume across repos and
 /// for duplicate task names).
-pub fn resume_session(repo: &str, task: &str, wt: &Path) -> Result<()> {
+///
+/// `fresh` drops the continue flag: a brand-new conversation in the existing worktree
+/// (branch + uncommitted work kept) — the dashboard's "start fresh" choice and
+/// `wta resume --fresh`.
+pub fn resume_session(repo: &str, task: &str, wt: &Path, fresh: bool) -> Result<()> {
+    let tail = if fresh { Vec::new() } else { resume_args() };
+    resume_session_with(repo, task, wt, &tail)
+}
+
+/// A resumed session that died right after launch. Carries the pane's last output so
+/// the CLI/dashboard can say WHY (typically Claude's "No conversation found to
+/// continue") and offer a way out, instead of a row that just flips back to ✗.
+#[derive(Debug)]
+pub struct ResumeDied {
+    pub task: String,
+    pub output: String,
+}
+
+impl std::fmt::Display for ResumeDied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let why = if self.output.trim().is_empty() {
+            "(no output)".to_string()
+        } else {
+            self.output.clone()
+        };
+        write!(
+            f,
+            "'{t}' exited right after launch:\n  {why}\n\
+             start a fresh conversation in the same worktree: `wta resume {t} --fresh`\n\
+             or recreate it from scratch: `wta rm {t} && wta new {t}`",
+            t = self.task,
+            why = why.replace('\n', "\n  "),
+        )
+    }
+}
+impl std::error::Error for ResumeDied {}
+
+/// How long we watch a resumed session for an immediate death before calling it
+/// running. `claude --continue` fails within ~1s; this only delays the SUCCESS path.
+const RESUME_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
+
+fn resume_session_with(repo: &str, task: &str, wt: &Path, tail: &[String]) -> Result<()> {
     if !wt.exists() {
         bail!("no worktree at {} to resume", wt.display());
     }
     let idx = status::read_state(repo, task).map(|s| s.index).unwrap_or_else(|| assign_slot(repo));
+    // Cheap, deterministic pre-check: `claude --continue` looks for a transcript under
+    // ~/.claude/projects/<encoded cwd>; with none it prints "No conversation found to
+    // continue" and exits 1. Don't even spawn — report it as the same typed failure.
+    let wants_continue = tail.iter().any(|a| a == "--continue" || a == "-c");
+    let is_claude = agent_cmd()
+        .split_whitespace()
+        .next()
+        .map(crate::roles::is_claude)
+        .unwrap_or(false);
+    if wants_continue && is_claude && !crate::cost::has_transcript(wt) {
+        return Err(ResumeDied {
+            task: task.to_string(),
+            output: format!(
+                "No conversation found to continue (no Claude transcript for {})",
+                wt.display()
+            ),
+        }
+        .into());
+    }
     preseed_claude_trust(wt);
     let session = tmux::session_name(repo, task);
-    let (prog, extra) = agent_argv(repo, task, idx, &resume_args());
+    let (prog, extra) = agent_argv(repo, task, idx, tail);
     tmux::new_session(&session, wt, &prog, &extra)?;
+    if let Some(root) = main_root_of(wt) {
+        tmux::set_label(&session, &repo_name(&root), task);
+    }
+    // Record BEFORE the grace watch: the agent's hooks may already write a newer state
+    // (needs_input) inside the window, and a later "running" would clobber it.
     let _ = status::record(repo, task, "running", &wt.to_string_lossy());
+    // Generic backstop for any engine/flag: if the pane dies inside the grace window,
+    // surface what it printed rather than letting the row silently flip back to ✗.
+    if let Some(out) = tmux::watch_early_exit(&session, RESUME_GRACE) {
+        let _ = status::record(repo, task, "exited", &wt.to_string_lossy());
+        return Err(ResumeDied { task: task.to_string(), output: out }.into());
+    }
     Ok(())
 }
 
 /// Resume the agent living at worktree `wt`, resolving its repo id from the worktree
 /// (falling back to the cwd repo). Used by CLI resume-by-path.
-pub fn resume_at(task: &str, wt: &Path) -> Result<()> {
+pub fn resume_at(task: &str, wt: &Path, fresh: bool) -> Result<()> {
     if !wt.exists() {
         bail!("no worktree at {} to resume", wt.display());
     }
     let repo = repo_of_worktree(wt)
         .or_else(|| repo_id().ok())
         .context("cannot resolve the repo for this worktree")?;
-    resume_session(&repo, task, wt)
+    resume_session(&repo, task, wt, fresh)
 }
 
 /// Resume by task name (looks up the worktree under the current repo). For an ADOPTED
 /// agent the worktree is the registered dir, not `.agents/<task>`, so use that.
-pub fn resume(task: &str) -> Result<()> {
+/// `fresh` drops the continue flag (new conversation, same worktree).
+pub fn resume(task: &str, fresh: bool) -> Result<()> {
     let root = repo_root()?;
     let repo = repo_id_of(&root);
     if let Some(st) = status::read_state(&repo, task) {
         if st.adopted && !st.cwd.is_empty() {
-            return resume_session(&repo, task, Path::new(&st.cwd));
+            return resume_session(&repo, task, Path::new(&st.cwd), fresh);
         }
     }
     let wt = worktrees_dir(&root).join(task);
-    resume_at(task, &wt)
+    resume_at(task, &wt, fresh)
 }
 
 /// `wta adopt <task> [--dir <path>]` — register an EXISTING directory (where you're
@@ -1673,12 +1746,25 @@ pub fn resume(task: &str) -> Result<()> {
 /// Enter in `wta dash` (or `wta resume <task>`) when you're ready — that resumes the
 /// conversation (`--continue`) in that dir under a wta-managed session.
 pub fn adopt(task: &str, dir: Option<&str>) -> Result<()> {
-    validate_task(task)?;
     let wt = match dir {
         Some(d) => PathBuf::from(d),
         None => std::env::current_dir()?,
     };
+    let root = adopt_core(task, &wt)?;
     let wt = std::fs::canonicalize(&wt).unwrap_or(wt);
+    println!("adopted '{task}' → {}", wt.display());
+    println!(
+        "it's in `wta dash` under {} — press Enter (or `wta resume {task}`) to continue it inside wta.",
+        repo_name(&root)
+    );
+    Ok(())
+}
+
+/// Register `wt` as an adopted agent under its repo; returns the repo root.
+/// Shared by the CLI `adopt` and the dashboard's adopt picker (no printing).
+pub fn adopt_core(task: &str, wt: &Path) -> Result<PathBuf> {
+    validate_task(task)?;
+    let wt = std::fs::canonicalize(wt).unwrap_or_else(|_| wt.to_path_buf());
     if !wt.exists() {
         bail!("no such directory: {}", wt.display());
     }
@@ -1691,12 +1777,88 @@ pub fn adopt(task: &str, dir: Option<&str>) -> Result<()> {
     let base = current_branch(&wt).unwrap_or_else(|| base_branch(&root));
     let idx = assign_slot(&repo);
     status::adopt(&repo, task, &wt.to_string_lossy(), &base, idx)?;
-    println!("adopted '{task}' → {}", wt.display());
-    println!(
-        "it's in `wta dash` under {} — press Enter (or `wta resume {task}`) to continue it inside wta.",
-        repo_name(&root)
-    );
-    Ok(())
+    Ok(root)
+}
+
+/// A directory under `root` with Claude Code history that isn't already a
+/// wta-managed agent — an adopt candidate offered by the dashboard's `a` picker.
+pub struct AdoptCandidate {
+    pub dir: PathBuf,
+    pub label: String, // repo-relative path, or "(repo root)"
+    pub sessions: usize,
+    pub last_unix: u64,
+    pub suggested: String, // pre-filled task name
+}
+
+/// Scan a repo for adoptable Claude sessions: its root plus every git worktree
+/// that has transcripts on disk and isn't already tracked by wta. Newest first.
+pub fn adopt_candidates(root: &Path) -> Vec<AdoptCandidate> {
+    let repo = repo_id_of(root);
+    let mut dirs: Vec<PathBuf> = vec![root.to_path_buf()];
+    if let Ok(out) = run_git(&["worktree", "list", "--porcelain"], Some(root)) {
+        for line in out.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                let pb = PathBuf::from(p);
+                if !dirs.contains(&pb) {
+                    dirs.push(pb);
+                }
+            }
+        }
+    }
+    // Directories already tracked as agents (managed or adopted) — don't re-offer.
+    let taken: std::collections::HashSet<String> = status::read_states(&repo)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.cwd)
+        .collect();
+    let mut out: Vec<AdoptCandidate> = Vec::new();
+    for dir in dirs {
+        if !dir.exists() {
+            continue;
+        }
+        let canon = std::fs::canonicalize(&dir).unwrap_or(dir);
+        let key = canon.to_string_lossy().to_string();
+        if taken.contains(&key) || out.iter().any(|c| c.dir == canon) {
+            continue;
+        }
+        let (sessions, last_unix) = crate::cost::sessions_for(&canon);
+        if sessions == 0 {
+            continue;
+        }
+        let (label, suggested) = match canon.strip_prefix(root) {
+            Ok(rel) if rel.as_os_str().is_empty() => {
+                ("(repo root)".to_string(), sanitize_task(&repo_name(root)))
+            }
+            Ok(rel) => (rel.display().to_string(), sanitize_task(&rel.display().to_string())),
+            Err(_) => {
+                let base = canon
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (canon.display().to_string(), sanitize_task(&base))
+            }
+        };
+        out.push(AdoptCandidate { dir: canon, label, sessions, last_unix, suggested });
+    }
+    out.sort_by(|a, b| b.last_unix.cmp(&a.last_unix));
+    out
+}
+
+/// Coerce an arbitrary string into a valid task name (alphanumerics, `-`, `_`).
+fn sanitize_task(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let t = out.trim_matches('-').to_string();
+    if t.is_empty() {
+        "session".to_string()
+    } else {
+        t
+    }
 }
 
 /// Stop an agent WITHOUT destroying anything: kills the tmux session but keeps
@@ -1783,6 +1945,67 @@ pub fn discover_repos() -> Vec<(String, PathBuf)> {
     v.sort_by(|a, b| a.1.cmp(&b.1));
     v
 }
+
+/// Every LIVE agent session in the SAME order the (global) dashboard lists them: repos
+/// sorted by root path, tasks within a repo by manual order rank then name. Returns tmux
+/// session names. This is the cycle order for the `Alt-]` / `Alt-[` switch keys, so the
+/// hotkeys and the visible list always agree.
+pub fn fleet_sessions() -> Vec<String> {
+    let live: std::collections::HashSet<String> = tmux::list_sessions().into_iter().collect();
+    let mut out = Vec::new();
+    for (repo, _root) in discover_repos() {
+        let rank = status::read_order(&repo);
+        let mut tasks: Vec<String> = status::read_states(&repo)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.task)
+            .filter(|t| live.contains(&tmux::session_name(&repo, t)))
+            .collect();
+        // dashboard's within-repo sort is total on (rank, task name), so the initial
+        // order doesn't matter — replicate just that.
+        tasks.sort_by(|a, b| {
+            let pa = rank.get(a).copied().unwrap_or(u32::MAX);
+            let pb = rank.get(b).copied().unwrap_or(u32::MAX);
+            pa.cmp(&pb).then_with(|| a.cmp(b))
+        });
+        for t in tasks {
+            out.push(tmux::session_name(&repo, &t));
+        }
+    }
+    out
+}
+
+/// `wta switch` (bound to `Alt-]`/`Alt-[`/`Alt-o` while attached): move the tmux client
+/// `client` from session `from` to the next/previous/last live agent, then flash where it
+/// landed. `dir` is "next" | "prev" | "last". No-op with a one-line note if there's
+/// nowhere to go.
+pub fn switch_session(client: &str, from: &str, dir: &str) -> Result<()> {
+    let fleet = fleet_sessions();
+    if fleet.len() < 2 {
+        tmux::client_message(client, "wta: only one live agent");
+        return Ok(());
+    }
+    let i = fleet.iter().position(|s| s == from).unwrap_or(0);
+    let n = fleet.len();
+    let target = match dir {
+        // toggle back to the agent we were on before, tracked per client (see status);
+        // if there's no valid record yet, behave like "next"
+        "last" => status::get_last_switch(client)
+            .filter(|s| s != from && fleet.iter().any(|f| f == s))
+            .unwrap_or_else(|| fleet[(i + 1) % n].clone()),
+        "prev" => fleet[(i + n - 1) % n].clone(),
+        _ => fleet[(i + 1) % n].clone(),
+    };
+    // record where we came FROM before moving, so the next Alt-o returns here
+    status::set_last_switch(client, from);
+    tmux::switch_client(client, &target)?;
+    // flash "‹2/5› repo › task" so you know where you landed
+    let pos = fleet.iter().position(|s| s == &target).map(|i| i + 1).unwrap_or(0);
+    let label = tmux::session_label(&target).unwrap_or_else(|| target.clone());
+    tmux::client_message(client, &format!("wta ‹{pos}/{}› {label}", fleet.len()));
+    Ok(())
+}
+
 
 /// `list_managed`, but for an explicit repo root (so the global dash can scan
 /// repos other than the current directory).
@@ -2680,6 +2903,58 @@ pub fn wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_task_yields_valid_names() {
+        assert_eq!(sanitize_task("my repo"), "my-repo");
+        assert_eq!(sanitize_task("feature/api.v2"), "feature-api-v2");
+        assert_eq!(sanitize_task("--weird--"), "weird");
+        assert_eq!(sanitize_task("///"), "session");
+        assert_eq!(sanitize_task("ok_name-1"), "ok_name-1");
+    }
+
+    #[test]
+    fn adopt_candidates_finds_then_skips_taken() {
+        let base = std::env::temp_dir().join(format!("wta-adopt-{}", std::process::id()));
+        let home = base.join("home");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("f"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        let root = std::fs::canonicalize(&repo).unwrap();
+
+        // A Claude transcript for the repo root, at the encoded-path project dir.
+        std::env::set_var("HOME", &home);
+        let enc: String = root
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let proj = home.join(".claude/projects").join(&enc);
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("s.jsonl"), "{\"type\":\"user\"}\n").unwrap();
+
+        let cands = adopt_candidates(&root);
+        assert_eq!(cands.len(), 1, "root session should be a candidate");
+        assert_eq!(cands[0].label, "(repo root)");
+        assert!(cands[0].sessions >= 1);
+        assert_eq!(cands[0].dir, root);
+
+        // Once adopted, it must not be offered again.
+        adopt_core("mine", &root).unwrap();
+        assert!(adopt_candidates(&root).is_empty(), "adopted dir should be skipped");
+
+        std::env::remove_var("HOME");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn hooks_installed_matches_wta_status_command() {

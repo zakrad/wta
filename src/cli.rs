@@ -264,10 +264,37 @@ pub enum Command {
         #[arg(long)]
         quiet: bool,
     },
+    /// vim-style copy mode over an agent's conversation: scroll, search, select lines,
+    /// yank to the clipboard — keyboard only, and independent of how the agent draws
+    /// (reads its transcript when wta knows the format, else the tmux scrollback)
+    Copy {
+        task: Option<String>,
+        /// resolve the agent from its tmux session name instead (used by the Alt-y popup)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Jump the current tmux client to another live agent (bound to Alt-]/Alt-[/Alt-o
+    /// while attached; not meant to be run by hand)
+    #[command(hide = true)]
+    Switch {
+        #[arg(short = 'c', long)]
+        client: String,
+        #[arg(short = 's', long)]
+        session: String,
+        /// next | prev | last
+        #[arg(short = 'd', long)]
+        dir: String,
+    },
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later
     Stop { task: String },
     /// Resume a stopped agent — re-spawn its session in the existing worktree
-    Resume { task: String },
+    Resume {
+        task: String,
+        /// start a NEW conversation in the same worktree (skip `--continue`) — for when
+        /// there's nothing to continue, or you want a clean context
+        #[arg(long)]
+        fresh: bool,
+    },
     /// Commit + push the agent's branch; with --pr, also open a PR via gh
     Push {
         task: String,

@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -99,6 +100,17 @@ enum Modal {
     Confirm(String),
     ForceKill { task: String, unpushed: u32 },
     Resume { task: String, repo: String, path: PathBuf },
+    /// Resume died right after launch (e.g. `claude --continue` with nothing to
+    /// continue). Shows WHY and offers: `f` fresh conversation in the same worktree,
+    /// `r` recreate — rm the worktree + `wta new` under the same name and base.
+    ResumeFailed {
+        task: String,
+        repo: String,
+        path: PathBuf,
+        root: PathBuf,
+        base: String,
+        reason: String,
+    },
     Push(String),
     BranchPick {
         branches: Vec<String>,
@@ -117,6 +129,23 @@ enum Modal {
         filter: String,
         sel: usize,
         prompt: bool, // carry N (new-with-prompt) through the picker
+    },
+    /// Adopt: pick which repo's sessions to browse (global dash only).
+    AdoptRepoPick {
+        repos: Vec<(String, PathBuf)>,
+        filter: String,
+        sel: usize,
+    },
+    /// Adopt: pick a Claude session under the chosen repo. Enter → AdoptName.
+    AdoptPick {
+        root: PathBuf,
+        cands: Vec<worktree::AdoptCandidate>,
+        sel: usize,
+    },
+    /// Adopt: name the adopted agent, then register it.
+    AdoptName {
+        dir: PathBuf,
+        name: String,
     },
     Help,
 }
@@ -185,6 +214,7 @@ struct App {
     spin: usize,
     msg: Option<(String, bool, Instant)>, // (text, is_error, when)
     attach: Option<String>,               // session to attach to after this frame
+    copy: Option<(String, String)>,       // (repo, task) to open copy mode on after this frame
     open: Option<(String, PathBuf)>,      // (editor cmd, worktree) to open inline after this frame
     scroll: u16,                          // preview/diff scroll offset
     scrollback: Option<String>,           // Some => Preview scroll mode: full (colored) history snapshot
@@ -192,11 +222,33 @@ struct App {
     attention: HashSet<String>,           // agents that finished / need input and haven't been viewed
     chart: Vec<Line<'static>>,            // selected agent's tokens-over-time chart (table overlay)
     chart_session: String,                // which agent `chart` was computed for (lazy recompute)
+    // Transcript parsing (cost) runs on a worker thread so a huge session never
+    // freezes the UI — jobs go out on cost_tx, results stream back on cost_rx.
+    cost_tx: Sender<(String, PathBuf)>,
+    cost_rx: Receiver<(String, (crate::cost::Usage, Option<String>))>,
+    cost_inflight: HashSet<String>, // sessions currently being parsed (dedupe jobs)
+    costmtime: HashMap<String, u64>, // session -> newest transcript mtime last parsed
 }
 
 impl App {
     fn new() -> Self {
+        // Cost worker: parses transcripts off the UI thread. Dropping the App drops
+        // cost_tx, which ends the worker's recv loop — no thread is leaked.
+        let (cost_tx, job_rx) = channel::<(String, PathBuf)>();
+        let (res_tx, cost_rx) = channel::<(String, (crate::cost::Usage, Option<String>))>();
+        std::thread::spawn(move || {
+            while let Ok((session, path)) = job_rx.recv() {
+                let cm = crate::cost::for_worktree(&path);
+                if res_tx.send((session, cm)).is_err() {
+                    break; // dashboard gone
+                }
+            }
+        });
         App {
+            cost_tx,
+            cost_rx,
+            cost_inflight: HashSet::new(),
+            costmtime: HashMap::new(),
             view: View::Split,
             pending_g: false,
             global: false,
@@ -220,6 +272,7 @@ impl App {
             spin: 0,
             msg: None,
             attach: None,
+            copy: None,
             open: None,
             scroll: 0,
             scrollback: None,
@@ -305,6 +358,19 @@ fn in_repo<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     r
 }
 
+/// Suspend the TUI, run wta's copy mode over the agent's conversation, resume on `q`.
+fn copy_inline(term: &mut Term, repo: &str, task: &str, app: &mut App) {
+    disable_raw_mode().ok();
+    execute!(term.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show).ok();
+    let res = crate::copyview::run(crate::copyview::source_for(repo, task));
+    enable_raw_mode().ok();
+    execute!(term.backend_mut(), EnterAlternateScreen, crossterm::cursor::Hide).ok();
+    let _ = term.clear();
+    if let Err(e) = res {
+        app.set_err(e);
+    }
+}
+
 /// Suspend the TUI, attach to the tmux session inline, resume on detach.
 fn attach_inline(term: &mut Term, session: &str) {
     disable_raw_mode().ok();
@@ -339,6 +405,7 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
             }
         }
         poll_checks(&mut app);
+        drain_costs(&mut app);
         term.draw(|f| ui(f, &mut app))?;
 
         if event::poll(Duration::from_millis(200))? {
@@ -353,6 +420,11 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
             attach_inline(term, &session);
             refresh(&mut app);
             load_detail(&mut app);
+            last_tick = Instant::now();
+        }
+
+        if let Some((repo, task)) = app.copy.take() {
+            copy_inline(term, &repo, &task, &mut app);
             last_tick = Instant::now();
         }
 
@@ -487,8 +559,74 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 KeyCode::Char('y') => {
                     let (task, repo, path) = (task.clone(), repo.clone(), path.clone());
                     app.modal = Modal::None;
-                    if let Err(e) = worktree::resume_session(&repo, &task, &path) {
-                        app.set_err(e);
+                    if let Err(e) = worktree::resume_session(&repo, &task, &path, false) {
+                        match e.downcast_ref::<worktree::ResumeDied>() {
+                            // died on launch → explain + offer fresh / recreate
+                            Some(d) => {
+                                let (root, base) = app
+                                    .rows
+                                    .iter()
+                                    .find(|r| r.task == task && r.repo == repo)
+                                    .map(|r| (r.root.clone(), r.base.clone()))
+                                    .unwrap_or_default();
+                                app.modal = Modal::ResumeFailed {
+                                    task,
+                                    repo,
+                                    path,
+                                    root,
+                                    base,
+                                    reason: d.output.clone(),
+                                };
+                            }
+                            None => app.set_err(e),
+                        }
+                    }
+                    refresh(app);
+                    load_detail(app);
+                }
+                KeyCode::Char('n') | KeyCode::Esc => app.modal = Modal::None,
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::ResumeFailed { task, repo, path, root, base, .. } => {
+            match key.code {
+                // fresh conversation, same worktree (branch + uncommitted work kept)
+                KeyCode::Char('f') => {
+                    let (task, repo, path) = (task.clone(), repo.clone(), path.clone());
+                    app.modal = Modal::None;
+                    match worktree::resume_session(&repo, &task, &path, true) {
+                        Ok(_) => app.set_info(format!("'{task}' restarted with a fresh conversation")),
+                        Err(e) => app.set_err(e),
+                    }
+                    refresh(app);
+                    load_detail(app);
+                }
+                // clean slate: rm worktree + branch, then `wta new` with the same name/base.
+                // Only when nothing can be lost — otherwise point at D (which warns properly).
+                KeyCode::Char('r') => {
+                    let (task, repo, path, root, base) =
+                        (task.clone(), repo.clone(), path.clone(), root.clone(), base.clone());
+                    app.modal = Modal::None;
+                    match recreate_guard(&repo, &task, &path, &base) {
+                        Err(why) => app.set_err(why),
+                        Ok(()) => {
+                            // force: the guard proved the worktree is clean and the branch
+                            // fully merged, and a plain rm would leave an unmerged branch
+                            // behind that makes the `new --base` below bail.
+                            let res = in_repo(&root, || {
+                                worktree::rm(&task, true).context("rm failed")?;
+                                if base.is_empty() {
+                                    worktree::new(&task, &[])
+                                } else {
+                                    worktree::new_with_base(&task, &[], &base)
+                                }
+                            });
+                            match res {
+                                Ok(_) => app.set_info(format!("recreated '{task}' from scratch")),
+                                Err(e) => app.set_err(format!("{e:#}")),
+                            }
+                        }
                     }
                     refresh(app);
                     load_detail(app);
@@ -570,6 +708,77 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                     filter.push(c);
                     *sel = 0;
                 }
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::AdoptRepoPick { repos, filter, sel } => {
+            let matches: Vec<(String, PathBuf)> = repos
+                .iter()
+                .filter(|(name, _)| filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase()))
+                .cloned()
+                .collect();
+            match key.code {
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Up => *sel = sel.saturating_sub(1),
+                KeyCode::Down => {
+                    if *sel + 1 < matches.len() {
+                        *sel += 1;
+                    }
+                }
+                KeyCode::Enter => match matches.get(*sel).map(|(_, r)| r.clone()) {
+                    Some(root) => open_adopt_pick(app, root),
+                    None => app.modal = Modal::None,
+                },
+                KeyCode::Backspace => {
+                    filter.pop();
+                    *sel = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    filter.push(c);
+                    *sel = 0;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::AdoptPick { cands, sel, .. } => {
+            match key.code {
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if *sel + 1 < cands.len() {
+                        *sel += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(c) = cands.get(*sel) {
+                        app.modal = Modal::AdoptName { dir: c.dir.clone(), name: c.suggested.clone() };
+                    }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::AdoptName { dir, name } => {
+            match key.code {
+                KeyCode::Enter => {
+                    let task = name.trim().to_string();
+                    let dir = dir.clone();
+                    app.modal = Modal::None;
+                    if !task.is_empty() {
+                        match worktree::adopt_core(&task, &dir) {
+                            Ok(_) => app.set_info(format!("adopted '{task}' — ↵ to resume it")),
+                            Err(e) => app.set_err(e),
+                        }
+                        refresh(app);
+                    }
+                }
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Backspace => {
+                    name.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => name.push(c),
                 _ => {}
             }
             return Ok(false);
@@ -741,8 +950,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 }
             }
         }
+        // wta's own vim-style copy mode over the agent's conversation (any renderer);
+        // runs after this frame, like attach, since it takes over the terminal
+        KeyCode::Char('c') => {
+            if let Some((repo, task)) = app.selected().map(|r| (r.repo.clone(), r.task.clone())) {
+                app.copy = Some((repo, task));
+            }
+        }
         KeyCode::Char('n') => open_new(app, false),
         KeyCode::Char('N') => open_new(app, true),
+        KeyCode::Char('a') => open_adopt(app),
         KeyCode::Char('s') => {
             if let Some(r) = app.selected() {
                 let (task, root) = (r.task.clone(), r.root.clone());
@@ -1040,6 +1257,47 @@ fn open_new(app: &mut App, prompt: bool) {
     }
 }
 
+/// `a` — adopt an existing Claude session as an agent. Pick a repo (global dash),
+/// then a session under it. Mirrors `open_new`'s repo-selection flow.
+fn open_adopt(app: &mut App) {
+    let mut list: Vec<(String, PathBuf)> = worktree::discover_repos()
+        .iter()
+        .map(|(_, root)| (worktree::repo_name(root), root.clone()))
+        .collect();
+    if !app.root.as_os_str().is_empty() && !list.iter().any(|(_, r)| r == &app.root) {
+        list.insert(0, (worktree::repo_name(&app.root), app.root.clone()));
+    }
+    if app.global && list.len() > 1 {
+        let sel = list.iter().position(|(_, r)| r == &app.root).unwrap_or(0);
+        app.modal = Modal::AdoptRepoPick { repos: list, filter: String::new(), sel };
+    } else {
+        let root = list
+            .first()
+            .map(|(_, r)| r.clone())
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_default();
+        if root.as_os_str().is_empty() {
+            app.set_err("cd into a repo to adopt a session");
+            return;
+        }
+        open_adopt_pick(app, root);
+    }
+}
+
+/// Scan `root` for adoptable Claude sessions and open the session picker (or warn).
+fn open_adopt_pick(app: &mut App, root: PathBuf) {
+    let cands = worktree::adopt_candidates(&root);
+    if cands.is_empty() {
+        app.modal = Modal::None;
+        app.set_err(format!(
+            "no un-adopted Claude sessions found in {}",
+            worktree::repo_name(&root)
+        ));
+        return;
+    }
+    app.modal = Modal::AdoptPick { root, cands, sel: 0 };
+}
+
 // ---------- git helpers ----------
 fn git_in(path: &Path, args: &[&str]) -> Option<String> {
     std::process::Command::new("git")
@@ -1091,6 +1349,37 @@ fn untracked_adds(path: &Path, rel: &str) -> u32 {
     }
 }
 /// Commits on HEAD not present on any remote — work that a force-kill would destroy.
+/// Is "recreate from scratch" safe for this agent? Refuses (with the reason) when it
+/// would destroy anything: an adopted agent (its dir isn't a wta worktree — `rm` only
+/// untracks it, and `new` would build an unrelated one), uncommitted changes, or
+/// commits not yet in the base branch.
+fn recreate_guard(repo: &str, task: &str, path: &Path, base: &str) -> Result<(), String> {
+    if crate::status::read_state(repo, task).map(|s| s.adopted).unwrap_or(false) {
+        return Err(format!(
+            "'{task}' is an adopted session (not a wta worktree) — use f, or rm + new manually"
+        ));
+    }
+    if !path.exists() {
+        return Err(format!("no worktree at {} — press D, then n", path.display()));
+    }
+    let dirty = git_in(path, &["status", "--porcelain"]).map(|s| !s.trim().is_empty()).unwrap_or(true);
+    if dirty {
+        return Err(format!("'{task}' has uncommitted changes — kill it with D first, then n"));
+    }
+    if !base.is_empty() {
+        let range = format!("{base}..HEAD");
+        let ahead: u32 = git_in(path, &["rev-list", "--count", &range])
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        if ahead > 0 {
+            return Err(format!(
+                "'{task}' has {ahead} commit(s) not in {base} — push/land them, or D to discard"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn unpushed_count(path: &Path) -> u32 {
     git_in(path, &["rev-list", "--count", "HEAD", "--not", "--remotes"])
         .and_then(|s| s.trim().parse().ok())
@@ -1229,7 +1518,7 @@ fn poll_checks(app: &mut App) {
 /// Build the rows for ONE repo (merging managed worktrees + state agents), keyed
 /// by the globally-unique session so the global dash's caches never collide across
 /// repos that reuse a task name.
-fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
+fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out: &mut Vec<Row>) {
     let repo_name = worktree::repo_name(root);
     let states: HashMap<String, status::AgentState> = status::read_states(repo)
         .unwrap_or_default()
@@ -1293,22 +1582,29 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
 
         // Token usage + model, cadence-refreshed like the diffstat (parsing transcripts
         // is heavy, so only on the periodic full sweep or for the selected agent).
+        // Cost is parsed on the worker thread (transcripts can be hundreds of MB).
+        // A cheap stat (newest transcript mtime) gates it: only when the agent has
+        // written new output since we last parsed do we enqueue a fresh parse, so an
+        // idle fleet costs nothing and a paint never blocks on transcript reads.
         let (cost, model) = match path.as_deref() {
             Some(p) => {
-                if full_sweep || is_sel || !app.costcache.contains_key(&session) {
-                    let cm = crate::cost::for_worktree(p);
-                    app.costcache.insert(session.clone(), cm.clone());
-                    cm
-                } else {
-                    app.costcache.get(&session).cloned().unwrap_or_default()
+                let (_, mtime) = crate::cost::sessions_for(p);
+                let stale = app.costmtime.get(&session).copied() != Some(mtime);
+                if stale && app.cost_inflight.insert(session.clone()) {
+                    app.costmtime.insert(session.clone(), mtime);
+                    let _ = app.cost_tx.send((session.clone(), p.to_path_buf()));
                 }
+                app.costcache.get(&session).cloned().unwrap_or_default()
             }
             None => (crate::cost::Usage::default(), None),
         };
 
+        // Diffstat / merge check are cheap git calls; keep them synchronous but only
+        // on the periodic sweep or for the selected agent, so launch isn't a burst of
+        // git across the whole fleet (the first paint shows cached-or-zero instead).
         let (added, removed) = match path.as_deref() {
             Some(p) => {
-                if full_sweep || is_sel || !app.diffcache.contains_key(&session) {
+                if full_sweep || is_sel {
                     let v = numstat(p, &base);
                     app.diffcache.insert(session.clone(), v);
                     v
@@ -1320,7 +1616,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
         };
         let merged = match path.as_deref() {
             Some(p) => {
-                if full_sweep || is_sel || !app.mergedcache.contains_key(&session) {
+                if full_sweep || is_sel {
                     let v = is_merged(p, &base, &branch);
                     app.mergedcache.insert(session.clone(), v);
                     v
@@ -1331,7 +1627,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
             None => false,
         };
 
-        let alive = tmux::has_session(&session);
+        let alive = live.contains(&session);
         let status = if alive {
             let text = tmux::capture(&session).unwrap_or_default();
             if auto_trust && !app.trust_done.contains(&session) {
@@ -1406,6 +1702,25 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, out: &mut Vec<Row>) {
     }
 }
 
+/// Fold in any cost results the worker finished since the last frame, updating both
+/// the cache and the already-built rows so the numbers appear without a full refresh.
+fn drain_costs(app: &mut App) {
+    let mut updated = false;
+    while let Ok((session, cm)) = app.cost_rx.try_recv() {
+        app.cost_inflight.remove(&session);
+        app.costcache.insert(session, cm);
+        updated = true;
+    }
+    if updated {
+        for r in &mut app.rows {
+            if let Some((u, m)) = app.costcache.get(&r.session) {
+                r.cost = u.clone();
+                r.model = m.clone();
+            }
+        }
+    }
+}
+
 fn refresh(app: &mut App) {
     let prev_sel = app.selected().map(|r| r.session.clone());
     app.tick = app.tick.wrapping_add(1);
@@ -1419,9 +1734,13 @@ fn refresh(app: &mut App) {
         Vec::new()
     };
 
+    // One `tmux list-sessions` for the whole fleet instead of a `has-session` spawn
+    // per agent every refresh — liveness is then a set lookup.
+    let live: HashSet<String> = tmux::list_sessions().into_iter().collect();
+
     let mut rows = Vec::new();
     for (repo, root) in &targets {
-        repo_rows(app, repo, root, &mut rows);
+        repo_rows(app, repo, root, &live, &mut rows);
     }
     app.rows = rows;
     app.sel = prev_sel
@@ -1435,6 +1754,8 @@ fn refresh(app: &mut App) {
     app.diffcache.retain(|k, _| live.contains(k));
     app.costcache.retain(|k, _| live.contains(k));
     app.mergedcache.retain(|k, _| live.contains(k));
+    app.cost_inflight.retain(|k| live.contains(k));
+    app.costmtime.retain(|k, _| live.contains(k));
     app.trust_seen.retain(|k, _| live.contains(k));
     app.trust_done.retain(|k| live.contains(k));
 
@@ -1462,6 +1783,21 @@ fn refresh(app: &mut App) {
         }
         if now == Status::Running && matches!(app.checks.get(&r.session), Some(Check::Done { .. })) {
             invalidate.push(r.session.clone());
+        }
+    }
+    // mirror status changes into the attached status-bar chip (only on change, so a
+    // quiet fleet costs no tmux calls)
+    for r in app.rows.iter().filter(|r| r.alive) {
+        if app.prev_status.get(&r.session) != Some(&r.status) {
+            let s = match r.status {
+                Status::Running => "running",
+                Status::Ready => "ready",
+                Status::NeedsInput => "needs_input",
+                Status::Merged => "merged",
+                Status::Exited => "exited",
+                Status::Idle => "idle",
+            };
+            tmux::set_status_chip(&r.session, s);
         }
     }
     app.prev_status = app.rows.iter().map(|r| (r.session.clone(), r.status)).collect();
@@ -2181,6 +2517,49 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::ResumeFailed { task, reason, .. } => {
+            let why: Vec<&str> = reason.lines().filter(|l| !l.trim().is_empty()).collect();
+            let width = 72.min(f.area().width.saturating_sub(2)).max(40);
+            let inner = width.saturating_sub(4) as usize;
+            let mut body = vec![Line::styled(
+                format!("'{task}' exited right after launch:"),
+                Style::default().fg(RED),
+            )];
+            for l in why.iter().take(4) {
+                let mut t: String = l.trim().chars().take(inner).collect();
+                if l.trim().chars().count() > inner {
+                    t.push('…');
+                }
+                body.push(Line::styled(format!("  {t}"), Style::default().fg(Color::DarkGray)));
+            }
+            if why.is_empty() {
+                body.push(Line::styled("  (no output)", Style::default().fg(Color::DarkGray)));
+            }
+            body.push(Line::from(""));
+            body.push(Line::from(vec![
+                Span::styled("f", Style::default().fg(GREEN)),
+                Span::raw("  fresh conversation in the same worktree (keeps branch + changes)"),
+            ]));
+            body.push(Line::from(vec![
+                Span::styled("r", Style::default().fg(GREEN)),
+                Span::raw("  recreate from scratch (rm worktree + new agent, same name)"),
+            ]));
+            body.push(Line::from(vec![
+                Span::styled("esc", Style::default().fg(RED)),
+                Span::raw("  leave it"),
+            ]));
+            let area = centered(width, body.len() as u16 + 2, f.area());
+            f.render_widget(Clear, area);
+            f.render_widget(
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(RED))
+                        .title(" resume failed "),
+                ),
+                area,
+            );
+        }
         Modal::Push(task) => {
             let area = centered(58, 5, f.area());
             f.render_widget(Clear, area);
@@ -2300,6 +2679,86 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::AdoptRepoPick { repos, filter, sel } => {
+            let area = centered(58, 16, f.area());
+            f.render_widget(Clear, area);
+            let matches: Vec<&(String, PathBuf)> = repos
+                .iter()
+                .filter(|(name, _)| filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase()))
+                .collect();
+            let mut lines = vec![Line::from(vec![
+                Span::styled("repo: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{filter}▏")),
+            ])];
+            let h = area.height.saturating_sub(3) as usize;
+            if matches.is_empty() {
+                lines.push(Line::styled("  no matching repos", Style::default().fg(Color::DarkGray)));
+            } else {
+                let start = if *sel >= h { *sel + 1 - h } else { 0 };
+                for (off, (name, _)) in matches.iter().skip(start).take(h).enumerate() {
+                    let idx = start + off;
+                    let style = if idx == *sel {
+                        Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(GREEN_SOFT)
+                    };
+                    lines.push(Line::styled(format!(" {name}"), style));
+                }
+            }
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(HL))
+                        .title(" adopt — pick a repo (↑↓ Enter, Esc) "),
+                ),
+                area,
+            );
+        }
+        Modal::AdoptPick { root, cands, sel } => {
+            let area = centered(66, 16, f.area());
+            f.render_widget(Clear, area);
+            let mut lines = vec![Line::from(vec![
+                Span::styled("sessions in ", Style::default().fg(Color::DarkGray)),
+                Span::styled(worktree::repo_name(root), Style::default().fg(GREEN_SOFT)),
+            ])];
+            let h = area.height.saturating_sub(3) as usize;
+            let start = if *sel >= h { *sel + 1 - h } else { 0 };
+            for (off, c) in cands.iter().skip(start).take(h).enumerate() {
+                let idx = start + off;
+                let style = if idx == *sel {
+                    Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(GREEN_SOFT)
+                };
+                let plural = if c.sessions == 1 { "" } else { "s" };
+                let meta = format!("{} session{} · {} ago", c.sessions, plural, short_age(c.last_unix));
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {:<30}", c.label), style),
+                    Span::styled(format!("  {meta}"), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(HL))
+                        .title(" adopt a Claude session (↑↓ Enter, Esc) "),
+                ),
+                area,
+            );
+        }
+        Modal::AdoptName { name, .. } => {
+            let area = centered(50, 3, f.area());
+            f.render_widget(Clear, area);
+            let p = Paragraph::new(format!("{name}▏")).block(
+                Block::default()
+                    .borders(Borders::ALL).border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(GREEN))
+                    .title(" name this agent (Enter adopts, Esc cancels) "),
+            );
+            f.render_widget(p, area);
+        }
         Modal::Matrix(lines) => {
             let h = (lines.len() as u16 + 2).min(f.area().height);
             let w = 78u16.min(f.area().width);
@@ -2316,7 +2775,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             );
         }
         Modal::Help => {
-            let area = centered(56, 23, f.area());
+            let area = centered(56, 24, f.area());
             f.render_widget(Clear, area);
             let k = |key: &str, desc: &str| {
                 Line::from(vec![
@@ -2336,13 +2795,17 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("m", "mergeability matrix (conflict preview)"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("i", "send one line to the agent (when ● ready)"),
+                k("c", "copy mode: vi-style scroll/search/select/yank of the conversation (Alt-y while attached)"),
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
                 k("e", "open the worktree in nvim (new tmux window) / $EDITOR"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
+                k("Alt-] / [", "while attached: jump to next / previous agent (no dashboard)"),
+                k("Alt-o", "while attached: jump to the last agent (toggle back & forth)"),
                 k("tab", "switch Preview / Diff"),
                 k("Shift+↑↓", "scroll Preview / Diff"),
                 k("n", "new agent"),
                 k("N", "new agent with an initial prompt"),
+                k("a", "adopt an existing Claude session as an agent"),
                 k("s", "stop (keep worktree — resume later)"),
                 k("glyphs", "⠋ running · ● ready · ▲ needs input · ✓ merged · ✗ exited"),
                 k("D", "kill (destroy worktree + branch)"),
@@ -2663,6 +3126,56 @@ mod tests {
         println!("\n{screen}\n");
         assert!(screen.contains('✗'));
         assert!(screen.contains("resume"));
+    }
+
+    #[test]
+    fn resume_failed_modal_shows_reason_and_choices() {
+        let mut app = App::new();
+        app.rows = vec![row("gone", Status::Exited, false, 1, 0)];
+        app.sel = 0;
+        app.modal = Modal::ResumeFailed {
+            task: "gone".into(),
+            repo: "r".into(),
+            path: PathBuf::from("/tmp/gone"),
+            root: PathBuf::from("/tmp"),
+            base: "main".into(),
+            reason: "No conversation found to continue".into(),
+        };
+        let screen = render_to_string(&mut app, 100, 16);
+        println!("\n{screen}\n");
+        assert!(screen.contains("resume failed"));
+        assert!(screen.contains("No conversation found to continue"));
+        assert!(screen.contains("fresh conversation"));
+        assert!(screen.contains("recreate from scratch"));
+    }
+
+    #[test]
+    fn recreate_guard_refuses_dirty_or_unmerged_and_allows_clean() {
+        let dir = std::env::temp_dir().join(format!("wta-recreate-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = |args: &[&str]| {
+            let o = std::process::Command::new("git").args(args).current_dir(&dir).output().unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        g(&["init", "-q", "-b", "main"]);
+        g(&["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"]);
+        g(&["checkout", "-q", "-b", "feat"]);
+        // clean + fully merged into main → allowed (task "zz-guard" has no wta state → not adopted)
+        assert_eq!(recreate_guard("r", "zz-guard", &dir, "main"), Ok(()));
+        // a commit not in main → refused
+        g(&["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "work"]);
+        let e = recreate_guard("r", "zz-guard", &dir, "main").unwrap_err();
+        assert!(e.contains("1 commit(s) not in main"), "{e}");
+        // uncommitted file → refused
+        g(&["reset", "-q", "--hard", "main"]);
+        std::fs::write(dir.join("x.txt"), "x").unwrap();
+        let e = recreate_guard("r", "zz-guard", &dir, "main").unwrap_err();
+        assert!(e.contains("uncommitted"), "{e}");
+        // missing worktree → refused
+        let e = recreate_guard("r", "zz-guard", &dir.join("nope"), "main").unwrap_err();
+        assert!(e.contains("no worktree"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

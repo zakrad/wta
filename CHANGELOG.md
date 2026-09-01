@@ -4,6 +4,57 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-09-01
+
+### Added
+- **wta copy mode — vim-style, keyboard-only, agent-agnostic.** `c` on an agent in the
+  dashboard, **`Alt-y` while attached** (a tmux popup over the agent, works through an
+  outer tmux), or `wta copy <task>`. tmux's own copy mode only sees tmux history, which
+  is empty for alternate-screen renderers (Claude Code ≥ 2.1 fullscreen), and every agent
+  CLI has a different (or no) keyboard-selection story — so wta builds the text itself:
+  the agent's transcript when it knows the format (Claude Code JSONL, rendered as
+  `you ›` / `claude ›` messages with tool calls summarized and results folded), else the
+  session's full tmux scrollback. Keys: `j`/`k`, `Ctrl-u`/`Ctrl-d`, `PgUp`/`PgDn`,
+  `g`/`G`, `[`/`]` message jumps, `/` `n` `N` search, `v` line selection, `y` yank to
+  the clipboard (pbcopy / wl-copy / xclip / xsel, else OSC 52), `Y` current line, **`m`
+  yank the whole message**, **`⏎` fold/unfold** a long tool result, **`?`** key card, `q`.
+  Long tool results fold to 6 lines behind a `… (+N lines) ⏎ unfold` marker. The
+  transcript dir is resolved from the agent's real cwd (the tmux pane path), so it's
+  found even when the recorded state cwd is the repo root.
+- **Switch agents while attached — no dashboard round-trip.** `Alt-]` / `Alt-[` (macOS
+  `⌥`) jump to the next / previous live agent, `Alt-o` toggles to the last agent you were
+  on (Alt-Tab style). The cycle is every live agent in dashboard order across all repos;
+  a `‹2/5› repo › task` toast shows where you landed. Keys are prefix-free (pass through
+  an outer tmux) and chosen to avoid the common outer-tmux Alt bindings. "Last" is tracked
+  per tmux client, so one client's switching never disturbs another's. New hidden
+  `wta switch` subcommand backs the bindings.
+- **Attached status bar shows the agent's live state.** The left `repo › task` chip now
+  carries a state glyph (`⟳` working · `●` ready · `▲` needs you) and turns yellow when
+  the agent needs you — updated by both the dashboard and the `wta status` hook, so it's
+  live with or without a dashboard open. `WTA_HINT_BAR=0` hides the bar entirely.
+- **Resume failures explain themselves.** Resuming an agent whose session dies right
+  after launch (the classic case: `claude --continue` in a worktree with no saved
+  conversation → *"No conversation found to continue"*, exit 1) used to just flip the
+  row back to ✗ with no clue why. wta now pre-checks for a Claude transcript before
+  spawning, and otherwise watches the new pane for ~2s and captures what it printed.
+  The dashboard opens a **resume failed** modal with the reason and two ways out:
+  **`f`** start a fresh conversation in the same worktree (branch + uncommitted work
+  kept), or **`r`** recreate from scratch (`rm` + `new` under the same name and base).
+- **`wta resume <task> --fresh`** — re-spawn without `--continue` (new conversation,
+  same worktree). The CLI error for a dead resume now prints the pane's last output
+  plus both recovery commands.
+- **Prefix-free keyboard scrollback while attached: `PgUp`/`PgDn`, `Alt-k`, `Shift-↑`.**
+  This fixes scrolling when wta runs inside your own tmux (WezTerm → tmux → wta): the
+  outer server eats `Ctrl-b`, so `Ctrl-b [` opened copy mode on the outer pane — the
+  shell's history, not the agent's chat. The keys are bound on wta's own server and
+  decide per keypress via `#{alternate_on}`: an alternate-screen agent (Claude Code
+  ≥ 2.1's fullscreen renderer, which scrolls its own buffer — tmux history is empty)
+  gets the key forwarded so it scrolls natively; a classic/plain-output agent gets tmux
+  copy mode one page up (repeat to keep paging, `Shift-↑/↓` page inside copy mode, then
+  your own `mode-keys`). The attached status bar is now a row of green key chips: **`repo › task`** on the left,
+  `PgUp scroll · ⌥y copy · ^q back` on the right (macOS glyphs; `M-y`/`C-q` elsewhere).
+  The manual shows the `~/.claude/keybindings.json` `Scroll` bindings for vim-style keys.
+
 ## [0.3.0] — 2026-08-11
 
 ### Added
@@ -13,6 +64,17 @@ All notable changes to **wta** are documented here. The format is based on
   the dashboard (or `wta resume <task>`) to continue that conversation (`--continue`)
   inside a wta-managed session when you're ready. `rm` on an adopted agent only untracks
   it — your directory and branch are left alone.
+- **Adopt from the dashboard** — press **`a`** to pick a repo, then one of *that repo's*
+  existing Claude sessions (scanned from the repo root + its git worktrees, newest
+  first), name it, and it joins the group as a resumable agent. Same effect as the CLI.
+
+### Changed
+- **Dashboard launches instantly.** Token/cost accounting now parses transcripts on a
+  background worker thread instead of on the UI thread before the first paint — with a
+  ~656 MB transcript set, launch went from a multi-second freeze to immediate. A cheap
+  mtime check re-parses a session only after it writes new output, so an idle fleet
+  does no transcript I/O (previously the full parse re-ran on every periodic sweep).
+  Diff/merge git calls no longer run across the whole fleet on the first frame either.
 
 ## [0.2.0] — 2026-08-11
 

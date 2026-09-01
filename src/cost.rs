@@ -5,7 +5,8 @@
 //! labeled as such everywhere it's shown. Zero for non-claude agents.
 
 use serde::Deserialize;
-use std::path::Path;
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
 
 #[derive(Default, Clone, Copy)]
 pub struct Usage {
@@ -99,6 +100,29 @@ fn short_model(m: &str) -> String {
     m.strip_prefix("claude-").unwrap_or(m).to_string()
 }
 
+/// Claude Code's transcript dir for a worktree (`~/.claude/projects/<encoded path>`,
+/// honoring `CLAUDE_CONFIG_DIR` the way the CLI does).
+pub fn transcript_dir(wt: &Path) -> Option<PathBuf> {
+    if let Ok(d) = std::env::var("CLAUDE_CONFIG_DIR") {
+        if !d.is_empty() {
+            return Some(PathBuf::from(d).join("projects").join(encode(wt)));
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".claude/projects").join(encode(wt)))
+}
+
+/// Whether Claude Code has ANY saved conversation for this worktree — i.e. whether
+/// `claude --continue` there can succeed at all.
+pub fn has_transcript(wt: &Path) -> bool {
+    let Some(dir) = transcript_dir(wt) else { return false };
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .any(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
+        })
+        .unwrap_or(false)
+}
+
 fn encode(path: &Path) -> String {
     path.to_string_lossy()
         .chars()
@@ -111,8 +135,8 @@ fn encode(path: &Path) -> String {
 pub fn for_worktree(wt: &Path) -> (Usage, Option<String>) {
     let mut total = Usage::default();
     let mut last_model: Option<String> = None;
-    let dir = match dirs::home_dir() {
-        Some(h) => h.join(".claude/projects").join(encode(wt)),
+    let dir = match transcript_dir(wt) {
+        Some(d) => d,
         None => return (total, last_model),
     };
     let rd = match std::fs::read_dir(&dir) {
@@ -124,12 +148,14 @@ pub fn for_worktree(wt: &Path) -> (Usage, Option<String>) {
         if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
             continue;
         }
-        let content = match std::fs::read_to_string(&p) {
-            Ok(c) => c,
+        // Stream line-by-line: transcripts reach hundreds of MB, so never hold a whole
+        // file in memory (this runs on the dashboard's cost worker).
+        let file = match std::fs::File::open(&p) {
+            Ok(f) => f,
             Err(_) => continue,
         };
-        for line in content.lines() {
-            let l: Line = match serde_json::from_str(line) {
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            let l: Line = match serde_json::from_str(&line) {
                 Ok(l) => l,
                 Err(_) => continue,
             };
@@ -156,6 +182,37 @@ pub fn for_worktree(wt: &Path) -> (Usage, Option<String>) {
         }
     }
     (total, last_model)
+}
+
+/// `(transcript count, newest transcript mtime as unix secs)` for a directory's
+/// Claude Code history — lets the dashboard surface adoptable sessions per repo.
+pub fn sessions_for(wt: &Path) -> (usize, u64) {
+    let dir = match transcript_dir(wt) {
+        Some(d) => d,
+        None => return (0, 0),
+    };
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return (0, 0),
+    };
+    let (mut n, mut newest) = (0usize, 0u64);
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+            continue;
+        }
+        n += 1;
+        if let Ok(secs) = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map_err(|_| ())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).map_err(|_| ()))
+            .map(|d| d.as_secs())
+        {
+            newest = newest.max(secs);
+        }
+    }
+    (n, newest)
 }
 
 pub fn human_tokens(n: u64) -> String {
@@ -189,8 +246,8 @@ pub struct Sample {
 /// The agent's full spend timeline, one entry per assistant message, sorted by time
 /// (merged across resumed sessions), with running cumulative totals.
 pub fn timeline(wt: &Path) -> Vec<Sample> {
-    let dir = match dirs::home_dir() {
-        Some(h) => h.join(".claude/projects").join(encode(wt)),
+    let dir = match transcript_dir(wt) {
+        Some(d) => d,
         None => return Vec::new(),
     };
     let mut raw: Vec<(String, String, u64, f64)> = Vec::new();
@@ -203,12 +260,14 @@ pub fn timeline(wt: &Path) -> Vec<Sample> {
         if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
             continue;
         }
-        let content = match std::fs::read_to_string(&p) {
-            Ok(c) => c,
+        // Stream line-by-line: transcripts reach hundreds of MB, so never hold a whole
+        // file in memory (this runs on the dashboard's cost worker).
+        let file = match std::fs::File::open(&p) {
+            Ok(f) => f,
             Err(_) => continue,
         };
-        for line in content.lines() {
-            let l: Line = match serde_json::from_str(line) {
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            let l: Line = match serde_json::from_str(&line) {
                 Ok(l) => l,
                 Err(_) => continue,
             };

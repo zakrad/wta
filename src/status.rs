@@ -196,6 +196,8 @@ pub fn emit(state: &str) -> Result<()> {
         let prev = read_state(&repo, &task).map(|s| s.status).unwrap_or_default();
         let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         record(&repo, &task, state, &cwd)?;
+        // keep the attached status bar's chip live even with no dashboard open
+        crate::tmux::set_status_chip(&crate::tmux::session_name(&repo, &task), state);
         // Edge-triggered: an agent going idle (Stop → "waiting" / Notification →
         // "needs_input") notifies exactly once. Claude fires both events — and re-fires
         // the idle Notification — for the same idle moment, so a level-triggered notify
@@ -306,6 +308,40 @@ pub fn read_all_states() -> Result<Vec<AgentState>> {
         }
     }
     Ok(out)
+}
+
+// ---- per-client "last agent" for Alt-o (the switch toggle) ----
+// Keyed by the tmux client's tty (`#{client_name}`), so each attached client has its own
+// last-agent history and one client's switching never disturbs another's — unlike tmux's
+// server-global `switch-client -l`.
+
+fn last_switch_path() -> Result<PathBuf> {
+    Ok(wta_dir()?.join("last-switch.json"))
+}
+
+/// The session this client was on before its current one, if recorded and still valid.
+pub fn get_last_switch(client: &str) -> Option<String> {
+    let path = last_switch_path().ok()?;
+    let map: HashMap<String, String> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())?;
+    map.get(client).cloned()
+}
+
+/// Remember `session` as this client's last agent (called with the FROM session on every
+/// switch, so Alt-o returns to it).
+pub fn set_last_switch(client: &str, session: &str) {
+    let path = match last_switch_path() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let mut map: HashMap<String, String> =
+        std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    map.insert(client.to_string(), session.to_string());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let _ = serde_json::to_vec(&map).map(|b| atomic_write(&path, &b));
 }
 
 // ---- manual list ordering (per-repo, separate from state so hooks don't clobber it) ----
