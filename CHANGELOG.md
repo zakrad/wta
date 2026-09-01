@@ -4,7 +4,7 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.3] — 2026-09-02
 
 ### Fixed
 - **Resume finds the conversation even when the agent's directory moved or the row's path
