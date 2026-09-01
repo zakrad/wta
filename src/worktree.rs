@@ -1874,14 +1874,27 @@ fn sanitize_task(s: &str) -> String {
 /// the worktree (and uncommitted work) so it can be resumed later. Contrast with
 /// `rm`, which also removes the worktree and branch.
 pub fn stop(task: &str) -> Result<()> {
-    let root = repo_root()?;
-    let repo = repo_id_of(&root);
-    tmux::kill(&tmux::session_name(&repo, task))?;
+    stop_session(&repo_id()?, task)
+}
+
+/// Stop an agent identified by its EXACT repo id (what the dashboard row tracks), not
+/// one recomputed from the current directory. This matters when the live session runs
+/// under a non-canonical ("phantom") repo id: recomputing would target a different
+/// session name and silently no-op, so the agent never actually stopped.
+pub fn stop_session(repo: &str, task: &str) -> Result<()> {
+    tmux::kill(&tmux::session_name(repo, task))?;
     // mark exited so the dashboard AND the Telegram bridge stop reporting it as
-    // running (the bridge reads state without checking tmux liveness).
-    let wt = worktrees_dir(&root).join(task);
-    let _ = status::record(&repo, task, "exited", &wt.to_string_lossy());
-    append_run_log(&root, task, "stop");
+    // running (the bridge reads state without checking tmux liveness). Preserve the
+    // agent's real cwd rather than assuming the standard worktree path — an adopted or
+    // main-checkout agent lives elsewhere, and clobbering its cwd would break resume.
+    let cwd = status::read_state(repo, task)
+        .map(|s| s.cwd)
+        .filter(|c| !c.is_empty())
+        .unwrap_or_default();
+    let _ = status::record(repo, task, "exited", &cwd);
+    if let Ok(root) = repo_root() {
+        append_run_log(&root, task, "stop");
+    }
     Ok(())
 }
 
@@ -2175,18 +2188,33 @@ pub fn ls(json: bool) -> Result<()> {
 pub fn rm(task: &str, force: bool) -> Result<()> {
     let root = repo_root()?;
     let repo = repo_id_of(&root);
+    rm_in(&repo, &root, task, force)
+}
+
+/// `rm`, but for an EXPLICIT repo id + root (what the dashboard row tracks) rather than
+/// values recomputed from the current directory — so the session kill and state removal
+/// hit the agent you actually selected, even when it runs under a non-canonical repo id.
+pub fn rm_in(repo: &str, root: &Path, task: &str, force: bool) -> Result<()> {
+    let repo = repo.to_string();
+    let root = root.to_path_buf();
+    // Only touch a worktree/branch when the agent actually lives at the standard worktree
+    // path. An adopted or main-checkout agent (cwd = your own dir / the repo root) is only
+    // UNTRACKED — never delete files that aren't a wta worktree.
+    let wt = worktrees_dir(&root).join(task);
+    let is_wta_worktree = status::read_state(&repo, task)
+        .map(|s| !s.adopted && !s.cwd.is_empty() && Path::new(&s.cwd) == wt)
+        .unwrap_or(false);
 
     // An ADOPTED agent is YOUR directory, not a wta worktree — `rm` only stops tracking
     // it (kills any wta session + drops the state file), never touches your files/branch.
-    if status::read_state(&repo, task).map(|s| s.adopted).unwrap_or(false) {
+    if !is_wta_worktree {
         let _ = tmux::kill(&tmux::session_name(&repo, task));
         status::remove_state(&repo, task);
-        println!("untracked adopted '{task}' (your directory + branch are untouched)");
+        println!("untracked '{task}' (your directory + branch are untouched)");
         return Ok(());
     }
 
     let branch = agent_branch(&root, task);
-    let wt = worktrees_dir(&root).join(task);
     let wt_str = wt.to_string_lossy().into_owned();
 
     let _ = tmux::kill(&tmux::session_name(&repo, task));

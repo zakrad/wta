@@ -7,6 +7,15 @@ All notable changes to **wta** are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **Dashboard `stop` (s) and `kill` (D) now act on the exact agent the row tracks.** They
+  used to recompute the repo id from the path (`repo_id_of(repo_root())`); when an agent's
+  live session runs under a non-canonical ("phantom") repo id — e.g. an adopted or
+  main-checkout agent, or one created by an older wta from inside a worktree — the
+  recomputed id named a different, dead session, so `stop`/`kill` silently no-op'd and the
+  agent kept running. Both now use the row's actual repo id (`stop_session` / `rm_in`), and
+  `stop` preserves the agent's real cwd instead of assuming the worktree path (which had
+  also broken resume for such agents). `rm` on a non-worktree agent (adopted / main
+  checkout) only untracks it, never deleting an unrelated worktree.
 - **Global dashboard no longer doubles/flickers a stopped or running agent.** Running
   `wta` from inside a linked worktree used `git rev-parse --show-toplevel`, which returns
   the *worktree's* root, hashing to a different ("phantom") repo id for the same physical
