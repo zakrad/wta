@@ -4,7 +4,7 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [0.3.1] — 2026-08-30
+## [0.3.2] — 2026-09-01
 
 ### Added
 - **wta copy mode — vim-style, keyboard-only, agent-agnostic.** `c` on an agent in the
