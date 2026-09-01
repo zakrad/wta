@@ -146,6 +146,7 @@ fn main() -> anyhow::Result<()> {
             println!("stopped '{task}' — worktree kept; resume with `wta resume {task}`");
         }
         Command::Copy { task, session } => copyview::run_cli(task.as_deref(), session.as_deref())?,
+        Command::Switch { client, session, dir } => worktree::switch_session(&client, &session, &dir)?,
         Command::Resume { task, fresh } => {
             worktree::resume(&task, fresh)?;
             let how = if fresh { "fresh conversation" } else { "continued" };

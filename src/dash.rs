@@ -2799,6 +2799,8 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
                 k("e", "open the worktree in nvim (new tmux window) / $EDITOR"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
+                k("Alt-] / [", "while attached: jump to next / previous agent (no dashboard)"),
+                k("Alt-o", "while attached: jump to the last agent (toggle back & forth)"),
                 k("tab", "switch Preview / Diff"),
                 k("Shift+↑↓", "scroll Preview / Diff"),
                 k("n", "new agent"),

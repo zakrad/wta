@@ -169,6 +169,13 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
   **`f`** a fresh conversation in the same worktree (branch + changes kept) or **`r`**
   recreate from scratch (`rm` + `new` under the same name and base). CLI equivalents:
   `wta resume <task> --fresh` / `wta rm <task> && wta new <task>`.
+- **Switch agents without the dashboard** — while attached, **`⌥]`** / **`⌥[`** (macOS
+  Option; `M-]`/`M-[` elsewhere) jump to the next / previous live agent, and **`⌥o`**
+  toggles to the *last* agent you were on (Alt-Tab style — one key to bounce between two).
+  The cycle is every live agent in the same order the global dashboard lists them (repos
+  by path, then your `J`/`K` order), across all repos. A brief `‹2/5› repo › task` toast
+  shows where you landed. Keys are prefix-free, so they work even with wta running inside
+  your own tmux.
 - **Quick-send** — press `i`, type one line, `Enter`. It's injected into the
   agent without attaching. Gated to when the agent is `●` ready and idle, so you
   never inject mid-stream.

@@ -132,6 +132,7 @@ fn ensure_hint_bar(name: &str) {
     let _ = tmux().args(["set-option", "-u", "-t", name, "status"]).status();
     ensure_scroll_keys();
     ensure_copy_key();
+    ensure_switch_keys();
     // macOS shows ⌥/^ (WezTerm/iTerm/Terminal all send left-Option as Alt/Meta);
     // elsewhere tmux's own M-/C- spelling.
     let (alt_y, ctrl_q) = if cfg!(target_os = "macos") { ("⌥y", "^q") } else { ("M-y", "C-q") };
@@ -140,9 +141,11 @@ fn ensure_hint_bar(name: &str) {
         format!("#[fg=black,bg={bg},bold] {key} #[fg={bg},bg=default,nobold] {label} ")
     };
     // all green: one hue reads calmer and matches wta's identity (and the left chip)
+    let next_key = if cfg!(target_os = "macos") { "⌥]" } else { "M-]" };
     let right = format!(
-        "{}{}{}",
+        "{}{}{}{}",
         chip("green", "PgUp", "scroll"),
+        chip("green", next_key, "next"),
         chip("green", alt_y, "copy"),
         chip("green", ctrl_q, "back"),
     );
@@ -159,7 +162,7 @@ fn ensure_hint_bar(name: &str) {
         ),
         ("status-left-length", "48"),
         ("status-right", right.as_str()),
-        ("status-right-length", "48"),
+        ("status-right-length", "60"),
     ] {
         let _ = tmux().args(["set-option", "-g", opt, val]).status();
     }
@@ -201,6 +204,39 @@ pub fn set_label(name: &str, repo_name: &str, task: &str) {
         .args(["set-option", "-t", name, "@wta_label", &label])
         .stderr(Stdio::null())
         .status();
+}
+
+/// Move a client to another session on our server (the switch keys' primitive).
+pub fn switch_client(client: &str, target: &str) -> Result<()> {
+    let out = tmux()
+        .args(["switch-client", "-c", client, "-t", target])
+        .output()
+        .context("tmux switch-client failed")?;
+    if !out.status.success() {
+        bail!("switch-client: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// Flash a one-line message in a client's status area (the switch/where-am-I toast).
+pub fn client_message(client: &str, text: &str) {
+    let _ = tmux()
+        .args(["display-message", "-c", client, text])
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// A session's `repo › task` label (the @wta_label we set at spawn), if any.
+pub fn session_label(name: &str) -> Option<String> {
+    let out = tmux()
+        .args(["show-options", "-v", "-t", name, "@wta_label"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 /// Reflect an agent's state in its status-bar chip: a glyph after `repo › task`, and a
@@ -255,6 +291,31 @@ fn ensure_scroll_keys() {
     for table in ["copy-mode", "copy-mode-vi"] {
         let _ = tmux().args(["bind-key", "-T", table, "S-Up", "send-keys", "-X", "page-up"]).status();
         let _ = tmux().args(["bind-key", "-T", table, "S-Down", "send-keys", "-X", "page-down"]).status();
+    }
+}
+
+/// `Alt-]` / `Alt-[` / `Alt-o` while attached: jump straight to the next / previous /
+/// last live agent, no dashboard round-trip. Prefix-free (so they pass through an outer
+/// tmux) and NOT among the outer config's own Alt bindings (M-n/M-p/M-c/M--/M-\\). Order
+/// matches the dashboard (see `worktree::fleet_sessions`). Runs THIS binary so it doesn't
+/// need `wta` on PATH.
+fn ensure_switch_keys() {
+    if !dedicated() {
+        return;
+    }
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "wta".into());
+    let sh = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    for (key, dir) in [("M-]", "next"), ("M-[", "prev"), ("M-o", "last")] {
+        let cmd = format!(
+            "{exe} switch -c '#{{client_name}}' -s '#{{session_name}}' -d {dir}",
+            exe = sh(&exe),
+        );
+        let _ = tmux()
+            .args(["bind-key", "-n", key, "run-shell", "-b", &cmd])
+            .stderr(Stdio::null())
+            .status();
     }
 }
 

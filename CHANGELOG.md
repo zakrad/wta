@@ -21,6 +21,13 @@ All notable changes to **wta** are documented here. The format is based on
   Long tool results fold to 6 lines behind a `… (+N lines) ⏎ unfold` marker. The
   transcript dir is resolved from the agent's real cwd (the tmux pane path), so it's
   found even when the recorded state cwd is the repo root.
+- **Switch agents while attached — no dashboard round-trip.** `Alt-]` / `Alt-[` (macOS
+  `⌥`) jump to the next / previous live agent, `Alt-o` toggles to the last agent you were
+  on (Alt-Tab style). The cycle is every live agent in dashboard order across all repos;
+  a `‹2/5› repo › task` toast shows where you landed. Keys are prefix-free (pass through
+  an outer tmux) and chosen to avoid the common outer-tmux Alt bindings. "Last" is tracked
+  per tmux client, so one client's switching never disturbs another's. New hidden
+  `wta switch` subcommand backs the bindings.
 - **Attached status bar shows the agent's live state.** The left `repo › task` chip now
   carries a state glyph (`⟳` working · `●` ready · `▲` needs you) and turns yellow when
   the agent needs you — updated by both the dashboard and the `wta status` hook, so it's

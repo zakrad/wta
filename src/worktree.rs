@@ -1946,6 +1946,67 @@ pub fn discover_repos() -> Vec<(String, PathBuf)> {
     v
 }
 
+/// Every LIVE agent session in the SAME order the (global) dashboard lists them: repos
+/// sorted by root path, tasks within a repo by manual order rank then name. Returns tmux
+/// session names. This is the cycle order for the `Alt-]` / `Alt-[` switch keys, so the
+/// hotkeys and the visible list always agree.
+pub fn fleet_sessions() -> Vec<String> {
+    let live: std::collections::HashSet<String> = tmux::list_sessions().into_iter().collect();
+    let mut out = Vec::new();
+    for (repo, _root) in discover_repos() {
+        let rank = status::read_order(&repo);
+        let mut tasks: Vec<String> = status::read_states(&repo)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.task)
+            .filter(|t| live.contains(&tmux::session_name(&repo, t)))
+            .collect();
+        // dashboard's within-repo sort is total on (rank, task name), so the initial
+        // order doesn't matter — replicate just that.
+        tasks.sort_by(|a, b| {
+            let pa = rank.get(a).copied().unwrap_or(u32::MAX);
+            let pb = rank.get(b).copied().unwrap_or(u32::MAX);
+            pa.cmp(&pb).then_with(|| a.cmp(b))
+        });
+        for t in tasks {
+            out.push(tmux::session_name(&repo, &t));
+        }
+    }
+    out
+}
+
+/// `wta switch` (bound to `Alt-]`/`Alt-[`/`Alt-o` while attached): move the tmux client
+/// `client` from session `from` to the next/previous/last live agent, then flash where it
+/// landed. `dir` is "next" | "prev" | "last". No-op with a one-line note if there's
+/// nowhere to go.
+pub fn switch_session(client: &str, from: &str, dir: &str) -> Result<()> {
+    let fleet = fleet_sessions();
+    if fleet.len() < 2 {
+        tmux::client_message(client, "wta: only one live agent");
+        return Ok(());
+    }
+    let i = fleet.iter().position(|s| s == from).unwrap_or(0);
+    let n = fleet.len();
+    let target = match dir {
+        // toggle back to the agent we were on before, tracked per client (see status);
+        // if there's no valid record yet, behave like "next"
+        "last" => status::get_last_switch(client)
+            .filter(|s| s != from && fleet.iter().any(|f| f == s))
+            .unwrap_or_else(|| fleet[(i + 1) % n].clone()),
+        "prev" => fleet[(i + n - 1) % n].clone(),
+        _ => fleet[(i + 1) % n].clone(),
+    };
+    // record where we came FROM before moving, so the next Alt-o returns here
+    status::set_last_switch(client, from);
+    tmux::switch_client(client, &target)?;
+    // flash "‹2/5› repo › task" so you know where you landed
+    let pos = fleet.iter().position(|s| s == &target).map(|i| i + 1).unwrap_or(0);
+    let label = tmux::session_label(&target).unwrap_or_else(|| target.clone());
+    tmux::client_message(client, &format!("wta ‹{pos}/{}› {label}", fleet.len()));
+    Ok(())
+}
+
+
 /// `list_managed`, but for an explicit repo root (so the global dash can scan
 /// repos other than the current directory).
 pub fn list_managed_in(root: &Path) -> Result<Vec<Worktree>> {

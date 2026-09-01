@@ -310,6 +310,40 @@ pub fn read_all_states() -> Result<Vec<AgentState>> {
     Ok(out)
 }
 
+// ---- per-client "last agent" for Alt-o (the switch toggle) ----
+// Keyed by the tmux client's tty (`#{client_name}`), so each attached client has its own
+// last-agent history and one client's switching never disturbs another's — unlike tmux's
+// server-global `switch-client -l`.
+
+fn last_switch_path() -> Result<PathBuf> {
+    Ok(wta_dir()?.join("last-switch.json"))
+}
+
+/// The session this client was on before its current one, if recorded and still valid.
+pub fn get_last_switch(client: &str) -> Option<String> {
+    let path = last_switch_path().ok()?;
+    let map: HashMap<String, String> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())?;
+    map.get(client).cloned()
+}
+
+/// Remember `session` as this client's last agent (called with the FROM session on every
+/// switch, so Alt-o returns to it).
+pub fn set_last_switch(client: &str, session: &str) {
+    let path = match last_switch_path() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let mut map: HashMap<String, String> =
+        std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    map.insert(client.to_string(), session.to_string());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let _ = serde_json::to_vec(&map).map(|b| atomic_write(&path, &b));
+}
+
 // ---- manual list ordering (per-repo, separate from state so hooks don't clobber it) ----
 
 fn order_path(repo: &str) -> Result<PathBuf> {

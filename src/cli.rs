@@ -273,6 +273,18 @@ pub enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Jump the current tmux client to another live agent (bound to Alt-]/Alt-[/Alt-o
+    /// while attached; not meant to be run by hand)
+    #[command(hide = true)]
+    Switch {
+        #[arg(short = 'c', long)]
+        client: String,
+        #[arg(short = 's', long)]
+        session: String,
+        /// next | prev | last
+        #[arg(short = 'd', long)]
+        dir: String,
+    },
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later
     Stop { task: String },
     /// Resume a stopped agent — re-spawn its session in the existing worktree
