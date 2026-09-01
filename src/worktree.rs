@@ -195,6 +195,15 @@ fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
 }
 
 pub fn repo_root() -> Result<PathBuf> {
+    // The MAIN repo root, even when invoked from a linked worktree — so the repo id
+    // (and thus tmux session names + the state dir) is identical no matter where wta is
+    // run. `--show-toplevel` returns the WORKTREE's own root inside a worktree, which
+    // hashed to a DIFFERENT ("phantom") repo id: the global dashboard then listed that
+    // root's agents under two groups and they flickered as the tied sort reordered them.
+    let cwd = std::env::current_dir().context("no current dir")?;
+    if let Some(root) = main_root_of(&cwd) {
+        return Ok(root);
+    }
     let out = run_git(&["rev-parse", "--show-toplevel"], None).context("not inside a git repo")?;
     Ok(PathBuf::from(out.trim()))
 }
@@ -1920,29 +1929,78 @@ pub fn repo_name(root: &Path) -> String {
 /// (`~/.wta/state/<repo>/`), each agent's `cwd` giving `<root>/<subdir>/<task>`.
 /// Returns `(repo_id, repo_root)`, sorted by path. Used by the global dashboard.
 pub fn discover_repos() -> Vec<(String, PathBuf)> {
-    let mut map: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
-    for st in status::read_all_states().unwrap_or_default() {
-        if st.cwd.is_empty() || map.contains_key(&st.repo) {
-            continue; // one correct root per repo id is enough
+    use std::collections::HashMap;
+    let states = status::read_all_states().unwrap_or_default();
+    let live: std::collections::HashSet<String> = tmux::list_sessions().into_iter().collect();
+
+    // repo id → its root, plus a score used to pick a winner when several ids resolve to
+    // the SAME physical root (a "phantom" id from an older wta run that hashed a worktree's
+    // own toplevel — see `repo_root`). Score = (# live sessions, freshest activity,
+    // is-canonical): the group the user is actually running always wins, deterministically,
+    // so the row can't double or flicker between two ids for one repo.
+    let mut id_root: HashMap<String, PathBuf> = HashMap::new();
+    let mut id_score: HashMap<String, (usize, u64)> = HashMap::new();
+    for st in &states {
+        if st.cwd.is_empty() {
+            continue;
         }
-        let cwd = PathBuf::from(&st.cwd);
-        // Cheap path: `<root>/<subdir>/<task>` → two hops up, accepted only if it's a
-        // MAIN repo (a real `.git` DIR — a linked worktree's `.git` is a file). Falls
-        // back to git for a worktree-subdirectory cwd or a nested worktree layout.
-        let root = cwd
-            .parent()
-            .and_then(|p| p.parent())
-            .filter(|r| r.join(".git").is_dir())
-            .map(|r| r.to_path_buf())
-            .or_else(|| main_root_of(&cwd));
-        if let Some(root) = root {
-            if root.exists() {
-                map.insert(st.repo.clone(), root);
+        if !id_root.contains_key(&st.repo) {
+            let cwd = PathBuf::from(&st.cwd);
+            // Cheap path: `<root>/<subdir>/<task>` → two hops up, accepted only if it's a
+            // MAIN repo (a real `.git` DIR — a linked worktree's `.git` is a file). Falls
+            // back to git for a worktree-subdirectory cwd or a nested worktree layout.
+            let root = cwd
+                .parent()
+                .and_then(|p| p.parent())
+                .filter(|r| r.join(".git").is_dir())
+                .map(|r| r.to_path_buf())
+                .or_else(|| main_root_of(&cwd));
+            if let Some(root) = root {
+                if root.exists() {
+                    id_root.insert(st.repo.clone(), root);
+                }
             }
         }
+        let e = id_score.entry(st.repo.clone()).or_insert((0, 0));
+        if live.contains(&tmux::session_name(&st.repo, &st.task)) {
+            e.0 += 1;
+        }
+        e.1 = e.1.max(st.updated_unix);
     }
-    let mut v: Vec<(String, PathBuf)> = map.into_iter().collect();
-    v.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let items: Vec<(String, PathBuf, (usize, u64, bool))> = id_root
+        .into_iter()
+        .map(|(id, root)| {
+            let canon = std::fs::canonicalize(&root).unwrap_or(root);
+            let (lc, upd) = id_score.get(&id).copied().unwrap_or((0, 0));
+            let score = (lc, upd, id == repo_id_of(&canon));
+            (id, canon, score)
+        })
+        .collect();
+    dedupe_repos_by_root(items)
+}
+
+/// Collapse candidate `(repo id, canonical root, score)` triples to one id per root, the
+/// highest score winning (ties → smaller id), then sort by root path. Score is
+/// `(live-session count, freshest activity, is-canonical-id)` so the group the user is
+/// actually running wins deterministically — no doubled or flickering rows. Pure, for tests.
+fn dedupe_repos_by_root(
+    items: Vec<(String, PathBuf, (usize, u64, bool))>,
+) -> Vec<(String, PathBuf)> {
+    use std::collections::HashMap;
+    let mut best: HashMap<PathBuf, (String, (usize, u64, bool))> = HashMap::new();
+    for (id, canon, score) in items {
+        let win = match best.get(&canon) {
+            None => true,
+            Some((cur_id, cur)) => score > *cur || (score == *cur && id < *cur_id),
+        };
+        if win {
+            best.insert(canon, (id, score));
+        }
+    }
+    let mut v: Vec<(String, PathBuf)> =
+        best.into_iter().map(|(root, (id, _))| (id, root)).collect();
+    v.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     v
 }
 
@@ -2903,6 +2961,36 @@ pub fn wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dedupe_repos_prefers_live_then_fresh_then_smaller_id() {
+        let soo = PathBuf::from("/repos/soo");
+        let rust = PathBuf::from("/repos/rust");
+        // two ids for /repos/soo: the live one (0 canonical, 1 live) must beat the dead
+        // one (canonical, 0 live) — the running agent's group wins.
+        let out = dedupe_repos_by_root(vec![
+            ("dead".into(), soo.clone(), (0, 100, true)),
+            ("live".into(), soo.clone(), (1, 50, false)),
+            ("rustid".into(), rust.clone(), (1, 10, true)),
+        ]);
+        assert_eq!(out, vec![("rustid".into(), rust), ("live".into(), soo)]); // sorted by root path
+    }
+
+    #[test]
+    fn dedupe_repos_tie_breaks_deterministically() {
+        let r = PathBuf::from("/repos/x");
+        // identical scores → smaller id wins, regardless of input order (no flicker)
+        let a = dedupe_repos_by_root(vec![
+            ("bbb".into(), r.clone(), (0, 0, false)),
+            ("aaa".into(), r.clone(), (0, 0, false)),
+        ]);
+        let b = dedupe_repos_by_root(vec![
+            ("aaa".into(), r.clone(), (0, 0, false)),
+            ("bbb".into(), r.clone(), (0, 0, false)),
+        ]);
+        assert_eq!(a, vec![("aaa".into(), r.clone())]);
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn sanitize_task_yields_valid_names() {

@@ -4,6 +4,19 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Global dashboard no longer doubles/flickers a stopped or running agent.** Running
+  `wta` from inside a linked worktree used `git rev-parse --show-toplevel`, which returns
+  the *worktree's* root, hashing to a different ("phantom") repo id for the same physical
+  repo. The global dashboard then listed that repo's agents under two groups whose tied
+  sort reordered every refresh, so a row appeared to duplicate and flash. `repo_root()`
+  now resolves the MAIN repo root (via `git-common-dir`) regardless of where wta runs, so
+  the repo id is stable; and `discover_repos()` collapses any lingering duplicate ids for
+  one physical root, keeping the id whose agents are actually live (then freshest, then
+  canonical) — deterministically, so nothing flickers even before old state is cleaned up.
+
 ## [0.3.2] — 2026-09-01
 
 ### Added
