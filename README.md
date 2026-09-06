@@ -86,7 +86,8 @@ a PR against the agent’s base. (`wta matrix` also previews which branches conf
 A k9s-style top band shows fleet health at a glance. Press **`t`** to toggle between
 the list+preview split and a full-width **fleet table** (sortable-looking columns:
 status, base, tokens, `$`, changes, acceptance-criteria, age). **`e`** opens the
-worktree in **nvim in a new tmux window** (the dashboard keeps running).
+worktree in **nvim in a split of the current tmux window** (the dashboard keeps
+running beside it; `WTA_OPEN_SPLIT=0` uses a separate window).
 
 Keys: `j`/`k` move · `gg`/`G` top/bottom · `Ctrl-d`/`u` half-page · `t` table · `↵`
 attach · `i` send · `n`/`N` new · `b` from a branch · `s` stop · `D` kill · `p` push/PR ·

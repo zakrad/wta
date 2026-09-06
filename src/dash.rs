@@ -909,14 +909,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                         _ => !worktree::is_gui_editor(&cmd), // terminal editor → inline
                     };
                     if inline {
-                        // Inside the user's own tmux, pop the editor into a NEW WINDOW so
-                        // the dashboard keeps running (switch back with your tmux keys);
+                        // Inside the user's own tmux, pop the editor into a pane of the
+                        // CURRENT window so the dashboard keeps running beside it;
                         // otherwise suspend the TUI and run it in place.
                         let popped = forced.as_deref() != Some("1")
                             && worktree::open_editor_window(&cmd, &path);
                         if popped {
                             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("agent");
-                            app.set_info(format!("opened '{name}' in a new tmux window"));
+                            app.set_info(format!(
+                                "opened '{name}' in {}",
+                                worktree::editor_placement()
+                            ));
                         } else {
                             app.open = Some((cmd, path)); // suspend TUI + run after this frame
                         }

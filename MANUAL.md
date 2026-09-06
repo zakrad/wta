@@ -423,15 +423,21 @@ agent — so it can't pile up a fleet unattended.
 wta open fix-auth       # or press `e` in the dash
 ```
 
-Opens the selected agent's worktree in `WTA_OPEN_CMD` (falls back to `$EDITOR`):
+Opens the selected agent's worktree in `WTA_OPEN_CMD` (falls back to `$EDITOR`).
+The worktree is passed as an **argument**, not just as the working directory, so
+`nvim` lands on the directory browser (netrw, or whatever file-tree plugin replaced
+it) rather than its start screen.
 
 - **GUI editors** (`code`, `cursor`, `zed`, JetBrains…) launch **detached** — wta
   stays on the dashboard.
-- **Terminal editors** (`nvim`/LazyVim, `vim`, `helix`, `emacs -nw`…) open
-  **inline** — wta suspends, you edit in the worktree, and `:q` returns you to the
-  dashboard.
+- **Terminal editors** (`nvim`/LazyVim, `vim`, `helix`, `emacs -nw`…) inside your own
+  tmux open in a **pane of the current window** (70% wide), so the dashboard stays
+  visible beside the editor. Close the pane to return to a full-width dashboard.
+- Outside tmux they open **inline** — wta suspends, you edit in the worktree, and
+  `:q` returns you to the dashboard.
 
-Force either behavior with `WTA_OPEN_INLINE=1` (inline) or `0` (detached).
+`WTA_OPEN_SPLIT=0` puts the editor in a separate tmux window instead of a split.
+Force the inline path with `WTA_OPEN_INLINE=1`, or detach with `0`.
 
 ---
 
@@ -796,6 +802,7 @@ integrate:  api web ; wta wait api web --all --until idle && wta new $@ -- "wire
 | `WTA_SKIP_PERMISSIONS` | `1` | agents run with `--dangerously-skip-permissions` (no prompts). `0` or `wta new --safe` re-enables prompts — **Claude only** |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` |
 | `WTA_OPEN_INLINE` | auto | force editor inline (`1`) or detached (`0`) |
+| `WTA_OPEN_SPLIT` | `1` | in tmux, open the editor as a split of the current window; `0` = a separate window |
 | `WTA_NOTIFY_SOUND` | `1` | notification sound (`0` = silent, or a sound-file path) |
 | `WTA_TMUX_NOTIFY` | `1` | compact top-right terminal toast (`0` = off) |
 | `WTA_TMUX_SECS` | `4` | seconds the toast stays before auto-dismissing |
