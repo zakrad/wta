@@ -1,6 +1,7 @@
 #[cfg(feature = "telegram")]
 mod bridge;
 mod cli;
+mod config;
 mod copyview;
 mod cost;
 mod cron;
@@ -24,6 +25,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(server) = &cli.server {
         std::env::set_var("WTA_TMUX_SOCKET", server);
     }
+    // Seed backing env vars from ~/.wta/config.json where the user hasn't set them
+    // (env wins over the file). Must run before any subcommand reads those vars.
+    config::apply_env_defaults();
     // Remember which tmux the user is driving so an agent's hook can pop a
     // notification onto it later (no-op outside tmux / inside an agent).
     notify::record_user_tmux();
@@ -46,6 +50,9 @@ fn main() -> anyhow::Result<()> {
             } else if yolo {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
+            let cfg = config::load();
+            let model = model.or_else(|| cfg.model.clone());
+            let effort = effort.or_else(|| cfg.effort.clone());
             worktree::apply_role(role.as_deref().unwrap_or("worker"), model.as_deref(), effort.as_deref());
             // `--into <target>` is the shared-branch workflow: branch off <target>, which
             // is persisted as the base so diffs/PR/land all target it (same start point as
@@ -82,6 +89,9 @@ fn main() -> anyhow::Result<()> {
             } else if yolo {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
             }
+            let cfg = config::load();
+            let model = model.or_else(|| cfg.model.clone());
+            let effort = effort.or_else(|| cfg.effort.clone());
             worktree::apply_role(role.as_deref().unwrap_or("worker"), model.as_deref(), effort.as_deref());
             let tgt = into.or(base);
             worktree::fanout(&name, count, tgt.as_deref(), &agent_args)?
@@ -147,6 +157,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Copy { task, session } => copyview::run_cli(task.as_deref(), session.as_deref())?,
         Command::Switch { client, session, dir } => worktree::switch_session(&client, &session, &dir)?,
+        Command::Config { key, value } => config_cmd(key, value)?,
         Command::Resume { task, fresh } => {
             worktree::resume(&task, fresh)?;
             let how = if fresh { "fresh conversation" } else { "continued" };
@@ -170,6 +181,42 @@ fn main() -> anyhow::Result<()> {
         Command::Dash { here } => dash::run(here)?,
         #[cfg(feature = "telegram")]
         Command::Bridge { test } => bridge::run(test)?,
+    }
+    Ok(())
+}
+
+/// `wta config` — no args lists every setting with its value; `<key>` prints one;
+/// `<key> <value>` sets it ("default"/"-" clears). Persists to ~/.wta/config.json.
+fn config_cmd(key: Option<String>, value: Option<String>) -> anyhow::Result<()> {
+    let mut cfg = config::load();
+    match (key, value) {
+        (None, _) => {
+            let p = config::path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "~/.wta/config.json".into());
+            println!("settings ({p}) — env vars override these:\n");
+            for (k, help) in config::FIELDS {
+                let v = cfg.get(k).unwrap_or_default();
+                let shown = if v.is_empty() { "(default)".to_string() } else { v };
+                println!("  {k:<10} {shown:<16} {help}");
+            }
+            println!("\nset one:   wta config <key> <value>      clear:  wta config <key> default");
+        }
+        (Some(k), None) => {
+            let v = cfg
+                .get(&k)
+                .with_context(|| format!("unknown setting '{k}' (see `wta config`)"))?;
+            println!("{}", if v.is_empty() { "(default)".into() } else { v });
+        }
+        (Some(k), Some(v)) => {
+            cfg.set(&k, &v)?;
+            config::save(&cfg)?;
+            let now = cfg.get(&k).unwrap_or_default();
+            println!(
+                "set {k} = {}",
+                if now.is_empty() { "(default)".into() } else { now }
+            );
+        }
     }
     Ok(())
 }

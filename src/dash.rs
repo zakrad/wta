@@ -123,6 +123,15 @@ enum Modal {
         session: String,
         text: String,
     },
+    /// Global settings editor (`,`) over ~/.wta/config.json. Text fields (editor/
+    /// agent/model) edit inline; enum fields (effort/hint_bar/open_mode) cycle.
+    Settings {
+        cfg: crate::config::Config,
+        sel: usize,
+        /// Some(buffer) while typing into the selected text field.
+        editing: Option<String>,
+        msg: Option<String>,
+    },
     /// Pick which repo a new agent goes in (global dash). Enter → NewTask in `root`.
     RepoPick {
         repos: Vec<(String, PathBuf)>, // (display name, root)
@@ -837,6 +846,65 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
+        Modal::Settings { cfg, sel, editing, msg } => {
+            let fields = crate::config::FIELDS;
+            let key_at = |i: usize| fields[i].0;
+            if let Some(buf) = editing {
+                // Inline text-editing mode for editor / agent / model.
+                match key.code {
+                    KeyCode::Enter => {
+                        let field = key_at(*sel);
+                        let val = std::mem::take(buf);
+                        *editing = None;
+                        match cfg.set(field, &val).and_then(|_| crate::config::save(cfg)) {
+                            Ok(_) => *msg = Some(format!("saved {field}")),
+                            Err(e) => *msg = Some(e.to_string()),
+                        }
+                    }
+                    KeyCode::Esc => *editing = None,
+                    KeyCode::Backspace => {
+                        buf.pop();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => buf.push(c),
+                    _ => {}
+                }
+                return Ok(false);
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char(',') | KeyCode::Char('q') => app.modal = Modal::None,
+                KeyCode::Char('j') | KeyCode::Down => *sel = (*sel + 1) % fields.len(),
+                KeyCode::Char('k') | KeyCode::Up => *sel = (*sel + fields.len() - 1) % fields.len(),
+                // Clear the selected field back to its default.
+                KeyCode::Char('d') | KeyCode::Delete => {
+                    let field = key_at(*sel);
+                    match cfg.set(field, "default").and_then(|_| crate::config::save(cfg)) {
+                        Ok(_) => *msg = Some(format!("{field} → default")),
+                        Err(e) => *msg = Some(e.to_string()),
+                    }
+                }
+                // Enter / Space / l → text fields edit, enum fields cycle forward; h cycles back.
+                KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('l') | KeyCode::Right
+                | KeyCode::Char('h') | KeyCode::Left => {
+                    let field = key_at(*sel);
+                    match settings_cycle(field) {
+                        None => *editing = Some(cfg.get(field).unwrap_or_default()),
+                        Some(opts) => {
+                            let cur = cfg.get(field).unwrap_or_default();
+                            let i = opts.iter().position(|o| *o == cur).unwrap_or(0);
+                            let back = matches!(key.code, KeyCode::Char('h') | KeyCode::Left);
+                            let n = opts.len();
+                            let j = if back { (i + n - 1) % n } else { (i + 1) % n };
+                            match cfg.set(field, opts[j]).and_then(|_| crate::config::save(cfg)) {
+                                Ok(_) => *msg = Some(format!("saved {field}")),
+                                Err(e) => *msg = Some(e.to_string()),
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
         Modal::Matrix(_) | Modal::Help => {
             app.modal = Modal::None;
             return Ok(false);
@@ -912,6 +980,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             app.scroll = 0;
         }
         KeyCode::Char('?') => app.modal = Modal::Help,
+        KeyCode::Char(',') => {
+            app.modal = Modal::Settings {
+                cfg: crate::config::load(),
+                sel: 0,
+                editing: None,
+                msg: None,
+            }
+        }
         KeyCode::Char('j') | KeyCode::Down => {
             if !app.rows.is_empty() {
                 app.sel = (app.sel + 1) % app.rows.len();
@@ -1013,17 +1089,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             Some(path) => match worktree::editor_cmd() {
                 None => app.set_err("set WTA_OPEN_CMD or $EDITOR (e.g. nvim, code)"),
                 Some(cmd) => {
-                    let forced = std::env::var("WTA_OPEN_INLINE").ok();
-                    let inline = match forced.as_deref() {
-                        Some("1") => true,
-                        Some("0") => false,
-                        _ => !worktree::is_gui_editor(&cmd), // terminal editor → inline
-                    };
-                    if inline {
-                        // Inside the user's own tmux, pop the editor into a NEW WINDOW so
-                        // the dashboard keeps running (switch back with your tmux keys);
-                        // otherwise suspend the TUI and run it in place.
-                        let popped = forced.as_deref() != Some("1")
+                    if !worktree::is_gui_editor(&cmd) {
+                        // Terminal editor. WTA_OPEN_TMUX / config open_mode decides:
+                        // window = pop a NEW tmux window (dash keeps running, switch back
+                        // with your tmux keys); inline = suspend the TUI in place; auto =
+                        // window when inside tmux, else inline.
+                        let mode = worktree::open_mode();
+                        let popped = mode != worktree::OpenMode::Inline
                             && worktree::open_editor_window(&cmd, &path);
                         if popped {
                             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("agent");
@@ -2420,6 +2492,17 @@ fn render_err(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Allowed values for an enum setting (index 0 is "" = default), or None for a
+/// free-text field that should be typed instead of cycled.
+fn settings_cycle(key: &str) -> Option<Vec<&'static str>> {
+    Some(match key {
+        "effort" => vec!["", "low", "medium", "high", "xhigh", "max"],
+        "hint_bar" => vec!["", "on", "off"],
+        "open_mode" => vec!["", "auto", "window", "inline"],
+        _ => return None,
+    })
+}
+
 fn render_modal(f: &mut Frame, app: &App) {
     match &app.modal {
         Modal::NewTask { name, prompt } => {
@@ -2650,6 +2733,65 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::Settings { cfg, sel, editing, msg } => {
+            let fields = crate::config::FIELDS;
+            let area = centered(72, (fields.len() + 5) as u16, f.area());
+            f.render_widget(Clear, area);
+            let mut lines: Vec<Line> = Vec::new();
+            for (i, (key, help)) in fields.iter().enumerate() {
+                let selected = i == *sel;
+                let editing_here = selected && editing.is_some();
+                let value = if editing_here {
+                    format!("{}▏", editing.as_deref().unwrap_or(""))
+                } else {
+                    let v = cfg.get(key).unwrap_or_default();
+                    if v.is_empty() { "(default)".to_string() } else { v }
+                };
+                let marker = if selected { "›" } else { " " };
+                let name_style = if selected {
+                    Style::default().fg(SEL_FG).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(GREEN_SOFT)
+                };
+                let val_style = if editing_here {
+                    Style::default().fg(SEL_FG).add_modifier(Modifier::BOLD)
+                } else if cfg.get(key).unwrap_or_default().is_empty() {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(GREEN)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {marker} "), name_style),
+                    Span::styled(format!("{key:<10}"), name_style),
+                    Span::styled(format!("{value:<18}"), val_style),
+                    Span::styled(help.to_string(), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+            lines.push(Line::from(""));
+            let foot = match msg {
+                Some(m) => Span::styled(format!(" {m}"), Style::default().fg(GREEN)),
+                None => Span::styled(
+                    " env vars override these · saved to ~/.wta/config.json",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            };
+            lines.push(Line::from(foot));
+            let title = if editing.is_some() {
+                " settings — type value · Enter save · Esc cancel "
+            } else {
+                " settings — ↑↓ move · Enter edit/cycle · d default · Esc close "
+            };
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(GREEN))
+                        .title(title),
+                ),
+                area,
+            );
+        }
         Modal::RepoPick { repos, filter, sel, .. } => {
             let area = centered(58, 16, f.area());
             f.render_widget(Clear, area);
@@ -2782,7 +2924,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             );
         }
         Modal::Help => {
-            let area = centered(56, 24, f.area());
+            let area = centered(56, 26, f.area());
             f.render_widget(Clear, area);
             let k = |key: &str, desc: &str| {
                 Line::from(vec![
@@ -2805,6 +2947,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("c", "copy mode: vi-style scroll/search/select/yank of the conversation (Alt-y while attached)"),
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
                 k("e", "open the worktree in nvim (new tmux window) / $EDITOR"),
+                k(",", "settings: editor, default agent/model/effort, hint bar"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("Alt-] / [", "while attached: jump to next / previous agent (no dashboard)"),
                 k("Alt-o", "while attached: jump to the last agent (toggle back & forth)"),

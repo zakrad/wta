@@ -471,15 +471,47 @@ agent — so it can't pile up a fleet unattended.
 wta open fix-auth       # or press `e` in the dash
 ```
 
-Opens the selected agent's worktree in `WTA_OPEN_CMD` (falls back to `$EDITOR`):
+Opens the selected agent's worktree in your editor (set it in the settings page or
+`WTA_OPEN_CMD`, falling back to `$EDITOR`). Because it's a worktree, the editor lands
+in the exact repo **and branch** of that agent — no path typing.
 
 - **GUI editors** (`code`, `cursor`, `zed`, JetBrains…) launch **detached** — wta
   stays on the dashboard.
-- **Terminal editors** (`nvim`/LazyVim, `vim`, `helix`, `emacs -nw`…) open
-  **inline** — wta suspends, you edit in the worktree, and `:q` returns you to the
-  dashboard.
+- **Terminal editors** (`nvim`/LazyVim, `vim`, `helix`, `emacs -nw`…) follow the
+  **open mode** (`open_mode` in settings, or `WTA_OPEN_TMUX`):
+  - `auto` (default) — a **new tmux window** when you're inside tmux (wta keeps
+    running; switch back with your tmux keys), otherwise **inline** (wta suspends,
+    you edit, `:q` returns to the dashboard).
+  - `window` — always a new tmux window.
+  - `inline` — always take over the screen.
 
-Force either behavior with `WTA_OPEN_INLINE=1` (inline) or `0` (detached).
+`WTA_OPEN_INLINE=1` still forces inline.
+
+---
+
+## Settings
+
+Press `,` in the dashboard for a settings page over `~/.wta/config.json`, or use the
+`wta config` CLI. **Environment variables always override the file**, so anything you
+already export in your shell keeps winning; the file just supplies your defaults.
+
+| setting     | what it sets                                   | backing env var  |
+|-------------|------------------------------------------------|------------------|
+| `editor`    | editor for `e` / `wta open`                     | `WTA_OPEN_CMD`   |
+| `agent`     | default agent CLI for `wta new`                 | `WTA_AGENT_CMD`  |
+| `model`     | default `--model` for new agents                | (none)           |
+| `effort`    | default `--effort` (low/medium/high/xhigh/max)  | (none)           |
+| `hint_bar`  | green hint bar in sessions (on/off)             | `WTA_HINT_BAR`   |
+| `open_mode` | editor launch: auto / window / inline           | `WTA_OPEN_TMUX`  |
+
+In the page: `↑↓` move, **Enter** edits a text field or cycles an enum (`←→` too),
+`d` resets a field to its default, `Esc` closes. On the CLI:
+
+```sh
+wta config                    # list every setting + current value
+wta config editor nvim        # set one
+wta config editor default     # clear it (fall back to $EDITOR / built-in default)
+```
 
 ---
 
