@@ -2452,6 +2452,29 @@ pub fn editor_cmd() -> Option<String> {
         .map(String::from)
 }
 
+/// How a TERMINAL editor is launched (GUI editors always fire-and-forget):
+/// `Auto` = new tmux window when inside tmux, else inline; `Window` = force a new
+/// tmux window (falls back to inline outside tmux); `Inline` = always take over.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OpenMode {
+    Auto,
+    Window,
+    Inline,
+}
+
+/// Resolve [`OpenMode`] from `WTA_OPEN_TMUX` (auto|window|inline); the legacy
+/// `WTA_OPEN_INLINE=1` still forces inline. `~/.wta/config.json` seeds WTA_OPEN_TMUX.
+pub fn open_mode() -> OpenMode {
+    if std::env::var("WTA_OPEN_INLINE").ok().as_deref() == Some("1") {
+        return OpenMode::Inline;
+    }
+    match std::env::var("WTA_OPEN_TMUX").ok().as_deref() {
+        Some("window") => OpenMode::Window,
+        Some("inline") => OpenMode::Inline,
+        _ => OpenMode::Auto,
+    }
+}
+
 /// GUI editors fork and return immediately (open detached); terminal editors
 /// (nvim/vim/helix/emacs -nw/…) take over the tty and must run inline.
 pub fn is_gui_editor(cmd: &str) -> bool {
@@ -2498,10 +2521,15 @@ pub fn open(task: &str) -> Result<()> {
         bail!("no worktree for '{task}'");
     }
     let cmd = editor_cmd().context("set WTA_OPEN_CMD or $EDITOR to an editor (e.g. nvim, code)")?;
-    let forced_inline = std::env::var("WTA_OPEN_INLINE").ok().as_deref() == Some("1");
-    if !is_gui_editor(&cmd) && !forced_inline && open_editor_window(&cmd, &wt) {
-        println!("opened '{task}' in a new tmux window");
-        return Ok(());
+    let mode = open_mode();
+    if !is_gui_editor(&cmd) && mode != OpenMode::Inline {
+        if open_editor_window(&cmd, &wt) {
+            println!("opened '{task}' in a new tmux window");
+            return Ok(());
+        }
+        if mode == OpenMode::Window {
+            eprintln!("wta: not inside tmux — opening '{task}' inline instead");
+        }
     }
     let mut it = cmd.split_whitespace();
     let prog = it.next().unwrap();

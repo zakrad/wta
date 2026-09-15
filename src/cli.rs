@@ -285,6 +285,13 @@ pub enum Command {
         #[arg(short = 'd', long)]
         dir: String,
     },
+    /// Show or change global settings in ~/.wta/config.json (also editable in the dash: `,`)
+    Config {
+        /// setting name (omit to list every setting + its value); e.g. editor, agent, model
+        key: Option<String>,
+        /// new value (omit to print just this setting); "default" or "-" clears it
+        value: Option<String>,
+    },
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later
     Stop { task: String },
     /// Resume a stopped agent — re-spawn its session in the existing worktree

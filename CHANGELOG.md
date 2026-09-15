@@ -4,6 +4,21 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] — 2026-09-15
+
+### Added
+- **Settings page — no more hunting for env vars.** Press `,` in the dashboard for a
+  settings editor over `~/.wta/config.json`: set your **editor** (for `e` / `wta open`),
+  the **default agent CLI**, default **model** and **effort** for new agents, the green
+  **hint bar** on/off, and the editor **open mode** (auto / new tmux window / inline).
+  Text fields edit inline (Enter), enum fields cycle (Enter / ←→), `d` resets a field to
+  default. Same thing on the CLI: `wta config` lists everything, `wta config <key> <value>`
+  sets one, `wta config <key> default` clears it. Environment variables still win over the
+  file, so existing setups are untouched.
+- **`WTA_OPEN_TMUX` / `open_mode`** controls how a terminal editor launches: `auto`
+  (default — new tmux window when inside tmux, else inline), `window` (always a new tmux
+  window), or `inline` (always take over the screen).
+
 ## [0.3.3] — 2026-09-02
 
 ### Fixed
