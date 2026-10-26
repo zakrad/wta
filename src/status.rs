@@ -30,6 +30,16 @@ pub struct AgentState {
     pub last_prompt_unix: u64, // when a prompt was last delivered — makes `wait --until idle` turn-bound (ignore a stale prior-turn idle)
     #[serde(default)]
     pub adopted: bool, // registered from an EXISTING dir via `wta adopt` (not a wta-created worktree) — `rm` won't delete it
+    #[serde(default)]
+    pub pinned: bool, // `P` / `wta pin` — sorts to the top of its repo group
+    #[serde(default)]
+    pub tags: Vec<String>, // free-form labels (`wta tag`) — shown as #tag, matched by the `/` filter
+    #[serde(default)]
+    pub parent: Option<String>, // the agent that spawned this one (fanout/review/handoff) — nests under it
+    #[serde(default)]
+    pub sleeping: bool, // stopped on purpose (`s`) — dimmed `z` until resumed
+    #[serde(default)]
+    pub account: Option<String>, // Claude account (`wta account`) — its CLAUDE_CONFIG_DIR is set in the pane
 }
 
 pub fn wta_dir() -> Result<PathBuf> {
@@ -101,6 +111,9 @@ pub fn record(repo: &str, task: &str, status: &str, cwd: &str) -> Result<()> {
     st.status = status.to_string();
     st.cwd = cwd.to_string();
     st.updated_unix = now_unix();
+    if status == "running" {
+        st.sleeping = false; // a resumed / re-prompted agent is awake again
+    }
     save(&st)
 }
 
@@ -113,6 +126,44 @@ pub fn record_meta(repo: &str, task: &str, index: u32, context: &[String]) -> Re
     st.index = index;
     st.context = context.to_vec();
     save(&st)
+}
+
+/// Merge-write one agent's state through `f` (read → modify → atomic save), for the
+/// organizing fields (pin/tags/parent/sleep/account) that hooks never touch.
+pub fn update(repo: &str, task: &str, f: impl FnOnce(&mut AgentState)) -> Result<()> {
+    let mut st = read_state(repo, task).unwrap_or_default();
+    st.task = task.to_string();
+    st.repo = repo.to_string();
+    f(&mut st);
+    save(&st)
+}
+
+/// Normalize a tag: lowercase, a leading `#` dropped, only `[a-z0-9-_./]` kept.
+pub fn clean_tag(t: &str) -> String {
+    t.trim()
+        .trim_start_matches('#')
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+        .collect()
+}
+
+/// Apply tag edits: `+x` / `x` adds, `-x` removes. Returns the new sorted, deduped list.
+pub fn edit_tags(cur: &[String], edits: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = cur.to_vec();
+    for e in edits.iter().flat_map(|e| e.split([',', ' '])) {
+        if let Some(t) = e.strip_prefix('-') {
+            let t = clean_tag(t);
+            out.retain(|x| *x != t);
+        } else {
+            let t = clean_tag(e.strip_prefix('+').unwrap_or(e));
+            if !t.is_empty() && !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Record the base branch this agent is based on / targets (merge-write, so it

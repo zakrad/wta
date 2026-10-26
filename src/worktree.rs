@@ -619,13 +619,18 @@ pub fn fanout(name: &str, count: u32, base: Option<&str>, agent_args: &[String])
         match r {
             Ok(_) => {
                 ok += 1;
+                // siblings share a parent, so the dash nests them under one `name` group
+                // and `wta compare <name>` can rank them
+                if let Ok(repo) = repo_id() {
+                    let _ = status::update(&repo, &task, |s| s.parent = Some(name.to_string()));
+                }
                 println!("  started {task}");
             }
             Err(e) => println!("  skipped {task}: {e}"),
         }
     }
-    println!("fanout: {ok}/{count} started. Compare with `wta matrix`, review diffs in `wta dash`,");
-    println!("        merge the winner with `wta push <task> --pr`, drop the rest with `wta rm <task> --force`.");
+    println!("fanout: {ok}/{count} started. Compare them with `wta compare {name}` (or `=` in `wta dash`),");
+    println!("        then keep the winner with `wta compare {name} --keep <task>` (removes the rest).");
     Ok(())
 }
 
@@ -663,6 +668,7 @@ pub fn review(builder: &str, by: Option<&str>, model: Option<&str>, effort: Opti
     let (cmd, _) = crate::roles::resolve("reviewer", by, model, effort, &rev_base, Some(&root));
     std::env::set_var("WTA_AGENT_CMD", &cmd);
     new_with_base(&reviewer, &[prompt], &builder_branch)?;
+    let _ = status::update(&repo_id_of(&root), &reviewer, |s| s.parent = Some(builder.to_string()));
     println!("started reviewer '{reviewer}' on {builder}'s branch — watch it in `wta dash`");
     Ok(())
 }
@@ -819,6 +825,7 @@ pub fn handoff(from: &str, new: &str, agent_args: &[String]) -> Result<()> {
     let note = handoff_note(&root, from, &from_branch, prompt.trim());
     // Pass the prompt as the new agent's initial instruction too, so it starts working.
     new_impl(new, agent_args, Some(&from_branch), Some(&note))?;
+    let _ = status::update(&repo_id_of(&root), new, |s| s.parent = Some(from.to_string()));
     // Carry the checkable spec forward — the durable context (goal + acceptance criteria
     // + plan) that a freeform note can't hold. Git-excluded in the new worktree too.
     let (from_wt, new_wt) = (worktrees_dir(&root).join(from), worktrees_dir(&root).join(new));
@@ -1931,6 +1938,7 @@ pub fn stop_session(repo: &str, task: &str) -> Result<()> {
         .filter(|c| !c.is_empty())
         .unwrap_or_default();
     let _ = status::record(repo, task, "exited", &cwd);
+    let _ = status::update(repo, task, |s| s.sleeping = true);
     if let Ok(root) = repo_root() {
         append_run_log(&root, task, "stop");
     }
