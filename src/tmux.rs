@@ -541,13 +541,16 @@ pub fn send_text(name: &str, text: &str) -> Result<bool> {
     // let the editor drain the burst before Enter arrives as a distinct event
     sleep(Duration::from_millis(60));
 
-    // echo-confirm: only submit once the typed chars are visible in the pane
+    // echo-confirm: only submit once the typed chars are visible in the pane. Compare
+    // with ALL whitespace removed: a long line wraps mid-word in the pane, which would
+    // split the needle where `norm` cannot rejoin it.
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
     let needle: String = {
         let c: Vec<char> = text.trim().chars().collect();
-        norm(&c[c.len().saturating_sub(24)..].iter().collect::<String>())
+        squash(&c[c.len().saturating_sub(24)..].iter().collect::<String>())
     };
     if !needle.is_empty() {
-        let seen = |s: Option<String>| s.map(|p| norm(&p).contains(&needle)).unwrap_or(false);
+        let seen = |s: Option<String>| s.map(|p| squash(&p).contains(&needle)).unwrap_or(false);
         if !seen(capture(name)) {
             sleep(Duration::from_millis(90));
             if !seen(capture(name)) {

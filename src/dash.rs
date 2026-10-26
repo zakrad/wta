@@ -1663,10 +1663,12 @@ fn deliver_comments(app: &mut App) {
                 }
                 app.set_info(format!("sent {} comment(s) → {task}", notes.len()));
             }
-            Err(e) => {
-                app.comments.insert(session, notes); // keep them; retry next refresh
-                app.set_err(format!("comments for '{task}' not sent yet: {e}"));
-            }
+            // no automatic retry: the text may already sit in the agent's input box, and a
+            // retry would type it twice — say so and let the user check
+            Err(e) => app.set_err(format!(
+                "{} comment(s) for '{task}' not submitted ({e}) — attach (↵) to check its input",
+                notes.len()
+            )),
         }
     }
     // an agent that is gone can't receive them
@@ -3876,6 +3878,7 @@ fn render_compare(f: &mut Frame, app: &App, repo: &str, group: &str, sel: usize,
     let best = members
         .iter()
         .enumerate()
+        .rev() // ties go to the first member
         .max_by_key(|(_, r)| compare_score(check_of(r), r.ac, r.added + r.removed, r.cost.tokens()))
         .map(|(i, _)| i);
     let dim = Style::default().fg(Color::DarkGray);
@@ -3924,7 +3927,7 @@ fn render_compare(f: &mut Frame, app: &App, repo: &str, group: &str, sel: usize,
         ]));
     } else {
         lines.push(Line::styled(
-            " ★ best: checks pass › AC met › smaller diff › fewer tokens · v run checks · ↵ keep one · esc",
+            " ★ = checks › AC › smaller diff › fewer tokens    v run checks · ↵ keep one · esc",
             dim,
         ));
     }
