@@ -1,5 +1,6 @@
 #[cfg(feature = "telegram")]
 mod bridge;
+mod account;
 mod cli;
 mod config;
 mod copyview;
@@ -9,6 +10,7 @@ mod dash;
 mod detect;
 mod guard;
 mod notify;
+mod org;
 mod roles;
 mod status;
 mod supervise;
@@ -17,7 +19,7 @@ mod worktree;
 
 use anyhow::Context;
 use clap::Parser;
-use cli::{Cli, Command, CronAction};
+use cli::{AccountAction, Cli, Command, CronAction};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -43,12 +45,20 @@ fn main() -> anyhow::Result<()> {
             model,
             effort,
             role,
+            account,
+            tags,
             agent_args,
         } => {
             if safe {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "0");
             } else if yolo {
                 std::env::set_var("WTA_SKIP_PERMISSIONS", "1");
+            }
+            if let Some(a) = &account {
+                if a != "default" && account::dir_for(a).is_none() {
+                    anyhow::bail!("no account '{a}' — add it with `wta account add {a}`");
+                }
+                std::env::set_var("WTA_ACCOUNT", a);
             }
             let cfg = config::load();
             let model = model.or_else(|| cfg.model.clone());
@@ -60,6 +70,11 @@ fn main() -> anyhow::Result<()> {
             match into.or(base) {
                 Some(b) => worktree::new_with_base(&task, &agent_args, &b)?,
                 None => worktree::new(&task, &agent_args)?,
+            }
+            if !tags.is_empty() {
+                let repo = worktree::repo_id()?;
+                let t = status::edit_tags(&[], &tags);
+                status::update(&repo, &task, |s| s.tags = t)?;
             }
             println!("started agent '{task}' — attach with `wta attach {task}` (or `wta dash`)");
             if let Some(hint) = worktree::instructions_hint() {
@@ -104,9 +119,19 @@ fn main() -> anyhow::Result<()> {
         Command::Task { task, new, json } => worktree::task_cmd(task.as_deref(), new, json)?,
         Command::Init => worktree::init()?,
         Command::Roles => roles::print_roles(worktree::repo_root().ok().as_deref()),
-        Command::Supervise { here, interval, stuck_secs } => {
-            supervise::supervise(!here, interval, stuck_secs)?
+        Command::Supervise { here, interval, stuck_secs, failover } => {
+            supervise::supervise(!here, interval, stuck_secs, failover)?
         }
+        Command::Tag { task, edits } => org::tag(&task, &edits)?,
+        Command::Pin { task, off } => org::pin(&task, off)?,
+        Command::Compare { group, verify, keep, json } => org::compare(&group, verify, keep.as_deref(), json)?,
+        Command::Search { query, here, limit, json } => org::search(&query.join(" "), here, limit, json)?,
+        Command::Usage => org::usage()?,
+        Command::Account { action } => match action {
+            AccountAction::Add { name, no_login } => account::add(&name, !no_login)?,
+            AccountAction::Ls => account::ls()?,
+            AccountAction::Use { task, name } => account::use_cmd(&task, &name)?,
+        },
         Command::Handoff { from, new, prompt } => worktree::handoff(&from, &new, &prompt)?,
         Command::Loop { task, max, no_progress, timeout, prompt } => {
             worktree::loop_verify(&task, max, no_progress, timeout, &prompt)?

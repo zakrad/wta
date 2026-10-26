@@ -301,7 +301,7 @@ fn tool_result_lines(b: &Value, id: u32) -> Vec<SrcLine> {
 
 /// Hook/system context is injected into user turns as `<system-reminder>…</system-reminder>`
 /// blocks — noise in a conversation view.
-fn strip_system_reminders(t: &str) -> String {
+pub(crate) fn strip_system_reminders(t: &str) -> String {
     let mut s = t.to_string();
     while let Some(a) = s.find("<system-reminder>") {
         match s[a..].find("</system-reminder>") {

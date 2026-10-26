@@ -27,7 +27,7 @@ pub struct Config {
     /// show the green hint bar in agent sessions — backs `WTA_HINT_BAR` (false → "0").
     pub hint_bar: Option<bool>,
     /// how `wta open` / dash `e` launches a terminal editor — backs `WTA_OPEN_TMUX`:
-    /// "auto" (new tmux window if inside tmux, else inline), "window", or "inline".
+    /// "auto" (tmux split if inside tmux, else inline), "window", or "inline".
     pub open_mode: Option<String>,
 }
 

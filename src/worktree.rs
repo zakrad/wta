@@ -235,7 +235,7 @@ pub fn base_branch(root: &Path) -> String {
     "HEAD".to_string()
 }
 
-fn worktrees_dir(root: &Path) -> PathBuf {
+pub fn worktrees_dir(root: &Path) -> PathBuf {
     root.join(worktree_subdir())
 }
 /// Prefix for the branch a NEW agent creates. Empty by default, so the branch is just
@@ -378,6 +378,13 @@ fn agent_argv(repo: &str, task: &str, idx: u32, tail: &[String]) -> (String, Vec
         format!("WTA_INDEX={idx}"),
         format!("WTA_PORT_BASE={}", port_base(idx)),
     ];
+    // an agent on another Claude account (`wta account`) runs with that config dir
+    if let Some(dir) = status::read_state(repo, task)
+        .and_then(|s| s.account)
+        .and_then(|a| crate::account::dir_for(&a))
+    {
+        extra.push(format!("CLAUDE_CONFIG_DIR={}", dir.display()));
+    }
     // tmux execs program+args directly (no shell), so a multi-word agent command
     // (`claude --model haiku`, `npx foo`) must be tokenized, not one argv element.
     let cmd = agent_cmd();
@@ -591,6 +598,12 @@ fn new_impl(task: &str, agent_args: &[String], base: Option<&str>, seed: Option<
     if let Some(eng) = agent_cmd().split_whitespace().next() {
         let _ = status::record_engine(&repo, task, eng);
     }
+    // `wta new --account <name>`: the pane gets that account's CLAUDE_CONFIG_DIR
+    if let Ok(acct) = std::env::var("WTA_ACCOUNT") {
+        if !acct.is_empty() && acct != "default" {
+            let _ = status::update(&repo, task, |s| s.account = Some(acct.clone()));
+        }
+    }
     preseed_claude_trust(&wt); // avoid the folder-trust dialog on this fresh worktree
     let wt_str = wt.to_string_lossy().into_owned();
     let session = tmux::session_name(&repo, task);
@@ -619,13 +632,18 @@ pub fn fanout(name: &str, count: u32, base: Option<&str>, agent_args: &[String])
         match r {
             Ok(_) => {
                 ok += 1;
+                // siblings share a parent, so the dash nests them under one `name` group
+                // and `wta compare <name>` can rank them
+                if let Ok(repo) = repo_id() {
+                    let _ = status::update(&repo, &task, |s| s.parent = Some(name.to_string()));
+                }
                 println!("  started {task}");
             }
             Err(e) => println!("  skipped {task}: {e}"),
         }
     }
-    println!("fanout: {ok}/{count} started. Compare with `wta matrix`, review diffs in `wta dash`,");
-    println!("        merge the winner with `wta push <task> --pr`, drop the rest with `wta rm <task> --force`.");
+    println!("fanout: {ok}/{count} started. Compare them with `wta compare {name}` (or `=` in `wta dash`),");
+    println!("        then keep the winner with `wta compare {name} --keep <task>` (removes the rest).");
     Ok(())
 }
 
@@ -663,6 +681,7 @@ pub fn review(builder: &str, by: Option<&str>, model: Option<&str>, effort: Opti
     let (cmd, _) = crate::roles::resolve("reviewer", by, model, effort, &rev_base, Some(&root));
     std::env::set_var("WTA_AGENT_CMD", &cmd);
     new_with_base(&reviewer, &[prompt], &builder_branch)?;
+    let _ = status::update(&repo_id_of(&root), &reviewer, |s| s.parent = Some(builder.to_string()));
     println!("started reviewer '{reviewer}' on {builder}'s branch — watch it in `wta dash`");
     Ok(())
 }
@@ -725,7 +744,7 @@ fn resolve_repo() -> Result<String> {
 /// The MAIN repo root for a directory anywhere inside a repo or one of its worktrees
 /// (`git rev-parse --git-common-dir` → the shared `.git`'s parent). Works from a
 /// worktree subdirectory, unlike a fixed parent-hop. `None` if `dir` isn't in a repo.
-fn main_root_of(dir: &Path) -> Option<PathBuf> {
+pub fn main_root_of(dir: &Path) -> Option<PathBuf> {
     let out = run_git(&["rev-parse", "--git-common-dir"], Some(dir)).ok()?;
     let raw = out.trim();
     let gc = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { dir.join(raw) };
@@ -819,6 +838,7 @@ pub fn handoff(from: &str, new: &str, agent_args: &[String]) -> Result<()> {
     let note = handoff_note(&root, from, &from_branch, prompt.trim());
     // Pass the prompt as the new agent's initial instruction too, so it starts working.
     new_impl(new, agent_args, Some(&from_branch), Some(&note))?;
+    let _ = status::update(&repo_id_of(&root), new, |s| s.parent = Some(from.to_string()));
     // Carry the checkable spec forward — the durable context (goal + acceptance criteria
     // + plan) that a freeform note can't hold. Git-excluded in the new worktree too.
     let (from_wt, new_wt) = (worktrees_dir(&root).join(from), worktrees_dir(&root).join(new));
@@ -1527,7 +1547,7 @@ fn wait_idle(session: &str, timeout: std::time::Duration) -> Result<()> {
 /// longer than `d` (so a hung check can't wedge the loop past `--timeout`) and its
 /// output is captured via a temp file to avoid pipe-buffer deadlock. `None` runs to
 /// completion.
-fn run_verify_sh(wt: &Path, script: &str, deadline: Option<std::time::Duration>) -> (i32, String) {
+pub fn run_verify_sh(wt: &Path, script: &str, deadline: Option<std::time::Duration>) -> (i32, String) {
     let d = match deadline {
         None => {
             return match Command::new("bash").arg("-c").arg(script).current_dir(wt).output() {
@@ -1788,6 +1808,40 @@ pub fn resume(task: &str, fresh: bool) -> Result<()> {
     resume_at(task, &wt, fresh)
 }
 
+/// Find an agent by name for a CLI command: the current repo's agent if it has one,
+/// else the ONE repo that has an agent of that name. Returns `(repo id, repo root,
+/// agent dir)`. Errors when the name is unknown or ambiguous across repos.
+pub fn locate(task: &str) -> Result<(String, PathBuf, PathBuf)> {
+    let here = repo_root().ok().map(|r| (repo_id_of(&r), r));
+    if let Some((repo, root)) = &here {
+        if let Some(st) = status::read_state(repo, task) {
+            let wt = if !st.cwd.is_empty() { PathBuf::from(&st.cwd) } else { worktrees_dir(root).join(task) };
+            return Ok((repo.clone(), root.clone(), wt));
+        }
+        let wt = worktrees_dir(root).join(task);
+        if wt.exists() {
+            return Ok((repo.clone(), root.clone(), wt));
+        }
+    }
+    let repos: std::collections::HashMap<String, PathBuf> = discover_repos().into_iter().collect();
+    let matches: Vec<status::AgentState> =
+        status::read_all_states().unwrap_or_default().into_iter().filter(|s| s.task == task).collect();
+    match matches.len() {
+        0 => bail!("no agent named '{task}'"),
+        1 => {
+            let st = &matches[0];
+            let root = repos
+                .get(&st.repo)
+                .cloned()
+                .or_else(|| main_root_of(Path::new(&st.cwd)))
+                .with_context(|| format!("cannot find the repo of '{task}'"))?;
+            let wt = if !st.cwd.is_empty() { PathBuf::from(&st.cwd) } else { worktrees_dir(&root).join(task) };
+            Ok((st.repo.clone(), root, wt))
+        }
+        _ => bail!("'{task}' exists in several repos — run this from that repo's directory"),
+    }
+}
+
 /// `wta adopt <task> [--dir <path>]` — register an EXISTING directory (where you're
 /// already running Claude) as an agent under its repo, so it joins your dashboard
 /// group. It does NOT spawn a session or touch your files; continue it inside wta with
@@ -1931,6 +1985,7 @@ pub fn stop_session(repo: &str, task: &str) -> Result<()> {
         .filter(|c| !c.is_empty())
         .unwrap_or_default();
     let _ = status::record(repo, task, "exited", &cwd);
+    let _ = status::update(repo, task, |s| s.sleeping = true);
     if let Ok(root) = repo_root() {
         append_run_log(&root, task, "stop");
     }
@@ -1949,7 +2004,7 @@ fn diffstat(path: &Path, base: &str) -> String {
 }
 
 /// Exact (added, deleted) line counts vs `base` for `--json` output.
-fn changes_vs_base(path: &Path, base: &str) -> (u64, u64) {
+pub fn changes_vs_base(path: &Path, base: &str) -> (u64, u64) {
     let mb = match run_git(&["merge-base", "HEAD", base], Some(path)) {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => return (0, 0),
@@ -2192,6 +2247,10 @@ pub fn ls(json: bool) -> Result<()> {
                     "added": added,
                     "deleted": deleted,
                     "ac": ac,
+                    "pinned": st.as_ref().map(|s| s.pinned).unwrap_or(false),
+                    "tags": st.as_ref().map(|s| s.tags.clone()).unwrap_or_default(),
+                    "parent": st.as_ref().and_then(|s| s.parent.clone()),
+                    "account": st.as_ref().and_then(|s| s.account.clone()),
                 })
             })
             .collect();
@@ -2453,8 +2512,8 @@ pub fn editor_cmd() -> Option<String> {
 }
 
 /// How a TERMINAL editor is launched (GUI editors always fire-and-forget):
-/// `Auto` = new tmux window when inside tmux, else inline; `Window` = force a new
-/// tmux window (falls back to inline outside tmux); `Inline` = always take over.
+/// `Auto` = a tmux split (or window, `WTA_OPEN_SPLIT=0`) inside tmux, else inline; `Window` = force
+/// the tmux path (falls back to inline outside tmux); `Inline` = always take over.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OpenMode {
     Auto,
@@ -2490,30 +2549,54 @@ pub fn is_gui_editor(cmd: &str) -> bool {
     )
 }
 
-/// If the user is inside their OWN tmux, open `cmd` in a NEW WINDOW rooted at `wt`
-/// (non-blocking — the dashboard / current pane stays put; switch back with your tmux
-/// keys). Uses the user's default tmux server (from `$TMUX`), never wta's `-L wta`
-/// socket. Returns true if the window was created; false (a no-op) when not in tmux.
+/// Width of the editor pane when `e` / `wta open` splits the current tmux window.
+const EDITOR_PANE_SIZE: &str = "70%";
+
+/// Where the editor lands inside the user's own tmux: a pane in the CURRENT window by
+/// default (the dashboard stays visible next to it), or a separate window when
+/// `WTA_OPEN_SPLIT=0`.
+fn opens_in_separate_window() -> bool {
+    std::env::var("WTA_OPEN_SPLIT").ok().as_deref() == Some("0")
+}
+
+/// Human-readable placement, so the caller's confirmation matches what actually happened.
+pub fn editor_placement() -> &'static str {
+    if opens_in_separate_window() { "a new tmux window" } else { "a split pane" }
+}
+
+/// If the user is inside their OWN tmux, open `cmd` on `wt` without blocking — a split
+/// of the current window (so the dashboard stays beside the editor), or a separate
+/// window under `WTA_OPEN_SPLIT=0`. Uses the user's default tmux server (from `$TMUX`),
+/// never wta's `-L wta` socket. Returns true if the pane was created; false (a no-op)
+/// when not in tmux.
 pub fn open_editor_window(cmd: &str, wt: &Path) -> bool {
     if std::env::var("TMUX").is_err() {
         return false;
     }
-    let name = wt.file_name().and_then(|s| s.to_str()).unwrap_or("wta");
-    Command::new("tmux")
-        .arg("new-window")
-        .arg("-c")
+    // The worktree has to be an ARGUMENT, not just the cwd: `nvim` alone opens its start
+    // screen, while `nvim <dir>` opens the directory browser (netrw, or the file-tree
+    // plugin that replaced it). The inline paths already pass it; this one must match.
+    let script = format!("{cmd} {}", sh_quote(&wt.to_string_lossy()));
+    let mut tmux = Command::new("tmux");
+    if opens_in_separate_window() {
+        let name = wt.file_name().and_then(|s| s.to_str()).unwrap_or("wta");
+        tmux.args(["new-window", "-n", name]);
+    } else {
+        tmux.args(["split-window", "-h", "-l", EDITOR_PANE_SIZE]);
+    }
+    tmux.arg("-c")
         .arg(wt)
-        .args(["-n", name, "sh", "-c"])
-        .arg(cmd)
+        .arg(&script)
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
 
 /// `wta open <task>` — open the agent's worktree in the editor. Inside tmux this pops
-/// the editor into a NEW WINDOW (non-blocking); otherwise it runs in the foreground
-/// (GUI apps return immediately, terminal editors run until you quit). Force the
-/// foreground path with `WTA_OPEN_INLINE=1`.
+/// the editor into a PANE OF THE CURRENT WINDOW (non-blocking; `WTA_OPEN_SPLIT=0` uses a
+/// separate window); otherwise it runs in the foreground (GUI apps return immediately,
+/// terminal editors run until you quit). Force the foreground path with
+/// `WTA_OPEN_INLINE=1`.
 pub fn open(task: &str) -> Result<()> {
     let root = repo_root()?;
     let wt = worktrees_dir(&root).join(task);
@@ -2524,7 +2607,7 @@ pub fn open(task: &str) -> Result<()> {
     let mode = open_mode();
     if !is_gui_editor(&cmd) && mode != OpenMode::Inline {
         if open_editor_window(&cmd, &wt) {
-            println!("opened '{task}' in a new tmux window");
+            println!("opened '{task}' in {}", editor_placement());
             return Ok(());
         }
         if mode == OpenMode::Window {

@@ -85,6 +85,8 @@ enum Tab {
 enum View {
     Split,
     Table,
+    /// Kanban-style columns by state (`B`): Working · Needs you · Ready · Merged · Stopped.
+    Board,
 }
 
 enum Modal {
@@ -156,6 +158,32 @@ enum Modal {
         dir: PathBuf,
         name: String,
     },
+    /// `/` — live filter over the agent list (task, repo, base, #tag, state word).
+    Filter {
+        text: String,
+    },
+    /// `T` — edit the selected agent's tags (space/comma separated).
+    Tags {
+        repo: String,
+        task: String,
+        text: String,
+    },
+    /// `C` in the Diff tab — a review note on one diff line, queued for the agent.
+    Comment {
+        session: String,
+        task: String,
+        loc: String,
+        code: String,
+        text: String,
+    },
+    /// `=` — compare siblings (a fanout group, or a parent and its children) and keep one.
+    Compare {
+        repo: String,
+        root: PathBuf,
+        group: String,
+        sel: usize,
+        confirm: bool,
+    },
     Help,
 }
 
@@ -168,6 +196,7 @@ fn branch_matches<'a>(branches: &'a [String], filter: &str) -> Vec<&'a String> {
         .collect()
 }
 
+#[derive(Clone)]
 struct Row {
     task: String,
     repo: String,       // repo id (namespaces the session + state)
@@ -184,6 +213,15 @@ struct Row {
     model: Option<String>,  // most recent model (short label) — for the table's MODEL column
     ac: Option<(u32, u32)>, // .wta/task.md acceptance criteria (checked, total)
     updated_unix: u64,      // last status write — for the table's AGE column
+    pinned: bool,           // `P` — sorts to the top of its repo group
+    tags: Vec<String>,      // `T` / `wta tag` — shown as #tag, matched by `/`
+    parent: Option<String>, // spawner (fanout name / review builder / handoff source)
+    sleeping: bool,         // stopped on purpose — dimmed `z` until resumed
+    account: Option<String>, // Claude account (`wta account`), if not the default
+    depth: u8,              // nesting under a parent (set by `apply_view`)
+    header: Option<String>, // a fanout group label drawn above this row (first member)
+    hidden: u32,            // children folded away under this row (`z`)
+    limit: bool,            // pane shows a Claude usage-limit stop (`A` moves accounts)
 }
 
 /// A `.wta/verify.sh` run for one agent. Runs async (spawn + poll) so the repo's
@@ -208,8 +246,13 @@ struct App {
     op_root: PathBuf, // repo root for the pending modal action (kill/push/resume/new)
     op_repo: String,  // repo id for the pending modal action — the EXACT id the row tracks
     checks: HashMap<String, Check>, // session -> verification result/run
+    all_rows: Vec<Row>, // every agent, nested + ordered — `rows` is the filtered/folded view
     rows: Vec<Row>,
     sel: usize,
+    filter: String,           // `/` filter terms (empty = show all)
+    folded: HashSet<String>,  // "<repo>/<parent>" groups folded with `z`
+    comments: HashMap<String, Vec<String>>, // session -> diff review notes waiting for the agent to be ready
+    diff_cursor: usize,       // Diff tab: the line a `C` comment attaches to (index into diff_text lines)
     tab: Tab,
     modal: Modal,
     preview: String,
@@ -237,6 +280,10 @@ struct App {
     cost_tx: Sender<(String, PathBuf)>,
     cost_rx: Receiver<(String, (crate::cost::Usage, Option<String>))>,
     cost_inflight: HashSet<String>, // sessions currently being parsed (dedupe jobs)
+    // Tokens per Claude account over the last 5h (the usage-limit window), from a
+    // worker thread that rescans every two minutes.
+    usage_rx: Option<Receiver<Vec<(String, u64)>>>,
+    usage5h: Vec<(String, u64)>,
     costmtime: HashMap<String, u64>, // session -> newest transcript mtime last parsed
 }
 
@@ -254,7 +301,39 @@ impl App {
                 }
             }
         });
+        // 5h usage worker (not in tests: it scans the real ~/.claude)
+        let usage_rx = if cfg!(test) {
+            None
+        } else {
+            let (tx, rx) = channel::<Vec<(String, u64)>>();
+            std::thread::spawn(move || {
+                // one incremental scanner per account: a rescan reads only new bytes
+                let mut scanners: HashMap<String, crate::cost::UsageScanner> = HashMap::new();
+                loop {
+                    let since = crate::cost::now_unix().saturating_sub(5 * 3600);
+                    let mut v = Vec::new();
+                    for name in crate::account::cycle() {
+                        let dir = if name == "default" {
+                            crate::cost::config_dirs().into_iter().next()
+                        } else {
+                            crate::account::dir_for(&name)
+                        };
+                        if let Some(d) = dir {
+                            let used = scanners.entry(name.clone()).or_default().scan(&d, since);
+                            v.push((name, used));
+                        }
+                    }
+                    if tx.send(v).is_err() {
+                        break; // dashboard gone
+                    }
+                    std::thread::sleep(Duration::from_secs(120));
+                }
+            });
+            Some(rx)
+        };
         App {
+            usage_rx,
+            usage5h: Vec::new(),
             cost_tx,
             cost_rx,
             cost_inflight: HashSet::new(),
@@ -267,8 +346,13 @@ impl App {
             op_root: PathBuf::new(),
             op_repo: String::new(),
             checks: HashMap::new(),
+            all_rows: Vec::new(),
             rows: Vec::new(),
             sel: 0,
+            filter: String::new(),
+            folded: HashSet::new(),
+            comments: HashMap::new(),
+            diff_cursor: 0,
             tab: Tab::Preview,
             modal: Modal::None,
             preview: String::new(),
@@ -417,6 +501,11 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
         }
         poll_checks(&mut app);
         drain_costs(&mut app);
+        if let Some(rx) = &app.usage_rx {
+            while let Ok(v) = rx.try_recv() {
+                app.usage5h = v;
+            }
+        }
         term.draw(|f| ui(f, &mut app))?;
 
         if event::poll(Duration::from_millis(200))? {
@@ -905,11 +994,167 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
+        Modal::Filter { text } => {
+            match key.code {
+                // Enter keeps the filter applied; Esc clears it
+                KeyCode::Enter => app.modal = Modal::None,
+                KeyCode::Esc => {
+                    app.modal = Modal::None;
+                    app.filter.clear();
+                    apply_view(app);
+                    load_detail(app);
+                }
+                KeyCode::Backspace => {
+                    text.pop();
+                    app.filter = text.clone();
+                    apply_view(app);
+                    load_detail(app);
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    text.push(c);
+                    app.filter = text.clone();
+                    apply_view(app);
+                    load_detail(app);
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::Tags { repo, task, text } => {
+            match key.code {
+                KeyCode::Enter => {
+                    let (repo, task) = (repo.clone(), task.clone());
+                    let words: Vec<String> = text.split([',', ' ']).map(String::from).collect();
+                    app.modal = Modal::None;
+                    let tags = status::edit_tags(&[], &words);
+                    match status::update(&repo, &task, |s| s.tags = tags.clone()) {
+                        Ok(_) if tags.is_empty() => app.set_info(format!("cleared tags on '{task}'")),
+                        Ok(_) => app.set_info(format!("'{task}' tagged #{}", tags.join(" #"))),
+                        Err(e) => app.set_err(e),
+                    }
+                    refresh(app);
+                }
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => text.push(c),
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::Comment { session, task, loc, code, text } => {
+            match key.code {
+                KeyCode::Enter => {
+                    let note = text.trim().to_string();
+                    let (session, task) = (session.clone(), task.clone());
+                    let line = comment_line(loc, code, &note);
+                    app.modal = Modal::None;
+                    if !note.is_empty() {
+                        app.comments.entry(session).or_default().push(line);
+                        let n = app.comments.values().map(|v| v.len()).sum::<usize>();
+                        app.set_info(format!(
+                            "comment queued for '{task}' — sent when it is ● ready ({n} pending)"
+                        ));
+                        deliver_comments(app);
+                    }
+                }
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => text.push(c),
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::Compare { repo, root, group, sel, confirm } => {
+            let members = compare_members(&app.all_rows, repo, group);
+            let n = members.len();
+            if *confirm {
+                match key.code {
+                    KeyCode::Char('y') => {
+                        let keep = members.get(*sel).map(|r| r.task.clone()).unwrap_or_default();
+                        let drop: Vec<String> =
+                            members.iter().map(|r| r.task.clone()).filter(|t| *t != keep).collect();
+                        let (repo, root) = (repo.clone(), root.clone());
+                        app.modal = Modal::None;
+                        let mut failed = Vec::new();
+                        for t in &drop {
+                            if let Err(e) = worktree::rm_in(&repo, &root, t, false) {
+                                failed.push(format!("{t} ({e})"));
+                            }
+                        }
+                        if failed.is_empty() {
+                            app.set_info(format!("kept '{keep}', removed {}", drop.len()));
+                        } else {
+                            app.set_err(format!("kept '{keep}'; could not remove: {}", failed.join(", ")));
+                        }
+                        refresh(app);
+                        load_detail(app);
+                    }
+                    KeyCode::Char('n') | KeyCode::Esc => *confirm = false,
+                    _ => {}
+                }
+                return Ok(false);
+            }
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('=') => app.modal = Modal::None,
+                KeyCode::Char('j') | KeyCode::Down if n > 0 => *sel = (*sel + 1) % n,
+                KeyCode::Char('k') | KeyCode::Up if n > 0 => *sel = (*sel + n - 1) % n,
+                KeyCode::Char('v') => {
+                    // run every member's checks (async; results fill the CHECK column)
+                    let jobs: Vec<(String, PathBuf, PathBuf)> = members
+                        .iter()
+                        .filter_map(|r| r.path.clone().map(|p| (r.session.clone(), r.root.clone(), p)))
+                        .collect();
+                    for (session, root, wt) in jobs {
+                        spawn_check(app, &session, &root, &wt);
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char('K') if n > 1 => *confirm = true,
+                _ => {}
+            }
+            return Ok(false);
+        }
         Modal::Matrix(_) | Modal::Help => {
             app.modal = Modal::None;
             return Ok(false);
         }
         Modal::None => {}
+    }
+
+    // Board view: h/l move between columns, j/k within one (Enter etc. act as usual).
+    if app.view == View::Board {
+        let dir = match key.code {
+            KeyCode::Char('h') | KeyCode::Left => Some((-1, 0)),
+            KeyCode::Char('l') | KeyCode::Right => Some((1, 0)),
+            KeyCode::Char('j') | KeyCode::Down => Some((0, 1)),
+            KeyCode::Char('k') | KeyCode::Up => Some((0, -1)),
+            _ => None,
+        };
+        if let Some((dx, dy)) = dir {
+            if let Some(i) = board_move(app, dx, dy) {
+                select_to(app, i);
+            }
+            return Ok(false);
+        }
+    }
+
+    // Diff tab: Shift+↑↓ moves a line cursor (a `C` comment attaches to that line).
+    if app.tab == Tab::Diff && key.modifiers.contains(KeyModifiers::SHIFT) {
+        match key.code {
+            KeyCode::Up => {
+                app.diff_cursor = app.diff_cursor.saturating_sub(1);
+                return Ok(false);
+            }
+            KeyCode::Down => {
+                let max = app.diff_text.lines().count().saturating_sub(1);
+                app.diff_cursor = (app.diff_cursor + 1).min(max);
+                return Ok(false);
+            }
+            _ => {}
+        }
     }
 
     // Shift+Up/Down scroll the active pane. `scroll` means "lines away from the
@@ -952,7 +1197,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     let was_g = std::mem::replace(&mut app.pending_g, false);
     match key.code {
         // `q` closes the table overlay first (layered, like lazygit); only quits at the base.
-        KeyCode::Char('q') if app.view == View::Table => app.view = View::Split,
+        KeyCode::Char('q') if app.view != View::Split => app.view = View::Split,
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         // vim navigation: gg/G jump to ends, Ctrl-d/Ctrl-u half-page
@@ -972,9 +1217,59 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
         // toggle the fleet-table overlay (k9s-style; esc also closes it)
         KeyCode::Char('t') => {
-            app.view = if app.view == View::Split { View::Table } else { View::Split };
+            app.view = if app.view == View::Table { View::Split } else { View::Table };
         }
-        KeyCode::Esc if app.view == View::Table => app.view = View::Split,
+        // toggle the board (kanban columns by state)
+        KeyCode::Char('B') => {
+            app.view = if app.view == View::Board { View::Split } else { View::Board };
+        }
+        KeyCode::Esc if app.view != View::Split => app.view = View::Split,
+        KeyCode::Char('/') => {
+            app.modal = Modal::Filter { text: app.filter.clone() };
+        }
+        KeyCode::Esc if !app.filter.is_empty() => {
+            app.filter.clear();
+            apply_view(app);
+            load_detail(app);
+        }
+        KeyCode::Char('P') => {
+            if let Some((repo, task, pinned)) = app.selected().map(|r| (r.repo.clone(), r.task.clone(), r.pinned)) {
+                match status::update(&repo, &task, |s| s.pinned = !pinned) {
+                    Ok(_) => app.set_info(if pinned { format!("unpinned '{task}'") } else { format!("pinned '{task}'") }),
+                    Err(e) => app.set_err(e),
+                }
+                refresh(app);
+            }
+        }
+        KeyCode::Char('T') => {
+            if let Some(r) = app.selected() {
+                app.modal = Modal::Tags { repo: r.repo.clone(), task: r.task.clone(), text: r.tags.join(" ") };
+            }
+        }
+        KeyCode::Char('z') => toggle_fold(app),
+        // move the agent to the next Claude account (a running one restarts there and
+        // continues) — the manual failover when it hits a usage limit
+        KeyCode::Char('A') => {
+            if let Some(r) = app.selected().cloned() {
+                let names = crate::account::cycle();
+                if names.len() < 2 {
+                    app.set_err("only one Claude account — add another with `wta account add <name>`");
+                } else {
+                    let cur = r.account.clone().unwrap_or_else(|| "default".into());
+                    let i = names.iter().position(|n| *n == cur).unwrap_or(0);
+                    let next = names[(i + 1) % names.len()].clone();
+                    let wt = r.path.clone().unwrap_or_default();
+                    match crate::account::switch(&r.repo, &r.task, &wt, &next) {
+                        Ok(m) => app.set_info(m),
+                        Err(e) => app.set_err(format!("{e:#}")),
+                    }
+                    refresh(app);
+                    load_detail(app);
+                }
+            }
+        }
+        KeyCode::Char('=') => open_compare(app),
+        KeyCode::Char('C') => open_comment(app),
         KeyCode::Esc if app.scrollback.is_some() => {
             app.scrollback = None; // leave Preview scroll mode, back to live output
             app.scroll = 0;
@@ -992,6 +1287,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             if !app.rows.is_empty() {
                 app.sel = (app.sel + 1) % app.rows.len();
                 app.scroll = 0;
+                app.diff_cursor = 0;
                 app.scrollback = None;
                 load_detail(app);
             }
@@ -1000,6 +1296,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             if !app.rows.is_empty() {
                 app.sel = (app.sel + app.rows.len() - 1) % app.rows.len();
                 app.scroll = 0;
+                app.diff_cursor = 0;
                 app.scrollback = None;
                 load_detail(app);
             }
@@ -1011,6 +1308,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 Tab::Preview
             };
             app.scroll = 0;
+            app.diff_cursor = 0;
             load_detail(app);
         }
         KeyCode::Enter | KeyCode::Char('o') => {
@@ -1099,7 +1397,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                             && worktree::open_editor_window(&cmd, &path);
                         if popped {
                             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("agent");
-                            app.set_info(format!("opened '{name}' in a new tmux window"));
+                            app.set_info(format!(
+                                "opened '{name}' in {}",
+                                worktree::editor_placement()
+                            ));
                         } else {
                             app.open = Some((cmd, path)); // suspend TUI + run after this frame
                         }
@@ -1169,6 +1470,253 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         _ => {}
     }
     Ok(false)
+}
+
+/// `z` — fold / unfold the selected agent's group: its own children if it has any,
+/// else the group it belongs to (its parent's children, or its fanout siblings).
+fn toggle_fold(app: &mut App) {
+    let Some(r) = app.selected().cloned() else { return };
+    let has_kids = app.all_rows.iter().any(|x| x.repo == r.repo && x.parent.as_deref() == Some(r.task.as_str()));
+    let key = if has_kids { Some(r.task.clone()) } else { r.parent.clone() };
+    let Some(key) = key else {
+        app.set_err("nothing to fold — this agent has no children or group");
+        return;
+    };
+    let k = format!("{}/{key}", r.repo);
+    let folding = !app.folded.remove(&k);
+    if folding {
+        app.folded.insert(k);
+    }
+    apply_view(app);
+    // a fold can hide the selected row: land on the parent (or the group's visible member)
+    if !app.rows.iter().any(|x| x.session == r.session) {
+        if let Some(i) = app
+            .rows
+            .iter()
+            .position(|x| x.repo == r.repo && (x.task == key || x.parent.as_deref() == Some(key.as_str())))
+        {
+            app.sel = i;
+        }
+    }
+    load_detail(app);
+}
+
+/// Members of a compare group: every agent in `repo` whose parent is `group`.
+fn compare_members<'a>(rows: &'a [Row], repo: &str, group: &str) -> Vec<&'a Row> {
+    rows.iter().filter(|r| r.repo == repo && r.parent.as_deref() == Some(group)).collect()
+}
+
+/// `=` — open the compare view for the selected agent's siblings (or its children).
+fn open_compare(app: &mut App) {
+    let Some(r) = app.selected().cloned() else { return };
+    let group = match &r.parent {
+        Some(p) => p.clone(),
+        None if app.all_rows.iter().any(|x| x.repo == r.repo && x.parent.as_deref() == Some(r.task.as_str())) => {
+            r.task.clone()
+        }
+        None => {
+            app.set_err("nothing to compare — use on a fanout agent (`wta fanout`) or a parent");
+            return;
+        }
+    };
+    let members = compare_members(&app.all_rows, &r.repo, &group);
+    let sel = members.iter().position(|m| m.session == r.session).unwrap_or(0);
+    app.modal = Modal::Compare { repo: r.repo.clone(), root: r.root.clone(), group, sel, confirm: false };
+}
+
+/// Rank a compare member: checks passed, then acceptance criteria met, then a smaller
+/// diff, then fewer tokens. Higher is better. Pure, so it is unit-tested.
+fn compare_score(check: Option<i32>, ac: Option<(u32, u32)>, delta: u32, tokens: u64) -> (u8, u32, i64, i64) {
+    let c = match check {
+        Some(0) => 2,
+        None => 1,
+        Some(_) => 0,
+    };
+    let ac_pct = ac.and_then(|(d, t)| (d * 100).checked_div(t)).unwrap_or(0);
+    (c, ac_pct, -(delta as i64), -(tokens.min(i64::MAX as u64) as i64))
+}
+
+/// Where a diff line lives: `(file, "L42")` for a `+`/context line (new-file numbering),
+/// `(file, "old L42")` for a `-` line. `None` on headers / outside any hunk.
+fn diff_location(lines: &[&str], idx: usize) -> Option<(String, String)> {
+    let mut file: Option<String> = None;
+    let (mut old, mut new) = (0u32, 0u32);
+    let mut in_hunk = false;
+    for (i, l) in lines.iter().enumerate().take(idx + 1) {
+        let here = i == idx;
+        if l.starts_with("diff --git") {
+            in_hunk = false;
+            file = None;
+            if here {
+                return None;
+            }
+            continue;
+        }
+        if let Some(f) = l.strip_prefix("+++ ") {
+            if f != "/dev/null" {
+                file = Some(f.strip_prefix("b/").unwrap_or(f).to_string());
+            }
+            if here {
+                return None;
+            }
+            continue;
+        }
+        if l.starts_with("--- ") && !in_hunk {
+            if here {
+                return None;
+            }
+            continue;
+        }
+        if l.starts_with("@@") {
+            // @@ -a,b +c,d @@
+            let mut it = l.split_whitespace().skip(1);
+            let num = |s: Option<&str>| {
+                s.and_then(|x| x[1..].split(',').next().and_then(|n| n.parse::<u32>().ok())).unwrap_or(0)
+            };
+            old = num(it.next());
+            new = num(it.next());
+            in_hunk = true;
+            if here {
+                return file.map(|f| (f, format!("L{new}")));
+            }
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        let f = file.clone().unwrap_or_default();
+        if l.starts_with('-') {
+            if here {
+                return Some((f, format!("old L{old}")));
+            }
+            old += 1;
+        } else if l.starts_with('+') {
+            if here {
+                return Some((f, format!("L{new}")));
+            }
+            new += 1;
+        } else {
+            if here {
+                return Some((f, format!("L{new}")));
+            }
+            old += 1;
+            new += 1;
+        }
+    }
+    None
+}
+
+/// One review note as the agent will read it.
+fn comment_line(loc: &str, code: &str, note: &str) -> String {
+    let code: String = code.trim().chars().take(80).collect();
+    if code.is_empty() {
+        format!("{loc}: {note}")
+    } else {
+        format!("{loc} (`{code}`): {note}")
+    }
+}
+
+/// `C` in the Diff tab — open a comment on the cursor line of the selected agent's diff.
+fn open_comment(app: &mut App) {
+    if app.tab != Tab::Diff {
+        app.set_err("comments attach to a diff line — press tab for the Diff, Shift+↑↓ to pick a line");
+        return;
+    }
+    let Some(r) = app.selected().cloned() else { return };
+    let lines: Vec<&str> = app.diff_text.lines().collect();
+    let Some((file, at)) = diff_location(&lines, app.diff_cursor) else {
+        app.set_err("pick a code line (Shift+↑↓), not a header");
+        return;
+    };
+    let code = lines.get(app.diff_cursor).copied().unwrap_or("").to_string();
+    app.modal = Modal::Comment {
+        session: r.session.clone(),
+        task: r.task.clone(),
+        loc: match at.strip_prefix("old L") {
+            Some(n) => format!("{file}:{n} (removed line)"),
+            None => format!("{file}:{}", at.trim_start_matches('L')),
+        },
+        code,
+        text: String::new(),
+    };
+}
+
+/// Send queued diff comments to every agent that is ● ready (one message per agent, so
+/// the notes arrive together). Agents still working keep theirs queued until ready.
+fn deliver_comments(app: &mut App) {
+    if app.comments.is_empty() {
+        return;
+    }
+    let ready: Vec<(String, String)> = app
+        .all_rows
+        .iter()
+        .filter(|r| r.alive && r.status == Status::Ready && app.comments.contains_key(&r.session))
+        .map(|r| (r.session.clone(), r.task.clone()))
+        .collect();
+    for (session, task) in ready {
+        let notes = app.comments.remove(&session).unwrap_or_default();
+        let msg = if notes.len() == 1 {
+            format!("Review comment on your diff — {}", notes[0])
+        } else {
+            let list: Vec<String> = notes.iter().enumerate().map(|(i, n)| format!("({}) {n}", i + 1)).collect();
+            format!("Review comments on your diff — {}", list.join("  "))
+        };
+        match tmux::send_text(&session, &msg) {
+            Ok(_) => {
+                if let Some(r) = app.all_rows.iter().find(|r| r.session == session) {
+                    status::mark_prompt_sent(&r.repo, &r.task);
+                }
+                app.set_info(format!("sent {} comment(s) → {task}", notes.len()));
+            }
+            // no automatic retry: the text may already sit in the agent's input box, and a
+            // retry would type it twice — say so and let the user check
+            Err(e) => app.set_err(format!(
+                "{} comment(s) for '{task}' not submitted ({e}) — attach (↵) to check its input",
+                notes.len()
+            )),
+        }
+    }
+    // an agent that is gone can't receive them
+    let live: HashSet<&str> = app.all_rows.iter().map(|r| r.session.as_str()).collect();
+    app.comments.retain(|k, _| live.contains(k.as_str()));
+}
+
+/// Board column for a row: 0 working · 1 needs you · 2 ready · 3 merged · 4 stopped.
+fn board_col(r: &Row) -> usize {
+    match r.status {
+        Status::Running => 0,
+        Status::NeedsInput => 1,
+        Status::Ready => 2,
+        Status::Merged => 3,
+        Status::Exited | Status::Idle => 4,
+    }
+}
+const BOARD_COLS: [&str; 5] = ["Working", "Needs you", "Ready", "Merged", "Stopped"];
+
+/// Next selection on the board: `dy` moves within the column, `dx` jumps to the nearest
+/// non-empty column that way (keeping the row position where it can).
+fn board_move(app: &App, dx: i32, dy: i32) -> Option<usize> {
+    let cur = app.selected()?;
+    let col = board_col(cur);
+    let in_col = |c: usize| -> Vec<usize> {
+        app.rows.iter().enumerate().filter(|(_, r)| board_col(r) == c).map(|(i, _)| i).collect()
+    };
+    let here = in_col(col);
+    let pos = here.iter().position(|&i| i == app.sel).unwrap_or(0);
+    if dy != 0 {
+        let n = here.len() as i32;
+        let p = (pos as i32 + dy).rem_euclid(n.max(1)) as usize;
+        return here.get(p).copied();
+    }
+    let mut c = col as i32 + dx;
+    while (0..BOARD_COLS.len() as i32).contains(&c) {
+        let v = in_col(c as usize);
+        if !v.is_empty() {
+            return v.get(pos.min(v.len() - 1)).copied();
+        }
+        c += dx;
+    }
+    None
 }
 
 /// Build the colored mergeability grid for the `m` overlay (calls git merge-tree
@@ -1707,8 +2255,10 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
         };
 
         let alive = live.contains(&session);
+        let mut limit = false;
         let status = if alive {
             let text = tmux::capture(&session).unwrap_or_default();
+            limit = crate::account::is_limit_hit(&text);
             if auto_trust && !app.trust_done.contains(&session) {
                 if is_trust_prompt(&text) {
                     let _ = tmux::send_enter(&session);
@@ -1760,7 +2310,13 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
             .as_deref()
             .and_then(crate::worktree::read_task_spec)
             .map(|s| (s.checked_ac, s.total_ac));
-        let updated_unix = states.get(&task).map(|s| s.updated_unix).unwrap_or(0);
+        let st = states.get(&task);
+        let updated_unix = st.map(|s| s.updated_unix).unwrap_or(0);
+        let pinned = st.map(|s| s.pinned).unwrap_or(false);
+        let tags = st.map(|s| s.tags.clone()).unwrap_or_default();
+        let parent = st.and_then(|s| s.parent.clone()).filter(|p| !p.is_empty() && *p != task);
+        let sleeping = status == Status::Exited && st.map(|s| s.sleeping).unwrap_or(false);
+        let account = st.and_then(|s| s.account.clone());
         out.push(Row {
             task,
             repo: repo.to_string(),
@@ -1777,8 +2333,196 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
             model,
             ac,
             updated_unix,
+            pinned,
+            tags,
+            parent,
+            sleeping,
+            account,
+            depth: 0,
+            header: None,
+            hidden: 0,
+            limit,
         });
     }
+}
+
+/// Order one repo's rows into a tree: pinned units first, each child right under its
+/// parent (indented), and fanout siblings — whose parent is a NAME, not an agent —
+/// gathered under one group label. `folded` holds the parent keys collapsed with `z`:
+/// a real parent hides its children; a fanout group shows only its first member.
+fn nest(rows: Vec<Row>, folded: &dyn Fn(&str) -> bool) -> Vec<Row> {
+    let tasks: HashSet<String> = rows.iter().map(|r| r.task.clone()).collect();
+    let mut kids: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        if let Some(p) = &r.parent {
+            kids.entry(p.clone()).or_default().push(i);
+        }
+    }
+    // top-level units, in list order: a lone/parent agent, or a virtual fanout group
+    enum Unit {
+        Agent(usize),
+        Group(String),
+    }
+    let mut units: Vec<Unit> = Vec::new();
+    let mut seen_groups = HashSet::new();
+    for (i, r) in rows.iter().enumerate() {
+        match &r.parent {
+            Some(p) if tasks.contains(p) => {} // drawn under its parent
+            Some(p) => {
+                if seen_groups.insert(p.clone()) {
+                    units.push(Unit::Group(p.clone()));
+                }
+            }
+            None => units.push(Unit::Agent(i)),
+        }
+    }
+    let unit_pinned = |u: &Unit| match u {
+        Unit::Agent(i) => rows[*i].pinned,
+        Unit::Group(g) => kids.get(g).map(|v| v.iter().any(|&i| rows[i].pinned)).unwrap_or(false),
+    };
+    units.sort_by_key(|u| !unit_pinned(u)); // stable: pinned first, list order kept
+
+    fn emit(
+        i: usize,
+        depth: u8,
+        rows: &[Row],
+        kids: &HashMap<String, Vec<usize>>,
+        folded: &dyn Fn(&str) -> bool,
+        done: &mut HashSet<usize>,
+        out: &mut Vec<Row>,
+    ) {
+        if !done.insert(i) {
+            return; // a parent cycle — never loop
+        }
+        let mut r = rows[i].clone();
+        r.depth = depth;
+        let children = kids.get(&r.task).cloned().unwrap_or_default();
+        let fold = !children.is_empty() && folded(&r.task);
+        if fold {
+            r.hidden = children.len() as u32;
+        }
+        out.push(r);
+        if fold {
+            hide(&children, rows, kids, done);
+        } else if depth < 3 {
+            for c in children {
+                emit(c, depth + 1, rows, kids, folded, done, out);
+            }
+        }
+    }
+    // mark folded-away rows (and their descendants) as placed, so they stay hidden
+    fn hide(ids: &[usize], rows: &[Row], kids: &HashMap<String, Vec<usize>>, done: &mut HashSet<usize>) {
+        for &i in ids {
+            if done.insert(i) {
+                if let Some(k) = kids.get(&rows[i].task) {
+                    hide(k, rows, kids, done);
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(rows.len());
+    let mut done = HashSet::new();
+    for u in units {
+        match u {
+            Unit::Agent(i) => emit(i, 0, &rows, &kids, folded, &mut done, &mut out),
+            Unit::Group(g) => {
+                let members = kids.get(&g).cloned().unwrap_or_default();
+                let fold = folded(&g);
+                let start = out.len();
+                for (n, &m) in members.iter().enumerate() {
+                    if fold && n > 0 {
+                        hide(&members[n..], &rows, &kids, &mut done);
+                        break;
+                    }
+                    emit(m, 1, &rows, &kids, folded, &mut done, &mut out);
+                }
+                if let Some(first) = out.get_mut(start) {
+                    first.header = Some(g.clone());
+                    if fold {
+                        first.hidden = members.len().saturating_sub(1) as u32;
+                    }
+                }
+            }
+        }
+    }
+    // anything unreachable (a parent cycle) still shows, flat — never drop an agent
+    for (i, r) in rows.iter().enumerate() {
+        if !done.contains(&i) {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
+/// The status word a filter term can match (`running`, `needs`, `sleeping`, …).
+fn status_word(r: &Row) -> &'static str {
+    if r.sleeping {
+        return "sleeping";
+    }
+    match r.status {
+        Status::Running => "running",
+        Status::Ready => "ready",
+        Status::NeedsInput => "needs-input",
+        Status::Merged => "merged",
+        Status::Exited => "exited",
+        Status::Idle => "idle",
+    }
+}
+
+/// Does `r` match EVERY whitespace-separated term of `filter`? `#x` matches a tag
+/// prefix; `is:pinned` / `is:<state>` match flags; anything else is a case-insensitive
+/// substring of the task, repo, base, a tag, the state word, or the account.
+fn row_matches(r: &Row, filter: &str) -> bool {
+    filter.split_whitespace().all(|term| {
+        let t = term.to_lowercase();
+        if let Some(tag) = t.strip_prefix('#') {
+            return r.tags.iter().any(|x| x.starts_with(tag));
+        }
+        if let Some(flag) = t.strip_prefix("is:") {
+            return match flag {
+                "pinned" | "pin" => r.pinned,
+                "child" => r.parent.is_some(),
+                f => status_word(r).starts_with(f),
+            };
+        }
+        r.task.to_lowercase().contains(&t)
+            || r.repo_name.to_lowercase().contains(&t)
+            || r.base.to_lowercase().contains(&t)
+            || r.tags.iter().any(|x| x.contains(&t))
+            || status_word(r).starts_with(&t)
+            || r.account.as_deref().map(|a| a.to_lowercase().contains(&t)).unwrap_or(false)
+    })
+}
+
+/// Rebuild the visible `rows` from `all_rows`: nest + fold each repo group, then apply
+/// the `/` filter (a filter shows matches even inside folded groups). Cheap — no git
+/// or tmux — so typing a filter or folding re-renders instantly. Keeps the selection.
+fn apply_view(app: &mut App) {
+    let prev = app.selected().map(|r| r.session.clone());
+    let filtering = !app.filter.trim().is_empty();
+    let mut out: Vec<Row> = Vec::with_capacity(app.all_rows.len());
+    let mut i = 0;
+    while i < app.all_rows.len() {
+        let repo = app.all_rows[i].repo.clone();
+        let mut j = i;
+        while j < app.all_rows.len() && app.all_rows[j].repo == repo {
+            j += 1;
+        }
+        let group: Vec<Row> = app.all_rows[i..j].to_vec();
+        let folded = &app.folded;
+        let is_folded = |k: &str| !filtering && folded.contains(&format!("{repo}/{k}"));
+        out.extend(nest(group, &is_folded));
+        i = j;
+    }
+    if filtering {
+        out.retain(|r| row_matches(r, &app.filter));
+    }
+    app.rows = out;
+    app.sel = prev
+        .and_then(|s| app.rows.iter().position(|r| r.session == s))
+        .unwrap_or(app.sel)
+        .min(app.rows.len().saturating_sub(1));
 }
 
 /// Fold in any cost results the worker finished since the last frame, updating both
@@ -1791,7 +2535,7 @@ fn drain_costs(app: &mut App) {
         updated = true;
     }
     if updated {
-        for r in &mut app.rows {
+        for r in app.rows.iter_mut().chain(app.all_rows.iter_mut()) {
             if let Some((u, m)) = app.costcache.get(&r.session) {
                 r.cost = u.clone();
                 r.model = m.clone();
@@ -1821,14 +2565,16 @@ fn refresh(app: &mut App) {
     for (repo, root) in &targets {
         repo_rows(app, repo, root, &live, &mut rows);
     }
-    app.rows = rows;
+    app.all_rows = rows;
+    apply_view(app);
     app.sel = prev_sel
         .and_then(|s| app.rows.iter().position(|r| r.session == s))
-        .unwrap_or(0)
+        .unwrap_or(app.sel)
         .min(app.rows.len().saturating_sub(1));
 
-    // caches are keyed by session (globally unique)
-    let live: HashSet<String> = app.rows.iter().map(|r| r.session.clone()).collect();
+    // caches are keyed by session (globally unique) — over ALL agents, not just the
+    // filtered view, so a filter never throws away a hidden agent's cached numbers
+    let live: HashSet<String> = app.all_rows.iter().map(|r| r.session.clone()).collect();
     app.hashes.retain(|k, _| live.contains(k));
     app.diffcache.retain(|k, _| live.contains(k));
     app.costcache.retain(|k, _| live.contains(k));
@@ -1841,7 +2587,7 @@ fn refresh(app: &mut App) {
     let sel_now = app.rows.get(app.sel).map(|r| r.session.clone());
     let mut to_check: Vec<(String, PathBuf, PathBuf)> = Vec::new(); // (session, root, worktree)
     let mut invalidate: Vec<String> = Vec::new();
-    for r in &app.rows {
+    for r in &app.all_rows {
         let now = r.status;
         let prev = app.prev_status.get(&r.session).copied();
 
@@ -1866,7 +2612,7 @@ fn refresh(app: &mut App) {
     }
     // mirror status changes into the attached status-bar chip (only on change, so a
     // quiet fleet costs no tmux calls)
-    for r in app.rows.iter().filter(|r| r.alive) {
+    for r in app.all_rows.iter().filter(|r| r.alive) {
         if app.prev_status.get(&r.session) != Some(&r.status) {
             let s = match r.status {
                 Status::Running => "running",
@@ -1879,7 +2625,7 @@ fn refresh(app: &mut App) {
             tmux::set_status_chip(&r.session, s);
         }
     }
-    app.prev_status = app.rows.iter().map(|r| (r.session.clone(), r.status)).collect();
+    app.prev_status = app.all_rows.iter().map(|r| (r.session.clone(), r.status)).collect();
     app.attention.retain(|s| live.contains(s));
     app.checks.retain(|s, c| {
         if live.contains(s) {
@@ -1897,6 +2643,7 @@ fn refresh(app: &mut App) {
     for (session, root, wt) in to_check {
         spawn_check(app, &session, &root, &wt);
     }
+    deliver_comments(app);
 }
 
 /// Claude Code's per-folder trust dialog. Matches BOTH wording generations
@@ -1927,6 +2674,7 @@ fn select_to(app: &mut App, idx: usize) {
     }
     app.sel = idx.min(app.rows.len() - 1);
     app.scroll = 0;
+    app.diff_cursor = 0;
     app.scrollback = None;
     load_detail(app);
 }
@@ -2025,6 +2773,9 @@ fn ui(f: &mut Frame, app: &mut App) {
         render_table(f, app, parts[0]);
         render_chart_panel(f, app, parts[1]);
     }
+    if app.view == View::Board {
+        render_board(f, app, root[1]);
+    }
     render_modal(f, app);
 }
 
@@ -2094,6 +2845,18 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
             format!("   Σ {} tok", crate::cost::human_tokens(tok)),
             Style::default().fg(Color::Yellow),
         ));
+    }
+    // last-5h tokens per account (the usage-limit window); one account shows no name
+    if !app.usage5h.is_empty() {
+        let parts: Vec<String> = if app.usage5h.len() == 1 {
+            vec![crate::cost::human_tokens(app.usage5h[0].1)]
+        } else {
+            app.usage5h.iter().map(|(n, t)| format!("{n} {}", crate::cost::human_tokens(*t))).collect()
+        };
+        spans.push(Span::styled(format!("   5h {}", parts.join(" · ")), muted));
+    }
+    if !app.filter.trim().is_empty() {
+        spans.push(Span::styled(format!("   /{}", app.filter.trim()), Style::default().fg(GREEN)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -2226,7 +2989,10 @@ fn render_chart_panel(f: &mut Frame, app: &App, area: Rect) {
 fn render_list(f: &mut Frame, app: &App, area: Rect) {
     let base = if app.global { "Agents · all repos" } else { "Instances" };
     let sum = status_summary(app.rows.iter());
-    let title = if sum.is_empty() { format!(" {base} ") } else { format!(" {base} · {sum} ") };
+    let mut title = if sum.is_empty() { format!(" {base} ") } else { format!(" {base} · {sum} ") };
+    if !app.filter.trim().is_empty() {
+        title.push_str(&format!("· /{} ({}/{}) ", app.filter.trim(), app.rows.len(), app.all_rows.len()));
+    }
     let block = Block::default()
         .borders(Borders::ALL).border_type(BorderType::Rounded)
         .border_style(Style::default().fg(HL))
@@ -2251,9 +3017,21 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
             ])));
             last_repo = Some(r.repo.clone());
         }
-        // finished-but-unviewed agents get a bright review glyph; needs-input keeps ▲
+        let base_indent = if app.global { "   " } else { " " };
+        // a fanout group label above its first member: `⑂ name ×N`
+        if let Some(g) = &r.header {
+            let n = app.all_rows.iter().filter(|x| x.repo == r.repo && x.parent.as_deref() == Some(g.as_str())).count();
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!("{base_indent}⑂ {g} "), Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("×{n}  = compare"), Style::default().fg(Color::DarkGray)),
+            ])));
+        }
+        // finished-but-unviewed agents get a bright review glyph; needs-input keeps ▲;
+        // an agent stopped on purpose (`s`) sleeps: a dim `z` instead of the red ✗
         let glyph = if app.attention.contains(&r.session) && r.status != Status::NeedsInput {
             Span::styled("◆ ".to_string(), Style::default().fg(Color::LightYellow))
+        } else if r.sleeping {
+            Span::styled("z ".to_string(), Style::default().fg(Color::DarkGray))
         } else {
             status_glyph(app, r.status)
         };
@@ -2263,16 +3041,29 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
             Check::Done { code: 0, .. } => Span::styled("✓ ".to_string(), Style::default().fg(GREEN_BRIGHT)),
             Check::Done { .. } => Span::styled("✗ ".to_string(), Style::default().fg(RED)),
         });
-        let extra = if check.is_some() { 2 } else { 0 };
-        // indent agents under the repo header in the global tree
+        // queued diff comments waiting for this agent to be ready
+        let pending = app.comments.get(&r.session).map(|v| v.len()).unwrap_or(0);
+        let note: Option<Span> =
+            (pending > 0).then(|| Span::styled(format!("✎{pending} "), Style::default().fg(Color::Yellow)));
+        let fold: Option<Span> =
+            (r.hidden > 0).then(|| Span::styled(format!("+{} ", r.hidden), Style::default().fg(Color::DarkGray)));
+        let extra = if check.is_some() { 2 } else { 0 }
+            + note.as_ref().map(|s| s.content.width()).unwrap_or(0)
+            + fold.as_ref().map(|s| s.content.width()).unwrap_or(0);
+        // indent agents under the repo header in the global tree, children under parents
+        let tree = if r.depth > 0 { format!("{}└ ", "  ".repeat(r.depth as usize - 1)) } else { String::new() };
+        let pin = if r.pinned { "★ " } else { "" };
         let head_txt = if app.global {
-            format!("   {}", r.task)
+            format!("{base_indent}{tree}{pin}{}", r.task)
         } else {
-            format!(" {}. {}", i + 1, r.task)
+            format!(" {}. {tree}{pin}{}", i + 1, r.task)
         };
         let head = truncate_cols(&head_txt, inner_w.saturating_sub(2 + extra));
         let pad1 = inner_w.saturating_sub(head.width() + 2 + extra);
-        let mut spans1 = vec![Span::raw(head), Span::raw(" ".repeat(pad1))];
+        let head_style = if r.sleeping { Style::default().fg(Color::DarkGray) } else { Style::default() };
+        let mut spans1 = vec![Span::styled(head, head_style), Span::raw(" ".repeat(pad1))];
+        spans1.extend(fold);
+        spans1.extend(note);
         if let Some(c) = check {
             spans1.push(c);
         }
@@ -2288,8 +3079,13 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         let counts_len = format!("{tok_str}+{},-{} ", r.added, r.removed).width();
         // Show the BASE branch each agent targets (its working branch is always
         // `agent/<task>` = the line-1 name, so it carries no extra info).
-        let indent = if app.global { "     Ꮧ " } else { "   Ꮧ " };
-        let bhead = truncate_cols(&format!("{indent}{}", r.base), inner_w.saturating_sub(counts_len));
+        let indent = format!("{}{}", if app.global { "     " } else { "   " }, "  ".repeat(r.depth as usize));
+        let tags = if r.tags.is_empty() { String::new() } else { format!("  #{}", r.tags.join(" #")) };
+        let mut acct = r.account.as_deref().map(|a| format!("  @{a}")).unwrap_or_default();
+        if r.limit {
+            acct.push_str("  ⚠ limit — A");
+        }
+        let bhead = truncate_cols(&format!("{indent}Ꮧ {}{tags}{acct}", r.base), inner_w.saturating_sub(counts_len));
         let pad2 = inner_w.saturating_sub(bhead.width() + counts_len);
         let line2 = Line::from(vec![
             Span::styled(bhead, Style::default().fg(Color::DarkGray)),
@@ -2303,6 +3099,12 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
             sel_visual = Some(items.len());
         }
         items.push(ListItem::new(vec![line1, line2, Line::from("")]));
+    }
+    if items.is_empty() && !app.filter.trim().is_empty() {
+        items.push(ListItem::new(Line::styled(
+            format!("  nothing matches /{} — esc clears", app.filter.trim()),
+            Style::default().fg(Color::DarkGray),
+        )));
     }
     if items.is_empty() {
         let msg = if app.global {
@@ -2342,7 +3144,7 @@ fn render_right(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(inner);
 
-    let tabs = Tabs::new(vec!["Preview", "Diff"])
+    let tabs = Tabs::new(vec!["Preview", if app.tab == Tab::Diff { "Diff · ⇧↑↓ line · C comment" } else { "Diff" }])
         .select(if app.tab == Tab::Preview { 0 } else { 1 })
         .style(Style::default().fg(Color::DarkGray))
         .highlight_style(
@@ -2386,10 +3188,24 @@ fn render_right(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::raw("  "),
                 Span::styled(format!("{d} deletions(-)"), Style::default().fg(DEL)),
             ])];
-            for l in app.diff_text.lines() {
-                lines.push(colorize_diff_line(l));
+            let n = app.diff_text.lines().count();
+            app.diff_cursor = app.diff_cursor.min(n.saturating_sub(1));
+            let has_diff = n > 0 && app.diff_text != "No changes." && app.diff_text != "No worktree.";
+            for (i, l) in app.diff_text.lines().enumerate() {
+                let mut line = colorize_diff_line(l);
+                if has_diff && i == app.diff_cursor {
+                    line = line.patch_style(Style::default().add_modifier(Modifier::REVERSED));
+                }
+                lines.push(line);
             }
             let max_off = lines.len().saturating_sub(body_h) as u16;
+            // keep the cursor line (+1 for the counts header) inside the window
+            let cur = app.diff_cursor as u16 + 1;
+            if cur < app.scroll {
+                app.scroll = cur;
+            } else if body_h > 0 && cur >= app.scroll + body_h as u16 {
+                app.scroll = cur + 1 - body_h as u16;
+            }
             app.scroll = app.scroll.min(max_off);
             (Text::from(lines), app.scroll)
         }
@@ -2449,8 +3265,10 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" edit  │  ", muted),
             Span::styled("tab", action),
             Span::styled(" switch  ", muted),
-            Span::styled("t", action),
-            Span::styled(" table  ", muted),
+            Span::styled("t/B", action),
+            Span::styled(" table/board  ", muted),
+            Span::styled("/", action),
+            Span::styled(" filter  ", muted),
             Span::styled("?", action),
             Span::styled(" help  ", muted),
             Span::styled("q", action),
@@ -2908,6 +3726,66 @@ fn render_modal(f: &mut Frame, app: &App) {
             );
             f.render_widget(p, area);
         }
+        Modal::Filter { text } => {
+            let area = centered(64, 4, f.area());
+            f.render_widget(Clear, area);
+            let body = vec![
+                Line::raw(format!("{text}▏")),
+                Line::styled(
+                    format!("{} shown · #tag · is:pinned · is:needs · Enter keep · Esc clear", app.rows.len()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ];
+            f.render_widget(
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(GREEN))
+                        .title(" filter agents "),
+                ),
+                area,
+            );
+        }
+        Modal::Tags { task, text, .. } => {
+            let area = centered(60, 4, f.area());
+            f.render_widget(Clear, area);
+            let body = vec![
+                Line::raw(format!("{text}▏")),
+                Line::styled("space-separated · empty clears · Enter save · Esc cancel", Style::default().fg(Color::DarkGray)),
+            ];
+            f.render_widget(
+                Paragraph::new(body).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(GREEN))
+                        .title(format!(" tags for '{task}' ")),
+                ),
+                area,
+            );
+        }
+        Modal::Comment { task, loc, code, text, .. } => {
+            let area = centered(72, 7, f.area());
+            f.render_widget(Clear, area);
+            let inner = area.width.saturating_sub(4) as usize;
+            let body = vec![
+                Line::styled(truncate_cols(loc, inner), Style::default().fg(GREEN)),
+                Line::styled(truncate_cols(code.trim_end(), inner), Style::default().fg(Color::DarkGray)),
+                Line::raw(""),
+                Line::raw(format!("{text}▏")),
+            ];
+            f.render_widget(
+                Paragraph::new(body).wrap(ratatui::widgets::Wrap { trim: false }).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(GREEN))
+                        .title(format!(" comment for '{task}' (Enter queues · sent when ready · Esc) ")),
+                ),
+                area,
+            );
+        }
+        Modal::Compare { repo, group, sel, confirm, .. } => {
+            render_compare(f, app, repo, group, *sel, *confirm);
+        }
         Modal::Matrix(lines) => {
             let h = (lines.len() as u16 + 2).min(f.area().height);
             let w = 78u16.min(f.area().width);
@@ -2924,7 +3802,7 @@ fn render_modal(f: &mut Frame, app: &App) {
             );
         }
         Modal::Help => {
-            let area = centered(56, 26, f.area());
+            let area = centered(64, 34, f.area());
             f.render_widget(Clear, area);
             let k = |key: &str, desc: &str| {
                 Line::from(vec![
@@ -2941,12 +3819,19 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("Ctrl-d/u", "half-page down / up"),
                 k("J / K", "reorder down / up"),
                 k("t", "fleet table + per-agent chart (esc/q closes)"),
+                k("B", "board: columns by state (h/l/j/k move)"),
+                k("/", "filter: name, repo, #tag, is:pinned, is:needs…"),
+                k("P / T", "pin to top / edit tags"),
+                k("z", "fold / unfold a parent's children or a fanout group"),
+                k("=", "compare a fanout group; keep the best one"),
+                k("C", "Diff tab: comment on the line (⇧↑↓), sent when ready"),
                 k("m", "mergeability matrix (conflict preview)"),
                 k("↵ / o", "attach into the agent (type here)"),
                 k("i", "send one line to the agent (when ● ready)"),
                 k("c", "copy mode: vi-style scroll/search/select/yank of the conversation (Alt-y while attached)"),
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
-                k("e", "open the worktree in nvim (new tmux window) / $EDITOR"),
+                k("e", "open the worktree in nvim (split beside the dash) / $EDITOR"),
+                k("A", "move the agent to the next Claude account (usage limit?)"),
                 k(",", "settings: editor, default agent/model/effort, hint bar"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("Alt-] / [", "while attached: jump to next / previous agent (no dashboard)"),
@@ -2957,7 +3842,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("N", "new agent with an initial prompt"),
                 k("a", "adopt an existing Claude session as an agent"),
                 k("s", "stop (keep worktree — resume later)"),
-                k("glyphs", "⠋ running · ● ready · ▲ needs input · ✓ merged · ✗ exited"),
+                k("glyphs", "⠋ running · ● ready · ▲ needs input · ✓ merged · ✗ exited · z asleep"),
                 k("D", "kill (destroy worktree + branch)"),
                 k("p", "commit + push + open a PR"),
                 k("b", "new agent based on an existing branch"),
@@ -2984,6 +3869,129 @@ fn render_modal(f: &mut Frame, app: &App) {
             );
         }
         Modal::None => {}
+    }
+}
+
+/// The `=` compare overlay: one line per sibling with its checks, acceptance criteria,
+/// diff size, tokens and estimated $, best-ranked marked ★. Enter keeps one.
+fn render_compare(f: &mut Frame, app: &App, repo: &str, group: &str, sel: usize, confirm: bool) {
+    let members = compare_members(&app.all_rows, repo, group);
+    let check_of = |r: &Row| match app.checks.get(&r.session) {
+        Some(Check::Done { code }) => Some(*code),
+        _ => None,
+    };
+    let best = members
+        .iter()
+        .enumerate()
+        .rev() // ties go to the first member
+        .max_by_key(|(_, r)| compare_score(check_of(r), r.ac, r.added + r.removed, r.cost.tokens()))
+        .map(|(i, _)| i);
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines = vec![Line::styled(
+        format!("  {:<22} {:<6} {:<6} {:>12} {:>7} {:>8}  STATE", "AGENT", "CHECK", "AC", "Δ", "TOK", "~$"),
+        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+    )];
+    for (i, r) in members.iter().enumerate() {
+        let check = match app.checks.get(&r.session) {
+            Some(Check::Running { .. }) => "⟳".to_string(),
+            Some(Check::Done { code: 0 }) => "✓ pass".to_string(),
+            Some(Check::Done { .. }) => "✗ fail".to_string(),
+            None => "-".to_string(),
+        };
+        let ac = r.ac.map(|(c, t)| format!("{c}/{t}")).unwrap_or_else(|| "-".into());
+        let mark = if Some(i) == best && members.len() > 1 { "★" } else { " " };
+        let line = format!(
+            "{mark} {:<22} {:<6} {:<6} {:>12} {:>7} {:>8}  {}",
+            truncate_cols(&r.task, 22),
+            check,
+            ac,
+            format!("+{}/-{}", r.added, r.removed),
+            crate::cost::human_tokens(r.cost.tokens()),
+            format!("{:.2}", r.cost.est_usd),
+            status_word(r),
+        );
+        let style = if i == sel {
+            Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(GREEN_SOFT)
+        };
+        lines.push(Line::styled(line, style));
+    }
+    if members.is_empty() {
+        lines.push(Line::styled("  (no members left)", dim));
+    }
+    lines.push(Line::raw(""));
+    if confirm {
+        let keep = members.get(sel).map(|r| r.task.as_str()).unwrap_or("");
+        lines.push(Line::from(vec![
+            Span::styled(format!(" keep '{keep}' and remove the other {}? ", members.len().saturating_sub(1)), Style::default().fg(Color::Yellow)),
+            Span::styled("y", Style::default().fg(RED)),
+            Span::raw(" / "),
+            Span::styled("n", Style::default().fg(GREEN)),
+            Span::styled("  (agents with uncommitted work are kept)", dim),
+        ]));
+    } else {
+        lines.push(Line::styled(
+            " ★ = checks › AC › smaller diff › fewer tokens    v run checks · ↵ keep one · esc",
+            dim,
+        ));
+    }
+    let w = 92u16.min(f.area().width);
+    let area = centered(w, lines.len() as u16 + 2, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL).border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(HL))
+                .title(format!(" compare '{group}' ")),
+        ),
+        area,
+    );
+}
+
+/// The board (`B`): one column per state, a card per agent (task, repo, tokens).
+fn render_board(f: &mut Frame, app: &App, area: Rect) {
+    f.render_widget(Clear, area);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 5); 5])
+        .split(area);
+    let colors = [Color::Reset, Color::Yellow, GREEN, Color::Cyan, Color::DarkGray];
+    for (c, name) in BOARD_COLS.iter().enumerate() {
+        let inner_w = cols[c].width.saturating_sub(2) as usize;
+        let mut items: Vec<ListItem> = Vec::new();
+        let mut sel_item = None;
+        for (i, r) in app.rows.iter().enumerate().filter(|(_, r)| board_col(r) == c) {
+            if i == app.sel {
+                sel_item = Some(items.len());
+            }
+            let pin = if r.pinned { "★ " } else { "" };
+            let attn = if app.attention.contains(&r.session) { "◆ " } else { "" };
+            let mut meta = r.repo_name.clone();
+            if r.cost.tokens() > 0 {
+                meta.push_str(&format!(" · {}", crate::cost::human_tokens(r.cost.tokens())));
+            }
+            let tags = if r.tags.is_empty() { String::new() } else { format!("#{}", r.tags.join(" #")) };
+            items.push(ListItem::new(vec![
+                Line::raw(truncate_cols(&format!(" {attn}{pin}{}", r.task), inner_w)),
+                Line::styled(truncate_cols(&format!("   {meta}"), inner_w), Style::default().fg(Color::DarkGray)),
+                Line::styled(truncate_cols(&format!("   {tags}"), inner_w), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        let n = items.len();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(if sel_item.is_some() { GREEN_BRIGHT } else { HL }))
+                    .title(Span::styled(format!(" {name} {n} "), Style::default().fg(colors[c]).add_modifier(Modifier::BOLD))),
+            )
+            .highlight_style(Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD));
+        let mut st = ListState::default();
+        st.select(sel_item);
+        f.render_stateful_widget(list, cols[c], &mut st);
     }
 }
 
@@ -3035,7 +4043,145 @@ mod tests {
             model: None,
             ac: None,
             updated_unix: 0,
+            pinned: false,
+            tags: Vec::new(),
+            parent: None,
+            sleeping: false,
+            account: None,
+            depth: 0,
+            header: None,
+            hidden: 0,
+            limit: false,
         }
+    }
+
+    fn kid(task: &str, parent: &str) -> Row {
+        let mut r = row(task, Status::Ready, true, 0, 0);
+        r.parent = Some(parent.into());
+        r
+    }
+
+    fn tasks(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(|r| format!("{}{}", "  ".repeat(r.depth as usize), r.task)).collect()
+    }
+
+    #[test]
+    fn nest_puts_children_under_parents_and_groups_fanouts() {
+        let mut pinned = row("late", Status::Ready, true, 0, 0);
+        pinned.pinned = true;
+        let rows = vec![
+            row("builder", Status::Ready, true, 0, 0),
+            kid("fix-1", "fix"),
+            row("solo", Status::Ready, true, 0, 0),
+            kid("review-builder", "builder"),
+            kid("fix-2", "fix"),
+            pinned,
+        ];
+        let none = |_: &str| false;
+        let out = nest(rows.clone(), &none);
+        assert_eq!(
+            tasks(&out),
+            vec!["late", "builder", "  review-builder", "  fix-1", "  fix-2", "solo"]
+        );
+        assert_eq!(out[3].header.as_deref(), Some("fix"));
+        // folding: a real parent hides its children; a fanout group keeps its first member
+        let folded = |k: &str| k == "builder" || k == "fix";
+        let out = nest(rows, &folded);
+        assert_eq!(tasks(&out), vec!["late", "builder", "  fix-1", "solo"]);
+        assert_eq!(out[1].hidden, 1);
+        assert_eq!(out[2].hidden, 1);
+    }
+
+    #[test]
+    fn nest_survives_a_parent_cycle() {
+        let rows = vec![kid("a", "b"), kid("b", "a")];
+        let out = nest(rows, &|_: &str| false);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn filter_matches_terms_tags_and_flags() {
+        let mut r = row("fix-auth", Status::NeedsInput, true, 0, 0);
+        r.tags = vec!["api".into(), "backend".into()];
+        r.pinned = true;
+        assert!(row_matches(&r, "auth"));
+        assert!(row_matches(&r, "#back"));
+        assert!(row_matches(&r, "is:pinned AUTH"));
+        assert!(row_matches(&r, "is:needs"));
+        assert!(row_matches(&r, "needs"));
+        assert!(!row_matches(&r, "#web"));
+        assert!(!row_matches(&r, "auth is:running"));
+        let mut z = row("old", Status::Exited, false, 0, 0);
+        z.sleeping = true;
+        assert!(row_matches(&z, "is:sleeping"));
+    }
+
+    #[test]
+    fn diff_location_numbers_new_and_old_lines() {
+        let d = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -10,3 +10,4 @@ fn x\n ctx\n-gone\n+added\n+more\n ctx2";
+        let lines: Vec<&str> = d.lines().collect();
+        assert_eq!(diff_location(&lines, 0), None);
+        assert_eq!(diff_location(&lines, 2), None);
+        assert_eq!(diff_location(&lines, 4), Some(("src/a.rs".into(), "L10".into())));
+        assert_eq!(diff_location(&lines, 5), Some(("src/a.rs".into(), "old L11".into())));
+        assert_eq!(diff_location(&lines, 6), Some(("src/a.rs".into(), "L11".into())));
+        assert_eq!(diff_location(&lines, 7), Some(("src/a.rs".into(), "L12".into())));
+        assert_eq!(diff_location(&lines, 8), Some(("src/a.rs".into(), "L13".into())));
+        // an untracked file appended as a /dev/null diff
+        let n = "diff --git a/n.txt b/n.txt\nnew file mode 100644\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+one\n+two";
+        let nl: Vec<&str> = n.lines().collect();
+        assert_eq!(diff_location(&nl, 6), Some(("n.txt".into(), "L2".into())));
+    }
+
+    #[test]
+    fn compare_prefers_passing_checks_then_ac_then_smaller_diff() {
+        let pass = compare_score(Some(0), Some((1, 2)), 500, 9);
+        let fail = compare_score(Some(1), Some((2, 2)), 5, 1);
+        let unknown = compare_score(None, None, 5, 1);
+        assert!(pass > unknown && unknown > fail);
+        assert!(compare_score(None, Some((2, 2)), 50, 0) > compare_score(None, Some((1, 2)), 5, 0));
+        assert!(compare_score(None, None, 5, 0) > compare_score(None, None, 50, 0));
+    }
+
+    #[test]
+    fn board_renders_columns_and_moves_across() {
+        let mut app = App::new();
+        app.view = View::Board;
+        app.rows = vec![
+            row("w1", Status::Running, true, 0, 0),
+            row("n1", Status::NeedsInput, true, 0, 0),
+            row("w2", Status::Running, true, 0, 0),
+            row("r1", Status::Ready, true, 0, 0),
+        ];
+        let screen = render_to_string(&mut app, 120, 20);
+        assert!(screen.contains("Working 2"));
+        assert!(screen.contains("Needs you 1"));
+        assert!(screen.contains("Stopped 0"));
+        app.sel = 0;
+        assert_eq!(board_move(&app, 0, 1), Some(2)); // down within Working
+        assert_eq!(board_move(&app, 1, 0), Some(1)); // right → Needs you
+        app.sel = 1;
+        assert_eq!(board_move(&app, 1, 0), Some(3)); // right → Ready
+        assert_eq!(board_move(&app, -1, 0), Some(0));
+    }
+
+    #[test]
+    fn list_shows_tree_pins_tags_and_sleep() {
+        let mut app = App::new();
+        let mut p = row("builder", Status::Ready, true, 0, 0);
+        p.pinned = true;
+        p.tags = vec!["api".into()];
+        let mut c = kid("review-builder", "builder");
+        c.depth = 1;
+        let mut z = row("nap", Status::Exited, false, 0, 0);
+        z.sleeping = true;
+        app.rows = vec![p, c, z];
+        let screen = render_to_string(&mut app, 120, 24);
+        println!("{screen}");
+        assert!(screen.contains("★ builder"));
+        assert!(screen.contains("#api"));
+        assert!(screen.contains("└ review-builder"));
+        assert!(screen.contains("z "));
     }
 
     #[test]
