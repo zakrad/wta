@@ -4,6 +4,19 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The editor opened on its start screen instead of the worktree.** Inside tmux, `e` /
+  `wta open` ran the editor with the worktree only as the *cwd* and never passed it as an
+  argument, so `nvim` showed its intro rather than the directory browser. It is now passed
+  (shell-quoted, so paths with spaces survive), matching what the non-tmux paths always did.
+
+### Changed
+- **`e` / `wta open` split the CURRENT tmux window** (editor pane 70% wide) instead of
+  spawning a separate window, so the editor appears next to the dashboard you were already
+  looking at. `WTA_OPEN_SPLIT=0` restores the separate window.
+
 ## [0.3.4] — 2026-09-15
 
 ### Added

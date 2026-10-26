@@ -1099,7 +1099,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                             && worktree::open_editor_window(&cmd, &path);
                         if popped {
                             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("agent");
-                            app.set_info(format!("opened '{name}' in a new tmux window"));
+                            app.set_info(format!(
+                                "opened '{name}' in {}",
+                                worktree::editor_placement()
+                            ));
                         } else {
                             app.open = Some((cmd, path)); // suspend TUI + run after this frame
                         }
@@ -2946,7 +2949,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("i", "send one line to the agent (when ● ready)"),
                 k("c", "copy mode: vi-style scroll/search/select/yank of the conversation (Alt-y while attached)"),
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
-                k("e", "open the worktree in nvim (new tmux window) / $EDITOR"),
+                k("e", "open the worktree in nvim (split beside the dash) / $EDITOR"),
                 k(",", "settings: editor, default agent/model/effort, hint bar"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("Alt-] / [", "while attached: jump to next / previous agent (no dashboard)"),

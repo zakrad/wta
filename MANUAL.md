@@ -473,18 +473,21 @@ wta open fix-auth       # or press `e` in the dash
 
 Opens the selected agent's worktree in your editor (set it in the settings page or
 `WTA_OPEN_CMD`, falling back to `$EDITOR`). Because it's a worktree, the editor lands
-in the exact repo **and branch** of that agent — no path typing.
+in the exact repo **and branch** of that agent — no path typing. The worktree is passed as an **argument**, not just as the working
+directory, so `nvim` lands on the directory browser rather than its start screen.
 
 - **GUI editors** (`code`, `cursor`, `zed`, JetBrains…) launch **detached** — wta
   stays on the dashboard.
 - **Terminal editors** (`nvim`/LazyVim, `vim`, `helix`, `emacs -nw`…) follow the
   **open mode** (`open_mode` in settings, or `WTA_OPEN_TMUX`):
-  - `auto` (default) — a **new tmux window** when you're inside tmux (wta keeps
-    running; switch back with your tmux keys), otherwise **inline** (wta suspends,
-    you edit, `:q` returns to the dashboard).
-  - `window` — always a new tmux window.
+  - `auto` (default) — inside tmux, a **pane of the current window** (70% wide, so
+    the dashboard stays visible beside it); otherwise **inline** (wta suspends, you
+    edit, `:q` returns to the dashboard).
+  - `window` — always open in tmux (fails over to inline outside tmux).
   - `inline` — always take over the screen.
 
+
+`WTA_OPEN_SPLIT=0` puts the editor in a separate tmux window instead of a split.
 `WTA_OPEN_INLINE=1` still forces inline.
 
 ---
@@ -878,6 +881,7 @@ integrate:  api web ; wta wait api web --all --until idle && wta new $@ -- "wire
 | `WTA_SKIP_PERMISSIONS` | `1` | agents run with `--dangerously-skip-permissions` (no prompts). `0` or `wta new --safe` re-enables prompts — **Claude only** |
 | `WTA_OPEN_CMD` | `$EDITOR` | editor for `e` / `wta open` |
 | `WTA_OPEN_INLINE` | auto | force editor inline (`1`) or detached (`0`) |
+| `WTA_OPEN_SPLIT` | `1` | in tmux, open the editor as a split of the current window; `0` = a separate window |
 | `WTA_NOTIFY_SOUND` | `1` | notification sound (`0` = silent, or a sound-file path) |
 | `WTA_TMUX_NOTIFY` | `1` | compact top-right terminal toast (`0` = off) |
 | `WTA_TMUX_SECS` | `4` | seconds the toast stays before auto-dismissing |
