@@ -4,9 +4,51 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-10-26
+
+### Added
+- **Organize the fleet.** The dashboard list now holds many agents without getting lost:
+  - **`/` filter** — type to narrow the list live. Words match the task, repo, base,
+    tags, account, or state; `#tag`, `is:pinned`, `is:needs`, `is:sleeping`, `is:child`
+    are special. `Esc` clears it.
+  - **`P` pin** (`wta pin`) — a pinned agent (`★`) sorts to the top of its repo group.
+  - **`T` tags** (`wta tag <task> api +urgent -old`, `wta new --tag x`) — shown as `#tag`.
+  - **Groups** — `fanout`, `review` and `handoff` record which agent started which. The
+    list draws children under their parent and gathers fanout siblings under one
+    `⑂ name ×N` label. **`z`** folds a group to one line (`+N`).
+  - **Sleep** — an agent you stop with `s` shows a dim `z`, not a red `✗`, so a stop
+    you chose looks different from a crash. Resuming wakes it.
+  - **`B` board** — columns Working · Needs you · Ready · Merged · Stopped; `h`/`l`
+    between columns, `j`/`k` inside one.
+- **Comment on a diff line.** In the Diff tab, `Shift+↑↓` moves a line cursor and `C`
+  writes a note on that line (`file:line` and the code are filled in). Notes wait
+  (`✎N`) and go to the agent together, in one message, when it is `●` ready.
+- **Compare a fanout and keep the best.** `=` in the dashboard or `wta compare <group>
+  [--verify] [--keep <task>]` ranks the group by checks › acceptance criteria › diff
+  size › tokens (`★` marks the best) and keeps one, removing the rest. Agents with
+  uncommitted work are never removed.
+- **Multiple Claude accounts.** `wta account add <name>` makes an account (its own
+  `CLAUDE_CONFIG_DIR`, with your settings and hooks copied in) and starts `claude` on it
+  to log in. `wta new --account <name>` runs an agent there; `wta account use <task>
+  <name>` moves one — its conversation is copied over and a running agent restarts and
+  continues. `wta account ls` lists accounts and their agents.
+- **Usage window.** `wta usage` shows tokens used in the last 5 hours and 7 days per
+  account, over every session on the account. The dashboard's top band shows the 5-hour
+  number.
+- **Usage-limit failover.** A pane that shows a Claude usage-limit stop gets
+  `⚠ limit — A`; **`A`** moves the agent to the next account. `wta supervise
+  --failover` (opt-in) does it for you, picking the account with the most room.
+- **`wta search <text>`** — find text in every agent's conversation, in every repo,
+  newest first (`--here`, `-n`, `--json`).
+- **Telegram buttons.** A needs-input ping shows the agent's question and buttons:
+  ✅ Approve (Enter on the dialog), ❌ Deny (Esc), 📄 Diff, 👀 Peek. Approve and Deny act
+  only when a dialog is really on screen. New `/peek <task>` and `/diff <task>`.
+- `wta ls --json` includes `pinned`, `tags`, `parent` and `account`.
 
 ### Fixed
+- **Long messages no longer fail the echo check.** `wta send`, quick-send, Telegram and
+  diff comments confirm the typed text is on screen before pressing Enter. A long line
+  wraps mid-word in the pane, so the check failed; it now ignores all whitespace.
 - **The editor opened on its start screen instead of the worktree.** Inside tmux, `e` /
   `wta open` ran the editor with the worktree only as the *cwd* and never passed it as an
   argument, so `nvim` showed its intro rather than the directory browser. It is now passed

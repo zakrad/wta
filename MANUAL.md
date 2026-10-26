@@ -6,6 +6,7 @@ how to use each feature on its own.
 - [Concept](#concept)
 - [Creating agents](#creating-agents) · `new`, `--base`, prompts, fan-out
 - [The dashboard](#the-dashboard) · keys, panes, status glyphs
+- [Organizing agents](#organizing-agents) · filter, pins, tags, groups, sleep, board
 - [Attaching & sending input](#attaching--sending-input) · attach, quick-send
 - [Reviewing & merging](#reviewing--merging) · diff, matrix, push/PR
 - [Verification gate](#verification-gate) · `.wta/verify.sh`
@@ -14,7 +15,9 @@ how to use each feature on its own.
 - [Task spec](#task-spec) · `task`, acceptance criteria, context migration
 - [Locked regression checks](#locked-regression-checks) · `lock`
 - [Roles — model & effort](#roles--model--effort) · `roles`
-- [Cost & spend](#cost--spend) · `cost`, charts
+- [Cost & spend](#cost--spend) · `cost`, charts, `usage`
+- [Multiple Claude accounts](#multiple-claude-accounts) · `account`, failover
+- [Searching conversations](#searching-conversations) · `search`
 - [Supervising the fleet](#supervising-the-fleet) · `supervise`
 - [Scheduled routines](#scheduled-routines) · `cron`
 - [Open in your editor](#open-in-your-editor) · `open`, nvim/GUI
@@ -48,6 +51,8 @@ wta new fix-auth                       # worktree + agent/fix-auth branch + agen
 wta new fix-auth --base develop        # base the branch on an existing branch
 wta new fix-auth -- "add a login test" # everything after -- is passed to the agent (an initial prompt for claude)
 wta new fix-auth --yolo                # run with no permission prompts (--dangerously-skip-permissions)
+wta new fix-auth --tag api --tag urgent  # start with tags (see Organizing agents)
+wta new fix-auth --account work        # run on another Claude account (see Multiple Claude accounts)
 ```
 
 Task names must be letters/digits/`-`/`_` (≤64 chars). From the dashboard press
@@ -58,13 +63,16 @@ to base on, with type-to-filter).
 
 ```sh
 wta fanout refactor -n 3 -- "refactor the auth module, keep behavior identical"
-# creates refactor-1, refactor-2, refactor-3
-wta matrix                # see which of them conflict with each other / main
-# review each in `wta dash`, then:
-wta push refactor-2 --pr  # keep the winner
-wta rm refactor-1 --force # drop the rest
-wta rm refactor-3 --force
+# creates refactor-1, refactor-2, refactor-3 — grouped as "refactor" in the dash
+wta compare refactor --verify       # rank them: checks › acceptance criteria › diff size › tokens
+wta compare refactor --keep refactor-2   # keep the winner, remove the rest
+wta push refactor-2 --pr
 ```
+
+In the dashboard the three sit under one `⑂ refactor ×3` label. Press `=` on any of
+them for the same ranking (`v` runs every member's checks, `↵` keeps the selected one
+and removes the others). An agent with uncommitted work is never removed — `wta rm
+<task> --force` it by hand if you mean to.
 
 **Handoff** — migrate one agent's work into a fresh one:
 
@@ -114,12 +122,64 @@ Right: **Preview** (live, full-color capture of the agent's pane) and **Diff**
 | `D` | kill (destroy worktree + branch; confirms, and warns on unpushed commits) |
 | `p` | commit + push + open a PR |
 | `J` / `K` | reorder the list (persisted) |
+| `/` | filter the list (see [Organizing agents](#organizing-agents)) |
+| `P` / `T` | pin to the top / edit tags |
+| `z` | fold or unfold a group |
+| `B` | board view (columns by state) |
+| `=` | compare a fanout group, keep one |
+| `C` | Diff tab: comment on the cursor line (`Shift+↑↓` moves it) |
+| `A` | move the agent to the next Claude account |
+| `,` | settings |
 | `r` | refresh · `?` help · `q` quit |
 
 **Status glyphs:** `⠋` running · `●` ready · `▲` needs input · `◆` review
-(finished, unseen) · `✓` merged (landed in base) · `✗` exited. A verify check adds
+(finished, unseen) · `✓` merged (landed in base) · `✗` exited · `z` asleep (stopped
+with `s`). A `✎2` marker means two diff comments wait for the agent; `+3` means three
+agents are folded under this one.
+
+The top band shows the fleet: agent count, the status rollup, total tokens, and the
+**tokens used in the last 5 hours** on each Claude account (the window Claude's usage
+limit counts in). A verify check adds
 `⟳`/`✓`/`✗` to the left of the status. (`▲` needs-input requires the Claude Code
 hooks — [see Notifications](#notifications); other agents show running/ready/exited.)
+
+---
+
+## Organizing agents
+
+With many agents, the flat list gets long. These keep it in order. Each one is saved in
+the agent's state (`~/.wta/state/…`), so it stays after a restart.
+
+**Filter — `/`.** Type to narrow the list live. Every word must match. A word matches
+the task name, repo, base branch, a tag, the account, or the state. Special words:
+
+| Word | Matches |
+|---|---|
+| `#api` | agents with a tag that starts with `api` |
+| `is:pinned` | pinned agents |
+| `is:needs` / `is:running` / `is:ready` / `is:sleeping` / `is:merged` | agents in that state |
+| `is:child` | agents that another agent started |
+
+`Enter` keeps the filter on (the top band shows `/words`); `Esc` clears it.
+
+**Pin — `P`** (or `wta pin <task>`, `--off` to unpin). A pinned agent (`★`) sorts to the
+top of its repo group.
+
+**Tags — `T`** (or `wta tag <task> api +urgent -old`; `wta new --tag x`). Tags show as
+`#api` under the agent's name. Use them to filter.
+
+**Groups.** wta records who started whom. `wta fanout` agents sit under one `⑂ name ×N`
+label; a `wta review` agent sits under the agent it reviews; a `wta handoff` agent sits
+under the agent it came from. Press **`z`** to fold a group to one line (`+N` shows how
+many are hidden) and again to unfold it. A filter always shows matches, folded or not.
+
+**Sleep.** `s` (or `wta stop`) stops an agent and keeps its worktree. It shows a dim
+`z` instead of a red `✗`, so a stop you chose looks different from a crash. Resuming it
+wakes it up.
+
+**Board — `B`.** Five columns: Working · Needs you · Ready · Merged · Stopped. `h`/`l`
+move between columns, `j`/`k` inside one; `Enter` and the other keys work as usual.
+`B`, `q` or `Esc` go back.
 
 ---
 
@@ -186,6 +246,13 @@ hooks — [see Notifications](#notifications); other agents show running/ready/e
 
 - **Diff tab** — colorized diff vs the base branch, with `+adds/-dels` counts;
   agent-created (untracked) files are included.
+- **Comment on a diff line** — in the Diff tab, `Shift+↑↓` moves a line cursor; `C`
+  writes a note on that line. wta sends it to the agent as
+  `` Review comment on your diff — src/auth.rs:42 (`code`): <note> ``. Add as many as you
+  like: they wait (`✎N`) and go together in one message when the agent is `●` ready,
+  so you never type into a busy agent.
+- **Compare a fanout** — `=` in the dash or `wta compare <group>`. See
+  [Creating agents](#creating-agents).
 - **Mergeability matrix** — `m` in the dash or `wta matrix`. A pairwise grid of
   which agent branches merge cleanly with each other **and** the base, via
   `git merge-tree` (read-only — nothing is committed or checked out). Agents
@@ -423,6 +490,12 @@ wta cost --chart               # a one-row burn sparkline per agent, for side-by
 wta cost --json                # the per-message series (ts, tokens, $, model) for external analysis
 ```
 
+**Usage window** — `wta usage` shows the tokens used in the last 5 hours and 7 days on
+each Claude account, counting **every** session on the account (not only wta agents),
+because that is what the usage limit counts. The dashboard's top band shows the 5-hour
+number. Tokens are input + output from the transcripts — a close estimate of what the
+limit counts, not Anthropic's own meter.
+
 The dashboard shows each agent's token count on its second line, and model changes
 appear in the chart's timeline. (The `$` estimate is Claude-only; token counts work
 for any agent that writes compatible transcripts.)
@@ -444,6 +517,48 @@ It alerts (sound + toast + a printed line) when an agent goes `needs-input`, loo
 stuck (idle with no new changes for `--stuck-secs`), or crashed with uncommitted
 work, and prints a live status table grouped by repo. Accept or dismiss its
 escalations to judge whether the signal is trustworthy.
+
+**`--failover`** is the one opt-in action. When an agent's screen shows a Claude
+usage-limit stop, supervise moves it to the account with the fewest tokens used in the
+last 5 hours (see [Multiple Claude accounts](#multiple-claude-accounts)), continues its
+conversation there, and tells it to go on.
+
+---
+
+## Multiple Claude accounts
+
+Run agents on more than one Claude account — for example a personal and a team plan —
+so one usage limit does not stop the whole fleet.
+
+```sh
+wta account add work          # makes ~/.wta/accounts/work and starts claude there: /login, then /exit
+wta account ls                # accounts, their agents, tokens used in the last 5h / 7d
+wta new fix-auth --account work
+wta account use fix-auth default   # move an agent; a running one restarts and continues
+```
+
+Each account is its own Claude Code config dir, passed to the agent as
+`CLAUDE_CONFIG_DIR`. `add` copies your `~/.claude/settings.json` into it, so the wta
+status hooks work on that account too. Moving an agent copies its conversation to the
+new account first (nothing is deleted), so `--continue` picks up where it stopped.
+
+In the dashboard, an agent on another account shows `@work`, and a pane that shows a
+usage-limit stop gets `⚠ limit — A`. Press **`A`** to move the agent to the next
+account. `wta supervise --failover` does it for you.
+
+---
+
+## Searching conversations
+
+```sh
+wta search "rate limiter"          # every agent, every repo, newest first
+wta search token refresh --here    # only this repo
+wta search migration -n 100 --json
+```
+
+Finds text in what you and the agents wrote (tool output is skipped). Each hit shows
+the time, `repo › task`, and a short excerpt. Open the agent with `wta copy <task>`
+and press `/` to jump to the text.
 
 ---
 
@@ -710,6 +825,14 @@ It pings you when an agent needs input / finishes, and you can drive agents back
 - `/agents` — list agents
 - `/use <task>` then just type — send to the picked agent
 - `/send <task> <text>` — send to a specific agent
+- `/peek <task>` — the last lines of the agent's screen
+- `/diff <task>` — its changes vs the base branch
+
+A **needs input** ping shows the agent's question (the last lines of its screen) with
+buttons: **✅ Approve** presses Enter on the dialog, **❌ Deny** presses Esc, **📄 Diff**
+and **👀 Peek** post the changes or the screen. Approve and Deny act only when a dialog
+is really on the screen, so a late tap never types into a working agent. A
+**finished** ping has Diff and Peek.
 
 Needs the Claude Code hooks (above) for "needs input" pings.
 

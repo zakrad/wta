@@ -76,7 +76,21 @@ estimated spend with a usage-over-time chart (rate or cumulative, tokens or `$`)
 model timeline, straight from the agent’s transcripts — no tracking overhead. `wta
 supervise` watches the fleet and escalates stuck / needs-input / crashed agents.
 
+**Organize the fleet** — `/` filters the list (name, repo, `#tag`, `is:needs`…), `P`
+pins an agent to the top, `T` tags it, and agents started by `fanout` / `review` /
+`handoff` nest under the agent that started them (`z` folds a group). `B` shows a
+board: Working · Needs you · Ready · Merged · Stopped. A stopped agent sleeps (`z`)
+instead of looking crashed. `wta search <text>` finds text in every agent’s conversation.
+
+**Many accounts** — `wta account add work` gives agents a second Claude account;
+`wta new --account work`, or `A` in the dashboard to move one (its conversation comes
+along). The top band shows tokens used in the last 5 hours per account, and `wta
+supervise --failover` moves an agent that hits its usage limit to the account with room.
+
 **Review & merge** — the Diff tab shows a colorized diff vs the agent’s base branch;
+`Shift+↑↓` picks a line and `C` comments on it — the notes go to the agent together
+when it is ready. `=` (or `wta compare <group>`) ranks a fanout by checks, acceptance
+criteria, diff size and tokens, and keeps the best;
 `wta review <builder>` spawns an independent maker/checker agent; `wta push --pr` opens
 a PR against the agent’s base. (`wta matrix` also previews which branches conflict via
 `git merge-tree`, read-only, if you want it before merging.)
@@ -89,11 +103,13 @@ status, base, tokens, `$`, changes, acceptance-criteria, age). **`e`** opens the
 worktree in **nvim in a split of the current tmux window** (the dashboard keeps
 running beside it; `WTA_OPEN_SPLIT=0` uses a separate window).
 
-Keys: `j`/`k` move · `gg`/`G` top/bottom · `Ctrl-d`/`u` half-page · `t` table · `↵`
-attach · `i` send · `n`/`N` new · `b` from a branch · `s` stop · `D` kill · `p` push/PR ·
-`v` checks · `e` edit · `J`/`K` reorder · `tab` Preview/Diff · `?` help · `q` quit.
+Keys: `j`/`k` move · `gg`/`G` top/bottom · `Ctrl-d`/`u` half-page · `t` table · `B`
+board · `/` filter · `P` pin · `T` tags · `z` fold · `=` compare · `↵` attach · `i` send ·
+`n`/`N` new · `b` from a branch · `s` stop · `D` kill · `p` push/PR · `v` checks · `e`
+edit · `C` comment (Diff tab) · `A` account · `J`/`K` reorder · `tab` Preview/Diff · `,`
+settings · `?` help · `q` quit.
 
-Status glyphs: `⠋ running · ● ready · ▲ needs input · ◆ review (finished, unseen) · ✓ merged · ✗ exited`.
+Status glyphs: `⠋ running · ● ready · ▲ needs input · ◆ review (finished, unseen) · ✓ merged · ✗ exited · z asleep`.
 
 ## How it compares
 

@@ -479,6 +479,7 @@ pub fn send_enter(name: &str) -> Result<()> {
 }
 
 /// Press one named key (`Enter`, `Escape`, …) — for answering a dialog remotely.
+#[cfg_attr(not(feature = "telegram"), allow(dead_code))]
 pub fn send_key(name: &str, key: &str) -> Result<()> {
     let ok = tmux()
         .args(["send-keys", "-t", name, key])
