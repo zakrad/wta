@@ -44,6 +44,12 @@ pub enum Command {
         /// (built-ins: architect, backend, frontend, reviewer, tester; default: worker)
         #[arg(long)]
         role: Option<String>,
+        /// Claude account to run on (see `wta account`); default: your normal ~/.claude
+        #[arg(long)]
+        account: Option<String>,
+        /// Tags for the new agent, e.g. --tag api --tag urgent
+        #[arg(long = "tag")]
+        tags: Vec<String>,
         /// Everything after `--` is passed to the agent command (default: claude)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,
@@ -151,7 +157,7 @@ pub enum Command {
     Init,
     /// Show the resolved agent command per role (model/effort from config + flags)
     Roles,
-    /// Watch the fleet and escalate stuck / needs-input / crashed agents (read-only, no actions)
+    /// Watch the fleet and escalate stuck / needs-input / crashed agents (read-only unless --failover)
     Supervise {
         /// only this repo (default: watch every repo you have agents in)
         #[arg(long)]
@@ -162,6 +168,57 @@ pub enum Command {
         /// flag an agent that's been idle with no new changes this long (seconds) as stuck
         #[arg(long, default_value_t = 300)]
         stuck_secs: u64,
+        /// ACT (opt-in): when an agent hits its Claude usage limit, move it to the
+        /// account with the most room left (`wta account`) and tell it to continue
+        #[arg(long)]
+        failover: bool,
+    },
+    /// Show or edit an agent's tags: `wta tag <task> api +urgent -old` (no edits = print)
+    Tag {
+        task: String,
+        /// tags to add (`x` / `+x`) or remove (`-x`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        edits: Vec<String>,
+    },
+    /// Pin an agent to the top of its repo group in the dashboard (`--off` unpins)
+    Pin {
+        task: String,
+        #[arg(long)]
+        off: bool,
+    },
+    /// Rank a fanout group (checks, acceptance criteria, diff, tokens); `--keep` the best
+    Compare {
+        /// the group: the name you gave `wta fanout` (or a parent agent's name)
+        group: String,
+        /// run .wta/verify.sh in each member first
+        #[arg(long)]
+        verify: bool,
+        /// keep this member and remove the others (agents with uncommitted work are kept)
+        #[arg(long)]
+        keep: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search every agent's conversation for text (newest first)
+    Search {
+        /// text to find (case-insensitive)
+        #[arg(required = true)]
+        query: Vec<String>,
+        /// only this repo's agents
+        #[arg(long)]
+        here: bool,
+        /// how many hits to show
+        #[arg(short = 'n', long, default_value_t = 30)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tokens used in the last 5h / 7d per Claude account (all sessions on the account)
+    Usage,
+    /// Run agents on more than one Claude account: add, list, move an agent
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
     },
     /// Migrate <from>'s context into a NEW agent: branch off it + seed a handoff note
     Handoff {
@@ -343,6 +400,22 @@ pub enum Command {
         #[arg(long)]
         test: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum AccountAction {
+    /// Create an account (its own Claude config dir) and start `claude` on it to /login
+    Add {
+        name: String,
+        /// only create it; log in later
+        #[arg(long)]
+        no_login: bool,
+    },
+    /// List accounts, their agents, and tokens used in the last 5h / 7d
+    Ls,
+    /// Move an agent to an account ("default" = your normal Claude); a running agent
+    /// restarts there and continues its conversation
+    Use { task: String, name: String },
 }
 
 #[derive(Subcommand)]

@@ -235,7 +235,7 @@ pub fn base_branch(root: &Path) -> String {
     "HEAD".to_string()
 }
 
-fn worktrees_dir(root: &Path) -> PathBuf {
+pub fn worktrees_dir(root: &Path) -> PathBuf {
     root.join(worktree_subdir())
 }
 /// Prefix for the branch a NEW agent creates. Empty by default, so the branch is just
@@ -378,6 +378,13 @@ fn agent_argv(repo: &str, task: &str, idx: u32, tail: &[String]) -> (String, Vec
         format!("WTA_INDEX={idx}"),
         format!("WTA_PORT_BASE={}", port_base(idx)),
     ];
+    // an agent on another Claude account (`wta account`) runs with that config dir
+    if let Some(dir) = status::read_state(repo, task)
+        .and_then(|s| s.account)
+        .and_then(|a| crate::account::dir_for(&a))
+    {
+        extra.push(format!("CLAUDE_CONFIG_DIR={}", dir.display()));
+    }
     // tmux execs program+args directly (no shell), so a multi-word agent command
     // (`claude --model haiku`, `npx foo`) must be tokenized, not one argv element.
     let cmd = agent_cmd();
@@ -591,6 +598,12 @@ fn new_impl(task: &str, agent_args: &[String], base: Option<&str>, seed: Option<
     if let Some(eng) = agent_cmd().split_whitespace().next() {
         let _ = status::record_engine(&repo, task, eng);
     }
+    // `wta new --account <name>`: the pane gets that account's CLAUDE_CONFIG_DIR
+    if let Ok(acct) = std::env::var("WTA_ACCOUNT") {
+        if !acct.is_empty() && acct != "default" {
+            let _ = status::update(&repo, task, |s| s.account = Some(acct.clone()));
+        }
+    }
     preseed_claude_trust(&wt); // avoid the folder-trust dialog on this fresh worktree
     let wt_str = wt.to_string_lossy().into_owned();
     let session = tmux::session_name(&repo, task);
@@ -731,7 +744,7 @@ fn resolve_repo() -> Result<String> {
 /// The MAIN repo root for a directory anywhere inside a repo or one of its worktrees
 /// (`git rev-parse --git-common-dir` → the shared `.git`'s parent). Works from a
 /// worktree subdirectory, unlike a fixed parent-hop. `None` if `dir` isn't in a repo.
-fn main_root_of(dir: &Path) -> Option<PathBuf> {
+pub fn main_root_of(dir: &Path) -> Option<PathBuf> {
     let out = run_git(&["rev-parse", "--git-common-dir"], Some(dir)).ok()?;
     let raw = out.trim();
     let gc = if Path::new(raw).is_absolute() { PathBuf::from(raw) } else { dir.join(raw) };
@@ -1534,7 +1547,7 @@ fn wait_idle(session: &str, timeout: std::time::Duration) -> Result<()> {
 /// longer than `d` (so a hung check can't wedge the loop past `--timeout`) and its
 /// output is captured via a temp file to avoid pipe-buffer deadlock. `None` runs to
 /// completion.
-fn run_verify_sh(wt: &Path, script: &str, deadline: Option<std::time::Duration>) -> (i32, String) {
+pub fn run_verify_sh(wt: &Path, script: &str, deadline: Option<std::time::Duration>) -> (i32, String) {
     let d = match deadline {
         None => {
             return match Command::new("bash").arg("-c").arg(script).current_dir(wt).output() {
@@ -1795,6 +1808,40 @@ pub fn resume(task: &str, fresh: bool) -> Result<()> {
     resume_at(task, &wt, fresh)
 }
 
+/// Find an agent by name for a CLI command: the current repo's agent if it has one,
+/// else the ONE repo that has an agent of that name. Returns `(repo id, repo root,
+/// agent dir)`. Errors when the name is unknown or ambiguous across repos.
+pub fn locate(task: &str) -> Result<(String, PathBuf, PathBuf)> {
+    let here = repo_root().ok().map(|r| (repo_id_of(&r), r));
+    if let Some((repo, root)) = &here {
+        if let Some(st) = status::read_state(repo, task) {
+            let wt = if !st.cwd.is_empty() { PathBuf::from(&st.cwd) } else { worktrees_dir(root).join(task) };
+            return Ok((repo.clone(), root.clone(), wt));
+        }
+        let wt = worktrees_dir(root).join(task);
+        if wt.exists() {
+            return Ok((repo.clone(), root.clone(), wt));
+        }
+    }
+    let repos: std::collections::HashMap<String, PathBuf> = discover_repos().into_iter().collect();
+    let matches: Vec<status::AgentState> =
+        status::read_all_states().unwrap_or_default().into_iter().filter(|s| s.task == task).collect();
+    match matches.len() {
+        0 => bail!("no agent named '{task}'"),
+        1 => {
+            let st = &matches[0];
+            let root = repos
+                .get(&st.repo)
+                .cloned()
+                .or_else(|| main_root_of(Path::new(&st.cwd)))
+                .with_context(|| format!("cannot find the repo of '{task}'"))?;
+            let wt = if !st.cwd.is_empty() { PathBuf::from(&st.cwd) } else { worktrees_dir(&root).join(task) };
+            Ok((st.repo.clone(), root, wt))
+        }
+        _ => bail!("'{task}' exists in several repos — run this from that repo's directory"),
+    }
+}
+
 /// `wta adopt <task> [--dir <path>]` — register an EXISTING directory (where you're
 /// already running Claude) as an agent under its repo, so it joins your dashboard
 /// group. It does NOT spawn a session or touch your files; continue it inside wta with
@@ -1957,7 +2004,7 @@ fn diffstat(path: &Path, base: &str) -> String {
 }
 
 /// Exact (added, deleted) line counts vs `base` for `--json` output.
-fn changes_vs_base(path: &Path, base: &str) -> (u64, u64) {
+pub fn changes_vs_base(path: &Path, base: &str) -> (u64, u64) {
     let mb = match run_git(&["merge-base", "HEAD", base], Some(path)) {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => return (0, 0),
@@ -2200,6 +2247,10 @@ pub fn ls(json: bool) -> Result<()> {
                     "added": added,
                     "deleted": deleted,
                     "ac": ac,
+                    "pinned": st.as_ref().map(|s| s.pinned).unwrap_or(false),
+                    "tags": st.as_ref().map(|s| s.tags.clone()).unwrap_or_default(),
+                    "parent": st.as_ref().and_then(|s| s.parent.clone()),
+                    "account": st.as_ref().and_then(|s| s.account.clone()),
                 })
             })
             .collect();

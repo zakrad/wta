@@ -101,14 +101,124 @@ fn short_model(m: &str) -> String {
 }
 
 /// Claude Code's transcript dir for a worktree (`~/.claude/projects/<encoded path>`,
-/// honoring `CLAUDE_CONFIG_DIR` the way the CLI does).
+/// honoring `CLAUDE_CONFIG_DIR` the way the CLI does). An agent on another account
+/// (`wta account`) keeps its transcripts under that account's config dir, so every
+/// known config dir is checked and the one with the newest transcript wins.
 pub fn transcript_dir(wt: &Path) -> Option<PathBuf> {
-    if let Ok(d) = std::env::var("CLAUDE_CONFIG_DIR") {
-        if !d.is_empty() {
-            return Some(PathBuf::from(d).join("projects").join(encode(wt)));
+    let enc = encode(wt);
+    let dirs: Vec<PathBuf> = config_dirs().into_iter().map(|d| d.join("projects").join(&enc)).collect();
+    let newest = |d: &PathBuf| -> Option<u64> {
+        std::fs::read_dir(d)
+            .ok()?
+            .flatten()
+            .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
+            .filter_map(|e| e.metadata().ok()?.modified().ok())
+            .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()))
+            .max()
+    };
+    let best = dirs.iter().filter_map(|d| newest(d).map(|t| (t, d))).max_by_key(|(t, _)| *t);
+    match best {
+        Some((_, d)) => Some(d.clone()),
+        None => dirs.into_iter().next(),
+    }
+}
+
+/// Every Claude config dir wta knows: the default (`$CLAUDE_CONFIG_DIR` or
+/// `~/.claude`) first, then each `wta account` dir.
+pub fn config_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    match std::env::var("CLAUDE_CONFIG_DIR") {
+        Ok(d) if !d.is_empty() => out.push(PathBuf::from(d)),
+        _ => {
+            if let Some(h) = dirs::home_dir() {
+                out.push(h.join(".claude"));
+            }
         }
     }
-    dirs::home_dir().map(|h| h.join(".claude/projects").join(encode(wt)))
+    for (_, d) in crate::account::list() {
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    out
+}
+
+/// Transcript dir for `wt` under ONE config dir (used when moving an agent's
+/// conversation to another account).
+pub fn transcript_dir_in(config: &Path, wt: &Path) -> PathBuf {
+    config.join("projects").join(encode(wt))
+}
+
+/// Parse an ISO-8601 UTC timestamp (`2026-10-26T12:34:56.789Z`) to unix seconds.
+pub fn iso_to_unix(ts: &str) -> Option<u64> {
+    let b = ts.as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    let num = |a: usize, z: usize| ts.get(a..z)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, s) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    // days from civil (Howard Hinnant)
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let t = days * 86400 + h * 3600 + mi * 60 + s;
+    (t >= 0).then_some(t as u64)
+}
+
+/// Tokens (input + output) used under one Claude config dir since `since_unix`, across
+/// EVERY project — not only wta agents, because an account's usage limit counts all of
+/// its sessions. Files untouched since `since_unix` are skipped without being read.
+pub fn usage_since(config: &Path, since_unix: u64) -> u64 {
+    let mut total = 0u64;
+    let Ok(projects) = std::fs::read_dir(config.join("projects")) else { return 0 };
+    for proj in projects.flatten() {
+        let Ok(files) = std::fs::read_dir(proj.path()) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let fresh = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() >= since_unix)
+                .unwrap_or(false);
+            if !fresh {
+                continue;
+            }
+            let Ok(file) = std::fs::File::open(&p) else { continue };
+            for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+                if !line.contains("\"assistant\"") {
+                    continue; // cheap pre-filter before JSON parsing
+                }
+                let Ok(l) = serde_json::from_str::<Line>(&line) else { continue };
+                if l.kind != "assistant" {
+                    continue;
+                }
+                let at = l.timestamp.as_deref().and_then(iso_to_unix).unwrap_or(0);
+                if at < since_unix {
+                    continue;
+                }
+                if let Some(u) = l.message.and_then(|m| m.usage) {
+                    total += u.input_tokens + u.output_tokens;
+                }
+            }
+        }
+    }
+    total
+}
+
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Whether Claude Code has ANY saved conversation for this worktree — i.e. whether
@@ -213,6 +323,17 @@ pub fn sessions_for(wt: &Path) -> (usize, u64) {
         }
     }
     (n, newest)
+}
+
+#[cfg(test)]
+mod time_tests {
+    #[test]
+    fn iso_to_unix_parses_utc() {
+        assert_eq!(super::iso_to_unix("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(super::iso_to_unix("2026-10-26T12:00:00.123Z"), Some(1793016000));
+        assert_eq!(super::iso_to_unix("2000-03-01T00:00:00Z"), Some(951868800));
+        assert_eq!(super::iso_to_unix("bad"), None);
+    }
 }
 
 pub fn human_tokens(n: u64) -> String {

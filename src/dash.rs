@@ -221,6 +221,7 @@ struct Row {
     depth: u8,              // nesting under a parent (set by `apply_view`)
     header: Option<String>, // a fanout group label drawn above this row (first member)
     hidden: u32,            // children folded away under this row (`z`)
+    limit: bool,            // pane shows a Claude usage-limit stop (`A` moves accounts)
 }
 
 /// A `.wta/verify.sh` run for one agent. Runs async (spawn + poll) so the repo's
@@ -279,6 +280,10 @@ struct App {
     cost_tx: Sender<(String, PathBuf)>,
     cost_rx: Receiver<(String, (crate::cost::Usage, Option<String>))>,
     cost_inflight: HashSet<String>, // sessions currently being parsed (dedupe jobs)
+    // Tokens per Claude account over the last 5h (the usage-limit window), from a
+    // worker thread that rescans every two minutes.
+    usage_rx: Option<Receiver<Vec<(String, u64)>>>,
+    usage5h: Vec<(String, u64)>,
     costmtime: HashMap<String, u64>, // session -> newest transcript mtime last parsed
 }
 
@@ -296,7 +301,34 @@ impl App {
                 }
             }
         });
+        // 5h usage worker (not in tests: it scans the real ~/.claude)
+        let usage_rx = if cfg!(test) {
+            None
+        } else {
+            let (tx, rx) = channel::<Vec<(String, u64)>>();
+            std::thread::spawn(move || loop {
+                let since = crate::cost::now_unix().saturating_sub(5 * 3600);
+                let mut v = Vec::new();
+                for name in crate::account::cycle() {
+                    let dir = if name == "default" {
+                        crate::cost::config_dirs().into_iter().next()
+                    } else {
+                        crate::account::dir_for(&name)
+                    };
+                    if let Some(d) = dir {
+                        v.push((name, crate::cost::usage_since(&d, since)));
+                    }
+                }
+                if tx.send(v).is_err() {
+                    break; // dashboard gone
+                }
+                std::thread::sleep(Duration::from_secs(120));
+            });
+            Some(rx)
+        };
         App {
+            usage_rx,
+            usage5h: Vec::new(),
             cost_tx,
             cost_rx,
             cost_inflight: HashSet::new(),
@@ -464,6 +496,11 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
         }
         poll_checks(&mut app);
         drain_costs(&mut app);
+        if let Some(rx) = &app.usage_rx {
+            while let Ok(v) = rx.try_recv() {
+                app.usage5h = v;
+            }
+        }
         term.draw(|f| ui(f, &mut app))?;
 
         if event::poll(Duration::from_millis(200))? {
@@ -1205,6 +1242,27 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
         }
         KeyCode::Char('z') => toggle_fold(app),
+        // move the agent to the next Claude account (a running one restarts there and
+        // continues) — the manual failover when it hits a usage limit
+        KeyCode::Char('A') => {
+            if let Some(r) = app.selected().cloned() {
+                let names = crate::account::cycle();
+                if names.len() < 2 {
+                    app.set_err("only one Claude account — add another with `wta account add <name>`");
+                } else {
+                    let cur = r.account.clone().unwrap_or_else(|| "default".into());
+                    let i = names.iter().position(|n| *n == cur).unwrap_or(0);
+                    let next = names[(i + 1) % names.len()].clone();
+                    let wt = r.path.clone().unwrap_or_default();
+                    match crate::account::switch(&r.repo, &r.task, &wt, &next) {
+                        Ok(m) => app.set_info(m),
+                        Err(e) => app.set_err(format!("{e:#}")),
+                    }
+                    refresh(app);
+                    load_detail(app);
+                }
+            }
+        }
         KeyCode::Char('=') => open_compare(app),
         KeyCode::Char('C') => open_comment(app),
         KeyCode::Esc if app.scrollback.is_some() => {
@@ -2190,8 +2248,10 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
         };
 
         let alive = live.contains(&session);
+        let mut limit = false;
         let status = if alive {
             let text = tmux::capture(&session).unwrap_or_default();
+            limit = crate::account::is_limit_hit(&text);
             if auto_trust && !app.trust_done.contains(&session) {
                 if is_trust_prompt(&text) {
                     let _ = tmux::send_enter(&session);
@@ -2274,6 +2334,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
             depth: 0,
             header: None,
             hidden: 0,
+            limit,
         });
     }
 }
@@ -2765,6 +2826,18 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Yellow),
         ));
     }
+    // last-5h tokens per account (the usage-limit window); one account shows no name
+    if !app.usage5h.is_empty() {
+        let parts: Vec<String> = if app.usage5h.len() == 1 {
+            vec![crate::cost::human_tokens(app.usage5h[0].1)]
+        } else {
+            app.usage5h.iter().map(|(n, t)| format!("{n} {}", crate::cost::human_tokens(*t))).collect()
+        };
+        spans.push(Span::styled(format!("   5h {}", parts.join(" · ")), muted));
+    }
+    if !app.filter.trim().is_empty() {
+        spans.push(Span::styled(format!("   /{}", app.filter.trim()), Style::default().fg(GREEN)));
+    }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -2988,7 +3061,10 @@ fn render_list(f: &mut Frame, app: &App, area: Rect) {
         // `agent/<task>` = the line-1 name, so it carries no extra info).
         let indent = format!("{}{}", if app.global { "     " } else { "   " }, "  ".repeat(r.depth as usize));
         let tags = if r.tags.is_empty() { String::new() } else { format!("  #{}", r.tags.join(" #")) };
-        let acct = r.account.as_deref().map(|a| format!("  @{a}")).unwrap_or_default();
+        let mut acct = r.account.as_deref().map(|a| format!("  @{a}")).unwrap_or_default();
+        if r.limit {
+            acct.push_str("  ⚠ limit — A");
+        }
         let bhead = truncate_cols(&format!("{indent}Ꮧ {}{tags}{acct}", r.base), inner_w.saturating_sub(counts_len));
         let pad2 = inner_w.saturating_sub(bhead.width() + counts_len);
         let line2 = Line::from(vec![
@@ -3735,6 +3811,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("c", "copy mode: vi-style scroll/search/select/yank of the conversation (Alt-y while attached)"),
                 k("v", "run .wta/verify.sh checks (auto-runs when an agent finishes)"),
                 k("e", "open the worktree in nvim (split beside the dash) / $EDITOR"),
+                k("A", "move the agent to the next Claude account (usage limit?)"),
                 k(",", "settings: editor, default agent/model/effort, hint bar"),
                 k("Ctrl-q", "detach back to wta (while attached)"),
                 k("Alt-] / [", "while attached: jump to next / previous agent (no dashboard)"),
@@ -3953,6 +4030,7 @@ mod tests {
             depth: 0,
             header: None,
             hidden: 0,
+            limit: false,
         }
     }
 
