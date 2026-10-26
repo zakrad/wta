@@ -306,23 +306,28 @@ impl App {
             None
         } else {
             let (tx, rx) = channel::<Vec<(String, u64)>>();
-            std::thread::spawn(move || loop {
-                let since = crate::cost::now_unix().saturating_sub(5 * 3600);
-                let mut v = Vec::new();
-                for name in crate::account::cycle() {
-                    let dir = if name == "default" {
-                        crate::cost::config_dirs().into_iter().next()
-                    } else {
-                        crate::account::dir_for(&name)
-                    };
-                    if let Some(d) = dir {
-                        v.push((name, crate::cost::usage_since(&d, since)));
+            std::thread::spawn(move || {
+                // one incremental scanner per account: a rescan reads only new bytes
+                let mut scanners: HashMap<String, crate::cost::UsageScanner> = HashMap::new();
+                loop {
+                    let since = crate::cost::now_unix().saturating_sub(5 * 3600);
+                    let mut v = Vec::new();
+                    for name in crate::account::cycle() {
+                        let dir = if name == "default" {
+                            crate::cost::config_dirs().into_iter().next()
+                        } else {
+                            crate::account::dir_for(&name)
+                        };
+                        if let Some(d) = dir {
+                            let used = scanners.entry(name.clone()).or_default().scan(&d, since);
+                            v.push((name, used));
+                        }
                     }
+                    if tx.send(v).is_err() {
+                        break; // dashboard gone
+                    }
+                    std::thread::sleep(Duration::from_secs(120));
                 }
-                if tx.send(v).is_err() {
-                    break; // dashboard gone
-                }
-                std::thread::sleep(Duration::from_secs(120));
             });
             Some(rx)
         };

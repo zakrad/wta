@@ -173,45 +173,88 @@ pub fn iso_to_unix(ts: &str) -> Option<u64> {
 /// EVERY project — not only wta agents, because an account's usage limit counts all of
 /// its sessions. Files untouched since `since_unix` are skipped without being read.
 pub fn usage_since(config: &Path, since_unix: u64) -> u64 {
-    let mut total = 0u64;
-    let Ok(projects) = std::fs::read_dir(config.join("projects")) else { return 0 };
-    for proj in projects.flatten() {
-        let Ok(files) = std::fs::read_dir(proj.path()) else { continue };
-        for f in files.flatten() {
-            let p = f.path();
-            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let fresh = f
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() >= since_unix)
-                .unwrap_or(false);
-            if !fresh {
-                continue;
-            }
-            let Ok(file) = std::fs::File::open(&p) else { continue };
-            for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
-                if !line.contains("\"assistant\"") {
-                    continue; // cheap pre-filter before JSON parsing
-                }
-                let Ok(l) = serde_json::from_str::<Line>(&line) else { continue };
-                if l.kind != "assistant" {
+    UsageScanner::default().scan(config, since_unix)
+}
+
+/// Incremental `usage_since`: remembers, per transcript, how far it has read and the
+/// `(time, tokens)` of each message, so a rescan reads only the bytes appended since
+/// (transcripts are append-only). The dashboard keeps one per account.
+#[derive(Default)]
+pub struct UsageScanner {
+    files: std::collections::HashMap<PathBuf, (u64, Vec<(u64, u64)>)>,
+}
+
+impl UsageScanner {
+    pub fn scan(&mut self, config: &Path, since_unix: u64) -> u64 {
+        use std::io::{Seek, SeekFrom};
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let Ok(projects) = std::fs::read_dir(config.join("projects")) else { return 0 };
+        for proj in projects.flatten() {
+            let Ok(files) = std::fs::read_dir(proj.path()) else { continue };
+            for f in files.flatten() {
+                let p = f.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
                     continue;
                 }
-                let at = l.timestamp.as_deref().and_then(iso_to_unix).unwrap_or(0);
-                if at < since_unix {
+                let Ok(meta) = f.metadata() else { continue };
+                let fresh = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() >= since_unix)
+                    .unwrap_or(false);
+                if !fresh {
                     continue;
                 }
-                if let Some(u) = l.message.and_then(|m| m.usage) {
-                    total += u.input_tokens + u.output_tokens;
+                seen.insert(p.clone());
+                let entry = self.files.entry(p.clone()).or_default();
+                if meta.len() < entry.0 {
+                    *entry = (0, Vec::new()); // truncated / replaced — start over
                 }
+                if meta.len() == entry.0 {
+                    continue; // nothing new
+                }
+                let Ok(mut file) = std::fs::File::open(&p) else { continue };
+                if file.seek(SeekFrom::Start(entry.0)).is_err() {
+                    continue;
+                }
+                let mut reader = std::io::BufReader::new(file);
+                let mut buf = String::new();
+                let mut pos = entry.0;
+                loop {
+                    buf.clear();
+                    match reader.read_line(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if !buf.ends_with('\n') {
+                                break; // a half-written last line: read it next time
+                            }
+                            pos += n as u64;
+                        }
+                    }
+                    if !buf.contains("\"assistant\"") {
+                        continue; // cheap pre-filter before JSON parsing
+                    }
+                    let Ok(l) = serde_json::from_str::<Line>(buf.trim_end()) else { continue };
+                    if l.kind != "assistant" {
+                        continue;
+                    }
+                    let at = l.timestamp.as_deref().and_then(iso_to_unix).unwrap_or(0);
+                    if let Some(u) = l.message.and_then(|m| m.usage) {
+                        entry.1.push((at, u.input_tokens + u.output_tokens));
+                    }
+                }
+                entry.0 = pos;
             }
         }
+        self.files.retain(|k, _| seen.contains(k));
+        self.files
+            .values()
+            .flat_map(|(_, v)| v.iter())
+            .filter(|(at, _)| *at >= since_unix)
+            .map(|(_, t)| t)
+            .sum()
     }
-    total
 }
 
 pub fn now_unix() -> u64 {
@@ -327,6 +370,27 @@ pub fn sessions_for(wt: &Path) -> (usize, u64) {
 
 #[cfg(test)]
 mod time_tests {
+    #[test]
+    fn usage_scanner_reads_only_new_lines() {
+        let dir = std::env::temp_dir().join(format!("wta-usage-{}", std::process::id()));
+        let proj = dir.join("projects").join("p");
+        std::fs::create_dir_all(&proj).unwrap();
+        let f = proj.join("s.jsonl");
+        let line = |ts: &str, i: u64| {
+            format!("{{\"type\":\"assistant\",\"timestamp\":\"{ts}\",\"message\":{{\"usage\":{{\"input_tokens\":{i},\"output_tokens\":1}}}}}}\n")
+        };
+        std::fs::write(&f, line("2026-10-26T10:00:00Z", 9) + &line("2020-01-01T00:00:00Z", 100)).unwrap();
+        let since = super::iso_to_unix("2026-10-26T09:00:00Z").unwrap();
+        let mut sc = super::UsageScanner::default();
+        assert_eq!(sc.scan(&dir, since), 10); // the 2020 message is outside the window
+        use std::io::Write;
+        let mut h = std::fs::OpenOptions::new().append(true).open(&f).unwrap();
+        h.write_all(line("2026-10-26T11:00:00Z", 4).as_bytes()).unwrap();
+        h.write_all(b"{\"type\":\"assist").unwrap(); // half-written
+        assert_eq!(sc.scan(&dir, since), 15);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn iso_to_unix_parses_utc() {
         assert_eq!(super::iso_to_unix("1970-01-01T00:00:00Z"), Some(0));
