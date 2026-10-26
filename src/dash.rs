@@ -1527,7 +1527,7 @@ fn compare_score(check: Option<i32>, ac: Option<(u32, u32)>, delta: u32, tokens:
         None => 1,
         Some(_) => 0,
     };
-    let ac_pct = ac.map(|(d, t)| if t == 0 { 0 } else { d * 100 / t }).unwrap_or(0);
+    let ac_pct = ac.and_then(|(d, t)| (d * 100).checked_div(t)).unwrap_or(0);
     (c, ac_pct, -(delta as i64), -(tokens.min(i64::MAX as u64) as i64))
 }
 
@@ -2395,9 +2395,21 @@ fn nest(rows: Vec<Row>, folded: &dyn Fn(&str) -> bool) -> Vec<Row> {
             r.hidden = children.len() as u32;
         }
         out.push(r);
-        if !fold && depth < 3 {
+        if fold {
+            hide(&children, rows, kids, done);
+        } else if depth < 3 {
             for c in children {
                 emit(c, depth + 1, rows, kids, folded, done, out);
+            }
+        }
+    }
+    // mark folded-away rows (and their descendants) as placed, so they stay hidden
+    fn hide(ids: &[usize], rows: &[Row], kids: &HashMap<String, Vec<usize>>, done: &mut HashSet<usize>) {
+        for &i in ids {
+            if done.insert(i) {
+                if let Some(k) = kids.get(&rows[i].task) {
+                    hide(k, rows, kids, done);
+                }
             }
         }
     }
@@ -2413,6 +2425,7 @@ fn nest(rows: Vec<Row>, folded: &dyn Fn(&str) -> bool) -> Vec<Row> {
                 let start = out.len();
                 for (n, &m) in members.iter().enumerate() {
                     if fold && n > 0 {
+                        hide(&members[n..], &rows, &kids, &mut done);
                         break;
                     }
                     emit(m, 1, &rows, &kids, folded, &mut done, &mut out);
@@ -2426,10 +2439,10 @@ fn nest(rows: Vec<Row>, folded: &dyn Fn(&str) -> bool) -> Vec<Row> {
             }
         }
     }
-    // anything unreachable (shouldn't happen) still shows, flat
-    for i in 0..rows.len() {
-        if !done.contains(&i) && !(rows[i].parent.is_some()) {
-            out.push(rows[i].clone());
+    // anything unreachable (a parent cycle) still shows, flat — never drop an agent
+    for (i, r) in rows.iter().enumerate() {
+        if !done.contains(&i) {
+            out.push(r.clone());
         }
     }
     out
@@ -4075,7 +4088,7 @@ mod tests {
     fn nest_survives_a_parent_cycle() {
         let rows = vec![kid("a", "b"), kid("b", "a")];
         let out = nest(rows, &|_: &str| false);
-        assert!(out.len() <= 2);
+        assert_eq!(out.len(), 2);
     }
 
     #[test]

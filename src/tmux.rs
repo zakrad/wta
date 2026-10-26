@@ -478,6 +478,19 @@ pub fn send_enter(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Press one named key (`Enter`, `Escape`, …) — for answering a dialog remotely.
+pub fn send_key(name: &str, key: &str) -> Result<()> {
+    let ok = tmux()
+        .args(["send-keys", "-t", name, key])
+        .status()
+        .context("tmux send-keys failed")?
+        .success();
+    if !ok {
+        bail!("tmux send-keys {key} failed for {name}");
+    }
+    Ok(())
+}
+
 // collapse whitespace so pane wrapping/padding doesn't defeat a substring match
 pub(crate) fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")

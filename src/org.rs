@@ -81,7 +81,7 @@ pub fn compare(group: &str, verify: bool, keep: Option<&str>, json: bool) -> Res
             None => 1,
             Some(_) => 0,
         };
-        let ac = m.ac.map(|(d, t)| if t == 0 { 0 } else { d * 100 / t }).unwrap_or(0);
+        let ac = m.ac.and_then(|(d, t)| (d * 100).checked_div(t)).unwrap_or(0);
         (c, ac, -((m.added + m.deleted) as i64), -(m.tokens as i64))
     };
     let best = members.iter().max_by_key(|m| score(m)).map(|m| m.task.clone());
