@@ -2,6 +2,7 @@
 mod bridge;
 mod account;
 mod cli;
+mod clone;
 mod config;
 mod copyview;
 mod cost;
@@ -81,6 +82,7 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("{hint}");
             }
         }
+        Command::Clone { url, dir, task, agent_args } => clone::run_cli(&url, dir.as_deref(), task, &agent_args)?,
         Command::Adopt { task, dir } => worktree::adopt(&task, dir.as_deref())?,
         Command::Ls { json } => worktree::ls(json)?,
         Command::Cost { task, chart, usd, cumulative, json } => {

@@ -40,6 +40,7 @@ set `WTA_AGENT_CMD` to change). Add `--features telegram` for remote control.
 ```sh
 cd your-repo
 wta new fix-auth     # new worktree + branch + starts the agent in a tmux session
+wta clone owner/repo # or clone a repo first, then name its agent
 wta                  # the dashboard — a live tree of EVERY repo's agents
 ```
 
@@ -105,7 +106,7 @@ running beside it; `WTA_OPEN_SPLIT=0` uses a separate window).
 
 Keys: `j`/`k` move · `gg`/`G` top/bottom · `Ctrl-d`/`u` half-page · `t` table · `B`
 board · `/` filter · `P` pin · `T` tags · `z` fold · `=` compare · `↵` attach · `i` send ·
-`n`/`N` new · `b` from a branch · `s` stop · `D` kill · `p` push/PR · `v` checks · `e`
+`n`/`N` new · `R` clone a repo · `b` from a branch · `s` stop · `D` kill · `p` push/PR · `v` checks · `e`
 edit · `C` comment (Diff tab) · `A` account · `J`/`K` reorder · `tab` Preview/Diff · `,`
 settings · `?` help · `q` quit.
 

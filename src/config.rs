@@ -29,6 +29,9 @@ pub struct Config {
     /// how `wta open` / dash `e` launches a terminal editor — backs `WTA_OPEN_TMUX`:
     /// "auto" (tmux split if inside tmux, else inline), "window", or "inline".
     pub open_mode: Option<String>,
+    /// where `wta clone` / dash `R` put new clones (e.g. "~/code"); unset → next to
+    /// the repo you are in.
+    pub clone_dir: Option<String>,
 }
 
 /// The fields shown in the settings page / `wta config`, in display order.
@@ -40,6 +43,7 @@ pub const FIELDS: &[(&str, &str)] = &[
     ("effort", "default --effort (low|medium|high|xhigh|max)"),
     ("hint_bar", "green hint bar in sessions (on|off)"),
     ("open_mode", "editor launch: auto|window|inline"),
+    ("clone_dir", "folder for new clones (~/code)"),
 ];
 
 pub fn path() -> Option<PathBuf> {
@@ -103,6 +107,7 @@ impl Config {
                 None => String::new(),
             },
             "open_mode" => self.open_mode.clone().unwrap_or_default(),
+            "clone_dir" => self.clone_dir.clone().unwrap_or_default(),
             _ => return None,
         })
     }
@@ -140,6 +145,7 @@ impl Config {
                 }
                 self.open_mode = opt(v);
             }
+            "clone_dir" => self.clone_dir = opt(v),
             _ => anyhow::bail!("unknown setting '{key}' (see `wta config`)"),
         }
         Ok(())

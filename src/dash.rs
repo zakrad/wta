@@ -141,6 +141,13 @@ enum Modal {
         sel: usize,
         prompt: bool, // carry N (new-with-prompt) through the picker
     },
+    /// `R` (or "＋ clone" in the repo picker): a git URL or GitHub `owner/repo`.
+    CloneUrl { url: String, prompt: bool },
+    /// …then the folder, prefilled `<clone_dir>/<repo>` and editable.
+    CloneDir { url: String, dir: String, prompt: bool, err: Option<String> },
+    /// `git clone` runs on a thread. Esc hides this; the clone goes on, and a message
+    /// says when it is done.
+    Cloning { url: String, dest: PathBuf },
     /// Adopt: pick which repo's sessions to browse (global dash only).
     AdoptRepoPick {
         repos: Vec<(String, PathBuf)>,
@@ -292,6 +299,11 @@ struct App {
     git_inflight: HashSet<String>, // sessions with a queued/running git job (dedupe)
     probed_at: Option<Instant>,    // start time of the newest applied fleet snapshot
     detail_dirty: bool,            // selection moved: reload the detail pane before the next frame
+    // a `git clone` on a thread: (dest, result) arrives here; the flag carries N's
+    // "with a prompt" through to the agent-name box
+    clone_rx: Option<Receiver<(PathBuf, Result<(), String>)>>,
+    clone_prompt: bool,
+    extra_repos: Vec<PathBuf>, // cloned this session — offered by `n` before they have agents
 }
 
 impl App {
@@ -375,6 +387,9 @@ impl App {
             git_inflight: HashSet::new(),
             probed_at: None,
             detail_dirty: false,
+            clone_rx: None,
+            clone_prompt: false,
+            extra_repos: Vec::new(),
             view: View::Split,
             pending_g: false,
             global: false,
@@ -546,6 +561,7 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
                 app.usage5h = v;
             }
         }
+        poll_clone(&mut app);
         if let Ok(snap) = probes.try_recv() {
             apply_snapshot(&mut app, snap);
         }
@@ -848,6 +864,67 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
+        Modal::CloneUrl { url, prompt } => {
+            match key.code {
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Enter => {
+                    let u = crate::clone::expand_url(url);
+                    let prompt = *prompt;
+                    match crate::clone::repo_name(&u) {
+                        Some(name) if !url.trim().is_empty() => {
+                            let dir = crate::clone::tilde(&clone_parent(app).join(name));
+                            app.modal = Modal::CloneDir { url: u, dir, prompt, err: None };
+                        }
+                        _ => app.set_err("give a git URL or owner/repo"),
+                    }
+                }
+                KeyCode::Backspace => {
+                    url.pop();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => url.clear(),
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => url.push(c),
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::CloneDir { url, dir, prompt, err } => {
+            match key.code {
+                KeyCode::Esc => app.modal = Modal::None,
+                KeyCode::Enter => {
+                    let dest = crate::clone::expand_home(dir);
+                    let (url, prompt) = (url.clone(), *prompt);
+                    match crate::clone::check_dest(&dest) {
+                        Err(e) => *err = Some(e.to_string()),
+                        // already a checkout there: skip the clone, go straight to naming
+                        Ok(false) => {
+                            remember_repo(app, &dest);
+                            app.op_root = dest;
+                            app.modal = Modal::NewTask { name: String::new(), prompt };
+                            app.set_info("already a repo there — using it");
+                        }
+                        Ok(true) => start_clone(app, url, dest, prompt),
+                    }
+                }
+                KeyCode::Backspace => {
+                    dir.pop();
+                    *err = None;
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => dir.clear(),
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    dir.push(c);
+                    *err = None;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+        Modal::Cloning { .. } => {
+            if key.code == KeyCode::Esc {
+                app.modal = Modal::None;
+                app.set_info("still cloning — the agent-name box opens when it is done");
+            }
+            return Ok(false);
+        }
         Modal::RepoPick { repos, filter, sel, prompt } => {
             let matches: Vec<(String, PathBuf)> = repos
                 .iter()
@@ -857,8 +934,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             match key.code {
                 KeyCode::Esc => app.modal = Modal::None,
                 KeyCode::Up => *sel = sel.saturating_sub(1),
+                // one row past the matches: "＋ clone a repo…"
                 KeyCode::Down => {
-                    if *sel + 1 < matches.len() {
+                    if *sel < matches.len() {
                         *sel += 1;
                     }
                 }
@@ -869,7 +947,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                         app.op_root = root;
                         app.modal = Modal::NewTask { name: String::new(), prompt: want_prompt };
                     } else {
-                        app.modal = Modal::None;
+                        app.modal = Modal::CloneUrl { url: String::new(), prompt: want_prompt };
                     }
                 }
                 KeyCode::Backspace => {
@@ -1407,6 +1485,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
         KeyCode::Char('n') => open_new(app, false),
         KeyCode::Char('N') => open_new(app, true),
+        KeyCode::Char('R') => {
+            app.modal = Modal::CloneUrl { url: String::new(), prompt: false };
+        }
         KeyCode::Char('a') => open_adopt(app),
         KeyCode::Char('s') => {
             if let Some(r) = app.selected() {
@@ -1934,8 +2015,15 @@ fn open_new(app: &mut App, prompt: bool) {
     if !app.root.as_os_str().is_empty() && !list.iter().any(|(_, r)| r == &app.root) {
         list.insert(0, (worktree::repo_name(&app.root), app.root.clone()));
     }
+    // …and repos cloned this session that have no agent yet
+    for r in &app.extra_repos {
+        if !list.iter().any(|(_, x)| x == r) {
+            list.push((worktree::repo_name(r), r.clone()));
+        }
+    }
 
-    if app.global && list.len() > 1 {
+    // the picker also offers "＋ clone a repo…", so show it whenever there's a choice
+    if app.global && !list.is_empty() {
         // Default the highlight to the launch repo if it's in the list.
         let sel = list.iter().position(|(_, r)| r == &app.root).unwrap_or(0);
         app.modal = Modal::RepoPick { repos: list, filter: String::new(), sel, prompt };
@@ -1951,6 +2039,67 @@ fn open_new(app: &mut App, prompt: bool) {
         }
         app.op_root = root;
         app.modal = Modal::NewTask { name: String::new(), prompt };
+    }
+}
+
+/// Where a dashboard clone goes by default: the `clone_dir` setting, else next to the
+/// launch repo, else next to any known repo, else your home folder.
+fn clone_parent(app: &App) -> PathBuf {
+    let near = Some(app.root.clone())
+        .filter(|r| !r.as_os_str().is_empty())
+        .or_else(|| worktree::discover_repos().into_iter().next().map(|(_, r)| r));
+    crate::clone::parent_dir(near.as_deref(), dirs::home_dir().unwrap_or_default())
+}
+
+fn remember_repo(app: &mut App, root: &Path) {
+    if !app.extra_repos.iter().any(|r| r == root) {
+        app.extra_repos.push(root.to_path_buf());
+    }
+}
+
+/// Run `git clone` on a thread (a big repo takes a while; the keys stay live).
+fn start_clone(app: &mut App, url: String, dest: PathBuf, prompt: bool) {
+    if app.clone_rx.is_some() {
+        app.set_err("a clone is already running — wait for it to finish");
+        return;
+    }
+    let (tx, rx) = channel();
+    let d = dest.clone();
+    let u = url.clone();
+    std::thread::spawn(move || {
+        let r = crate::clone::clone(&u, &d, true).map_err(|e| e.to_string());
+        let _ = tx.send((d, r));
+    });
+    app.clone_rx = Some(rx);
+    app.clone_prompt = prompt;
+    app.modal = Modal::Cloning { url, dest };
+}
+
+/// A finished clone: open the agent-name box for the new repo (unless you are busy
+/// in another box — then a message says where it went).
+fn poll_clone(app: &mut App) {
+    let Some(rx) = &app.clone_rx else { return };
+    let Ok((dest, res)) = rx.try_recv() else { return };
+    app.clone_rx = None;
+    let showing = matches!(app.modal, Modal::Cloning { .. });
+    let name = worktree::repo_name(&dest);
+    match res {
+        Ok(()) => {
+            remember_repo(app, &dest);
+            if showing || matches!(app.modal, Modal::None) {
+                app.op_root = dest;
+                app.modal = Modal::NewTask { name: String::new(), prompt: app.clone_prompt };
+                app.set_info(format!("cloned {name} — name its first agent"));
+            } else {
+                app.set_info(format!("cloned {name} — press n to add an agent"));
+            }
+        }
+        Err(e) => {
+            if showing {
+                app.modal = Modal::None;
+            }
+            app.set_err(format!("clone failed: {e}"));
+        }
     }
 }
 
@@ -3473,6 +3622,8 @@ fn render_menu(f: &mut Frame, app: &App, area: Rect) {
         vec![
             Span::styled("n", action),
             Span::styled(" new  │  ", muted),
+            Span::styled("R", action),
+            Span::styled(" clone a repo  │  ", muted),
             Span::styled("q", action),
             Span::styled(" quit", muted),
         ]
@@ -3847,6 +3998,66 @@ fn render_modal(f: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::CloneUrl { url, .. } => {
+            let area = centered(f.area().width.saturating_sub(4).min(100), 4, f.area());
+            f.render_widget(Clear, area);
+            let w = area.width.saturating_sub(2) as usize;
+            let lines = vec![
+                Line::raw(tail_fit(&format!("{url}▏"), w)),
+                Line::styled("https://…, git@host:owner/repo.git, or owner/repo (GitHub)", Style::default().fg(Color::DarkGray)),
+            ];
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(GREEN))
+                        .title(" clone a repo — URL (Enter next, Esc cancels) "),
+                ),
+                area,
+            );
+        }
+        Modal::CloneDir { url, dir, err, .. } => {
+            let area = centered(f.area().width.saturating_sub(4).min(100), 5, f.area());
+            f.render_widget(Clear, area);
+            let w = area.width.saturating_sub(2) as usize;
+            let note = match err {
+                Some(e) => Line::styled(e.clone(), Style::default().fg(RED)),
+                None => Line::styled("Enter clones · then you name the agent · ^u clears", Style::default().fg(Color::DarkGray)),
+            };
+            let lines = vec![
+                Line::styled(tail_fit(url, w), Style::default().fg(GREEN_SOFT)),
+                Line::raw(tail_fit(&format!("{dir}▏"), w)),
+                note,
+            ];
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(GREEN))
+                        .title(" clone into folder (Enter clones, Esc cancels) "),
+                ),
+                area,
+            );
+        }
+        Modal::Cloning { url, dest } => {
+            let area = centered(f.area().width.saturating_sub(4).min(100), 5, f.area());
+            f.render_widget(Clear, area);
+            let w = area.width.saturating_sub(2) as usize;
+            let lines = vec![
+                Line::styled(tail_fit(&format!("{} cloning {url}", SPINNER[app.spin]), w), Style::default().fg(GREEN)),
+                Line::styled(tail_fit(&format!("→ {}", crate::clone::tilde(dest)), w), Style::default().fg(Color::DarkGray)),
+                Line::styled("Esc hides this — the clone keeps going", Style::default().fg(Color::DarkGray)),
+            ];
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL).border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(GREEN))
+                        .title(" cloning "),
+                ),
+                area,
+            );
+        }
         Modal::RepoPick { repos, filter, sel, .. } => {
             let area = centered(58, 16, f.area());
             f.render_widget(Clear, area);
@@ -3861,17 +4072,20 @@ fn render_modal(f: &mut Frame, app: &App) {
             let h = area.height.saturating_sub(3) as usize;
             if matches.is_empty() {
                 lines.push(Line::styled("  no matching repos", Style::default().fg(Color::DarkGray)));
-            } else {
-                let start = if *sel >= h { *sel + 1 - h } else { 0 };
-                for (off, (name, _)) in matches.iter().skip(start).take(h).enumerate() {
-                    let idx = start + off;
-                    let style = if idx == *sel {
-                        Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(GREEN_SOFT)
-                    };
-                    lines.push(Line::styled(format!(" {name}"), style));
-                }
+            }
+            // the repos, then one "clone" row (index = matches.len())
+            let mut items: Vec<(String, bool)> = matches.iter().map(|(n, _)| (format!(" {n}"), false)).collect();
+            items.push((" ＋ clone a repo from a URL…  (R)".into(), true));
+            let start = if *sel >= h { *sel + 1 - h } else { 0 };
+            for (off, (label, is_clone)) in items.iter().skip(start).take(h).enumerate() {
+                let style = if start + off == *sel {
+                    Style::default().bg(SEL_BG).fg(SEL_FG).add_modifier(Modifier::BOLD)
+                } else if *is_clone {
+                    Style::default().fg(HL)
+                } else {
+                    Style::default().fg(GREEN_SOFT)
+                };
+                lines.push(Line::styled(label.clone(), style));
             }
             f.render_widget(
                 Paragraph::new(lines).block(
@@ -4077,6 +4291,7 @@ fn render_modal(f: &mut Frame, app: &App) {
                 k("Shift+↑↓", "scroll Preview / Diff"),
                 k("n", "new agent"),
                 k("N", "new agent with an initial prompt"),
+                k("R", "clone a repo (URL or owner/repo), then start an agent in it"),
                 k("a", "adopt an existing Claude session as an agent"),
                 k("s", "stop (keep worktree — resume later)"),
                 k("glyphs", "⠋ running · ● ready · ▲ needs input · ✓ merged · ✗ exited · z asleep"),
@@ -4230,6 +4445,25 @@ fn render_board(f: &mut Frame, app: &App, area: Rect) {
         st.select(sel_item);
         f.render_stateful_widget(list, cols[c], &mut st);
     }
+}
+
+/// `s` cut to `w` columns from the LEFT ("…" first), so the end of a long path or URL
+/// — the part you are typing — stays visible.
+fn tail_fit(s: &str, w: usize) -> String {
+    if s.width() <= w || w < 2 {
+        return s.to_string();
+    }
+    let mut out: Vec<char> = Vec::new();
+    let mut used = 1; // the "…"
+    for c in s.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > w {
+            break;
+        }
+        used += cw;
+        out.push(c);
+    }
+    std::iter::once('…').chain(out.into_iter().rev()).collect()
 }
 
 fn centered(w: u16, h: u16, area: Rect) -> Rect {
@@ -4787,6 +5021,13 @@ mod tests {
         assert!(d.contains("@@ -0,0 +1,2 @@\n+a\n+b\n"));
         assert!(!d.contains("No newline"));
         assert!(new_file_diff("y", "only").ends_with("@@ -0,0 +1 @@\n+only\n\\ No newline at end of file\n"));
+    }
+
+    #[test]
+    fn tail_fit_keeps_the_end() {
+        assert_eq!(tail_fit("short", 10), "short");
+        assert_eq!(tail_fit("/very/long/path/proj", 8), "…th/proj");
+        assert_eq!(tail_fit("/very/long/path/proj", 8).width(), 8);
     }
 
     #[test]
