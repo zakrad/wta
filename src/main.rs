@@ -176,8 +176,20 @@ fn main() -> anyhow::Result<()> {
         Command::Wait { tasks, until, any, timeout, poll, quiet } => {
             worktree::wait(&tasks, &until, any, &timeout, &poll, quiet)?
         }
-        Command::Stop { task } => {
-            worktree::stop(&task)?;
+        Command::Stop { task, session } => {
+            let task = match session.as_deref() {
+                // from inside the agent (⌥x): the session names the exact repo + task
+                Some(_) => {
+                    let (repo, task) = copyview::resolve(None, session.as_deref())?;
+                    worktree::stop_session(&repo, &task)?;
+                    task
+                }
+                None => {
+                    let task = task.context("which agent? `wta stop <task>`")?;
+                    worktree::stop(&task)?;
+                    task
+                }
+            };
             println!("stopped '{task}' — worktree kept; resume with `wta resume {task}`");
         }
         Command::Copy { task, session } => copyview::run_cli(task.as_deref(), session.as_deref())?,

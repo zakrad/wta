@@ -133,6 +133,7 @@ fn ensure_hint_bar(name: &str) {
     ensure_scroll_keys();
     ensure_copy_key();
     ensure_switch_keys();
+    ensure_stop_key();
     // macOS shows ⌥/^ (WezTerm/iTerm/Terminal all send left-Option as Alt/Meta);
     // elsewhere tmux's own M-/C- spelling.
     let (alt_y, ctrl_q) = if cfg!(target_os = "macos") { ("⌥y", "^q") } else { ("M-y", "C-q") };
@@ -142,11 +143,13 @@ fn ensure_hint_bar(name: &str) {
     };
     // all green: one hue reads calmer and matches wta's identity (and the left chip)
     let next_key = if cfg!(target_os = "macos") { "⌥]" } else { "M-]" };
+    let stop_key = if cfg!(target_os = "macos") { "⌥x" } else { "M-x" };
     let right = format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
         chip("green", "PgUp", "scroll"),
         chip("green", next_key, "next"),
         chip("green", alt_y, "copy"),
+        chip("green", stop_key, "stop"),
         chip("green", ctrl_q, "back"),
     );
     for (opt, val) in [
@@ -162,7 +165,7 @@ fn ensure_hint_bar(name: &str) {
         ),
         ("status-left-length", "48"),
         ("status-right", right.as_str()),
-        ("status-right-length", "60"),
+        ("status-right-length", "80"),
     ] {
         let _ = tmux().args(["set-option", "-g", opt, val]).status();
     }
@@ -317,6 +320,32 @@ fn ensure_switch_keys() {
             .stderr(Stdio::null())
             .status();
     }
+}
+
+/// `Alt-x` while attached: stop this agent after a y/n prompt — same as `wta stop`
+/// (session killed, worktree kept, resume later). The session ends, so the client
+/// drops back to wherever you attached from (the dashboard, or your shell).
+fn ensure_stop_key() {
+    if !dedicated() {
+        return;
+    }
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "wta".into());
+    // single-quoted for tmux (no `$`/`~` expansion), double-quoted for the shell
+    let run = format!("run-shell -b '\"{exe}\" stop --session \"#{{session_name}}\" >/dev/null'");
+    let _ = tmux()
+        .args([
+            "bind-key",
+            "-n",
+            "M-x",
+            "confirm-before",
+            "-p",
+            "stop #{?@wta_label,#{@wta_label},#{session_name}}? worktree is kept (y/n)",
+            &run,
+        ])
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// `Alt-y` while attached: wta's own vim-style copy mode in a tmux popup over the agent
