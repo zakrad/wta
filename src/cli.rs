@@ -365,7 +365,7 @@ pub enum Command {
     /// Stop an agent's session but KEEP its worktree, so it can be resumed later
     Stop {
         task: Option<String>,
-        /// the agent's tmux session name instead of a task (what the attached ⌥x key passes)
+        /// the agent's tmux session name instead of a task (what the attached ⌥s key passes)
         #[arg(long, conflicts_with = "task")]
         session: Option<String>,
     },

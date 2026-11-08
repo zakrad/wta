@@ -143,7 +143,7 @@ fn ensure_hint_bar(name: &str) {
     };
     // all green: one hue reads calmer and matches wta's identity (and the left chip)
     let next_key = if cfg!(target_os = "macos") { "⌥]" } else { "M-]" };
-    let stop_key = if cfg!(target_os = "macos") { "⌥x" } else { "M-x" };
+    let stop_key = if cfg!(target_os = "macos") { "⌥s" } else { "M-s" };
     let right = format!(
         "{}{}{}{}{}",
         chip("green", "PgUp", "scroll"),
@@ -299,7 +299,7 @@ fn ensure_scroll_keys() {
 
 /// `Alt-]` / `Alt-[` / `Alt-o` while attached: jump straight to the next / previous /
 /// last live agent, no dashboard round-trip. Prefix-free (so they pass through an outer
-/// tmux) and NOT among the outer config's own Alt bindings (M-n/M-p/M-c/M--/M-\\). Order
+/// tmux) and NOT among the outer config's own Alt bindings (M-n/M-p/M-c/M-x/M--/M-\\). Order
 /// matches the dashboard (see `worktree::fleet_sessions`). Runs THIS binary so it doesn't
 /// need `wta` on PATH.
 fn ensure_switch_keys() {
@@ -322,9 +322,11 @@ fn ensure_switch_keys() {
     }
 }
 
-/// `Alt-x` while attached: stop this agent after a y/n prompt — same as `wta stop`
+/// `Alt-s` while attached: stop this agent after a y/n prompt — same as `wta stop`
 /// (session killed, worktree kept, resume later). The session ends, so the client
 /// drops back to wherever you attached from (the dashboard, or your shell).
+/// Not Alt-x: a common outer-tmux binding is `bind -n M-x kill-pane`, which would eat
+/// the key and kill the pane wta runs in.
 fn ensure_stop_key() {
     if !dedicated() {
         return;
@@ -333,12 +335,14 @@ fn ensure_stop_key() {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "wta".into());
     // single-quoted for tmux (no `$`/`~` expansion), double-quoted for the shell
+    // 0.4.1–0.4.2 bound M-x; drop it so the old key does nothing on our server
+    let _ = tmux().args(["unbind-key", "-n", "M-x"]).stderr(Stdio::null()).status();
     let run = format!("run-shell -b '\"{exe}\" stop --session \"#{{session_name}}\" >/dev/null'");
     let _ = tmux()
         .args([
             "bind-key",
             "-n",
-            "M-x",
+            "M-s",
             "confirm-before",
             "-p",
             "stop #{?@wta_label,#{@wta_label},#{session_name}}? worktree is kept (y/n)",
