@@ -4,6 +4,17 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] — 2026-11-09
+
+### Added
+- **Clone a repo and start an agent in it.** Dashboard **`R`** (or `n` → **＋ clone a
+  repo**): type a git URL or GitHub `owner/repo`, check the folder, and the clone runs in
+  the background. When it is done, the agent-name box opens for the new repo, as with
+  `n`. CLI: **`wta clone <url> [dir] [-t task] [-- agent args]`** — asks for the agent
+  name when `-t` is not given.
+- **`clone_dir` setting** (`wta config clone_dir ~/code`, or `,` in the dashboard):
+  where new clones go. Default: next to the repo you are in.
+
 ## [0.4.1] — 2026-11-08
 
 ### Added

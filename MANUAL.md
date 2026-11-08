@@ -59,6 +59,23 @@ Task names must be letters/digits/`-`/`_` (≤64 chars). From the dashboard pres
 `n` (blank agent), `N` (agent + initial prompt), or `b` (pick an existing branch
 to base on, with type-to-filter).
 
+**Clone a new repo and start an agent in it:**
+
+```sh
+wta clone owner/repo                   # GitHub shorthand; asks for the agent name (Enter = clone only)
+wta clone git@github.com:me/api.git -t first   # any git URL; -t names the agent, no question
+wta clone https://gitlab.com/g/p.git ~/work/p -t x -- "read the README and plan"
+wta config clone_dir ~/code            # where clones go (default: next to the repo you are in)
+```
+
+In the dashboard press **`R`** (or `n` → the last row, **＋ clone a repo**). Type the
+URL, then check the folder (prefilled `<clone_dir>/<repo>`, editable, `^u` clears).
+The clone runs in the background with a spinner — `Esc` hides it. When it is done the
+agent-name box opens for the new repo, the same as `n`. A folder that is already a
+repo is used as is; a non-empty folder that is not a repo is refused. In the dashboard
+git never asks for a password: use ssh-agent or a credential helper (as `git` does
+normally), or the clone fails with git's own message.
+
 **Fan-out** — try one prompt N ways, keep the best:
 
 ```sh
@@ -117,6 +134,7 @@ Right: **Preview** (live, full-color capture of the agent's pane) and **Diff**
 | `e` | open the worktree in your editor |
 | `m` | mergeability matrix overlay |
 | `n` / `N` | new agent / new agent with an initial prompt |
+| `R` | clone a repo (URL or `owner/repo`), then name its first agent |
 | `b` | new agent based on an existing branch |
 | `s` | stop (keep the worktree, resume later) |
 | `D` | kill (destroy worktree + branch; confirms, and warns on unpushed commits) |

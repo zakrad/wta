@@ -54,6 +54,19 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         agent_args: Vec<String>,
     },
+    /// Clone a repo, then start an agent in it (asks for the name, like `new`)
+    Clone {
+        /// git URL, or GitHub `owner/repo`
+        url: String,
+        /// folder to clone into (default: `<clone_dir>/<repo>`, else next to the repo you are in, else here)
+        dir: Option<String>,
+        /// name of the agent to start (asked for when omitted; empty = clone only)
+        #[arg(long, short)]
+        task: Option<String>,
+        /// Everything after `--` is passed to the agent command (default: claude)
+        #[arg(last = true)]
+        agent_args: Vec<String>,
+    },
     /// Register an EXISTING dir (an outside Claude session) as an agent under its repo,
     /// grouped with your others — continue it inside wta later with Enter / `wta resume`
     Adopt {
