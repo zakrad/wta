@@ -180,7 +180,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Stop { task, session } => {
             let task = match session.as_deref() {
-                // from inside the agent (⌥x): the session names the exact repo + task
+                // from inside the agent (⌥s): the session names the exact repo + task
                 Some(_) => {
                     let (repo, task) = copyview::resolve(None, session.as_deref())?;
                     worktree::stop_session(&repo, &task)?;

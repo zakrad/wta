@@ -207,10 +207,10 @@ move between columns, `j`/`k` inside one; `Enter` and the other keys work as usu
   real terminal. Type normally. **`Ctrl-q` detaches** back to wta (not tmux's
   `Ctrl-b d`). A thin status bar shows `repo › task` **plus the agent's live state glyph**
   (`⟳` working · `●` ready · `▲` needs you — the chip turns yellow) on the left, and key
-  chips on the right: `PgUp scroll · ⌥] next · ⌥y copy · ⌥x stop · ^q back`. Set `WTA_HINT_BAR=0` to hide the
+  chips on the right: `PgUp scroll · ⌥] next · ⌥y copy · ⌥s stop · ^q back`. Set `WTA_HINT_BAR=0` to hide the
   bar entirely. On macOS `⌥` is the **left** Option key
   (WezTerm/iTerm send it as Alt; the right one composes accents).
-- **Stop from inside** — **`Alt-x` (macOS: left `⌥x`) while attached** asks
+- **Stop from inside** — **`Alt-s` (macOS: left `⌥s`) while attached** asks
   `stop repo › task? (y/n)`. On `y` it does what `wta stop` does: the session ends, the
   worktree stays, and you drop back to the dashboard (or your shell). Resume it later
   with `Enter` in the dashboard or `wta resume <task>`. `wta stop --session <name>`

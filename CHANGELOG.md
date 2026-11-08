@@ -4,6 +4,13 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] — 2026-11-09
+
+### Fixed
+- **The stop key is now `⌥s` (Alt-s), not `⌥x`.** Many tmux configs bind
+  `M-x kill-pane`; run inside such a tmux, `⌥x` never reached the agent and closed the
+  pane wta was running in. The old binding is removed from wta's tmux server.
+
 ## [0.4.2] — 2026-11-09
 
 ### Added
