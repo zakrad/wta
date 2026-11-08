@@ -4,6 +4,28 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] — 2026-11-08
+
+### Added
+- **`⌥x` (Alt-x) stops the agent you are attached to**, after a y/n prompt. Same as
+  `wta stop`: the worktree stays, you drop back to the dashboard. New
+  `wta stop --session <name>` behind it. The hint bar shows the key.
+
+### Fixed
+- **Dashboard no longer freezes for seconds while you scroll with `j`/`k`.** All git,
+  tmux and file reads for the list now run on background threads. Before, every refresh
+  read the whole fleet on the UI thread — about 0.4 s each time, and 2–3 s with one big
+  worktree. Now a frame takes a few milliseconds whatever the fleet size.
+- The fleet read itself is about 3× faster: repos and agents are read in parallel
+  (24 agents: 180 ms → 55 ms), so the list after an action (kill, new, resume) updates
+  at once.
+- Queued keys are handled together before the next frame, so a held `j` moves many rows
+  for one redraw and one preview load.
+- A worktree with thousands of untracked files (an unignored `node_modules`, build
+  output) no longer stalls the stats or the Diff tab: wta counts and shows the first 300
+  untracked files (text, ≤ 1 MiB each) and notes how many it skipped. Untracked-file
+  diffs are built in-process instead of one `git diff --no-index` per file.
+
 ## [0.4.0] — 2026-10-26
 
 ### Added

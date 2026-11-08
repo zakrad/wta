@@ -285,6 +285,13 @@ struct App {
     usage_rx: Option<Receiver<Vec<(String, u64)>>>,
     usage5h: Vec<(String, u64)>,
     costmtime: HashMap<String, u64>, // session -> newest transcript mtime last parsed
+    // Diffstat + merge checks run on a worker thread too (a worktree with thousands of
+    // untracked files takes seconds) — jobs out on git_tx, results back on git_rx.
+    git_tx: Sender<GitJob>,
+    git_rx: Receiver<(String, (u32, u32), bool)>,
+    git_inflight: HashSet<String>, // sessions with a queued/running git job (dedupe)
+    probed_at: Option<Instant>,    // start time of the newest applied fleet snapshot
+    detail_dirty: bool,            // selection moved: reload the detail pane before the next frame
 }
 
 impl App {
@@ -298,6 +305,31 @@ impl App {
                 let cm = crate::cost::for_worktree(&path);
                 if res_tx.send((session, cm)).is_err() {
                     break; // dashboard gone
+                }
+            }
+        });
+        // Git worker: diffstat + merged per agent. The selected agent's job runs first,
+        // so its numbers never wait behind a sweep of the whole fleet.
+        let (git_tx, gjob_rx) = channel::<GitJob>();
+        let (gres_tx, git_rx) = channel::<(String, (u32, u32), bool)>();
+        std::thread::spawn(move || {
+            let mut queue: Vec<GitJob> = Vec::new();
+            loop {
+                if queue.is_empty() {
+                    match gjob_rx.recv() {
+                        Ok(j) => queue.push(j),
+                        Err(_) => break, // dashboard gone
+                    }
+                }
+                while let Ok(j) = gjob_rx.try_recv() {
+                    queue.push(j);
+                }
+                let i = queue.iter().position(|j| j.prio).unwrap_or(0);
+                let j = queue.remove(i);
+                let stat = numstat(&j.path, &j.base);
+                let merged = is_merged(&j.path, &j.base, &j.branch);
+                if gres_tx.send((j.session, stat, merged)).is_err() {
+                    break;
                 }
             }
         });
@@ -338,6 +370,11 @@ impl App {
             cost_rx,
             cost_inflight: HashSet::new(),
             costmtime: HashMap::new(),
+            git_tx,
+            git_rx,
+            git_inflight: HashSet::new(),
+            probed_at: None,
+            detail_dirty: false,
             view: View::Split,
             pending_g: false,
             global: false,
@@ -439,7 +476,7 @@ fn open_inline(term: &mut Term, cmd: &str, path: &Path) {
 
 /// Run `f` with the process cwd set to `root`, restoring it after — lets the
 /// cwd-based worktree ops (rm/push/resume/new) act on any repo from the global
-/// dash. Safe because the dashboard is single-threaded.
+/// dash. Safe because the worker threads (probe, git, cost) use absolute paths only.
 fn in_repo<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let prev = std::env::current_dir().ok();
     if root.as_os_str().is_empty() {
@@ -491,7 +528,9 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
     app.global = global;
     refresh(&mut app);
     load_detail(&mut app);
+    let probes = spawn_prober(global, app.repo.clone(), app.root.clone());
     let mut last_tick = Instant::now();
+    let mut ticks: u64 = 0;
 
     loop {
         if let Some((_, _, t)) = &app.msg {
@@ -501,17 +540,39 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
         }
         poll_checks(&mut app);
         drain_costs(&mut app);
+        drain_git(&mut app);
         if let Some(rx) = &app.usage_rx {
             while let Ok(v) = rx.try_recv() {
                 app.usage5h = v;
             }
         }
+        if let Ok(snap) = probes.try_recv() {
+            apply_snapshot(&mut app, snap);
+        }
+        if app.detail_dirty {
+            app.detail_dirty = false;
+            load_detail(&mut app);
+        }
         term.draw(|f| ui(f, &mut app))?;
 
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && handle_key(&mut app, key)? {
-                    return Ok(());
+        if event::poll(Duration::from_millis(100))? {
+            // Handle every key already queued before the next frame: a held j/k moves
+            // many rows for one paint and one detail load, instead of one each.
+            loop {
+                if let Event::Key(key) = event::read()? {
+                    // only plain moves may run on a stale detail pane; any other key
+                    // (diff cursor, comment, scroll…) sees the selected agent's text
+                    if app.detail_dirty && !is_move_key(&key) {
+                        app.detail_dirty = false;
+                        load_detail(&mut app);
+                    }
+                    if key.kind == KeyEventKind::Press && handle_key(&mut app, key)? {
+                        return Ok(());
+                    }
+                }
+                let leaving = app.attach.is_some() || app.copy.is_some() || app.open.is_some();
+                if leaving || !event::poll(Duration::ZERO)? {
+                    break;
                 }
             }
         }
@@ -537,11 +598,20 @@ fn event_loop(term: &mut Term, global: bool) -> Result<()> {
 
         if last_tick.elapsed() >= Duration::from_millis(600) {
             app.spin = (app.spin + 1) % SPINNER.len();
-            refresh(&mut app);
-            load_detail(&mut app);
+            ticks += 1;
+            // live preview: one capture-pane. A diff is costlier — refresh it less often.
+            if app.tab == Tab::Preview || ticks % 5 == 0 {
+                load_detail(&mut app);
+            }
             last_tick = Instant::now();
         }
     }
+}
+
+/// j/k/↑/↓ with no modifier: a selection move, safe to batch without the detail pane.
+fn is_move_key(key: &KeyEvent) -> bool {
+    key.modifiers == KeyModifiers::NONE
+        && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Up | KeyCode::Down)
 }
 
 /// Returns Ok(true) to quit.
@@ -1951,16 +2021,6 @@ fn is_merged(path: &Path, base: &str, branch: &str) -> bool {
     let base_t = git_in(path, &["rev-parse", base]);
     bt.is_some() && bt != base_t // exclude the un-worked branch sitting exactly at base
 }
-/// Like `git_in` but returns stdout even on a non-zero exit (needed for
-/// `git diff --no-index`, which exits 1 whenever the files differ).
-fn git_stdout(path: &Path, args: &[&str]) -> Option<String> {
-    std::process::Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
-}
 /// Untracked, non-ignored files in the worktree — agent-created files that a
 /// plain `git diff` wouldn't show.
 fn untracked_files(path: &Path) -> Vec<String> {
@@ -1970,10 +2030,42 @@ fn untracked_files(path: &Path) -> Vec<String> {
 }
 /// Additions contributed by an untracked file (its line count; 0 if binary/missing).
 fn untracked_adds(path: &Path, rel: &str) -> u32 {
-    match std::fs::read(path.join(rel)) {
-        Ok(bytes) if !bytes.contains(&0) => bytes.iter().filter(|&&b| b == b'\n').count() as u32,
-        _ => 0,
+    untracked_text(path, rel).map(|t| t.lines().count() as u32).unwrap_or(0)
+}
+/// Untracked files counted / shown per agent. More than this is almost always build
+/// output or dependencies that `.gitignore` misses, not the agent's work.
+const UNTRACKED_MAX: usize = 300;
+/// An untracked file's text, if it is a small text file (skips binaries and anything
+/// over 1 MiB, which a diff view can't show usefully anyway).
+fn untracked_text(path: &Path, rel: &str) -> Option<String> {
+    let p = path.join(rel);
+    if std::fs::metadata(&p).ok()?.len() > 1 << 20 {
+        return None;
     }
+    let bytes = std::fs::read(p).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+/// A git-style "new file" diff for one untracked file, built in-process: one
+/// `git diff --no-index` spawn per file made a big worktree's Diff tab take seconds.
+fn new_file_diff(rel: &str, text: &str) -> String {
+    let n = text.lines().count();
+    let mut d = format!("diff --git a/{rel} b/{rel}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel}\n");
+    if n == 0 {
+        return d;
+    }
+    d.push_str(&format!("@@ -0,0 +1{} @@\n", if n == 1 { String::new() } else { format!(",{n}") }));
+    for l in text.lines() {
+        d.push('+');
+        d.push_str(l);
+        d.push('\n');
+    }
+    if !text.ends_with('\n') {
+        d.push_str("\\ No newline at end of file\n");
+    }
+    d
 }
 /// Commits on HEAD not present on any remote — work that a force-kill would destroy.
 /// Is "recreate from scratch" safe for this agent? Refuses (with the reason) when it
@@ -2027,9 +2119,10 @@ fn numstat(path: &Path, base: &str) -> (u32, u32) {
         a += it.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0);
         d += it.next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0);
     }
-    // include agent-created (untracked) files, which `git diff` omits
-    for f in untracked_files(path) {
-        a += untracked_adds(path, &f);
+    // include agent-created (untracked) files, which `git diff` omits — capped, so an
+    // unignored node_modules can't turn one count into minutes of reads
+    for f in untracked_files(path).iter().take(UNTRACKED_MAX) {
+        a += untracked_adds(path, f);
     }
     (a, d)
 }
@@ -2038,16 +2131,24 @@ fn full_diff(path: &Path, base: &str) -> String {
         Some(mb) => git_in(path, &["diff", &mb]).unwrap_or_default(),
         None => String::new(),
     };
-    // append untracked files as new-file diffs (`--no-index` doesn't touch the index)
-    for f in untracked_files(path) {
-        if let Some(d) = git_stdout(path, &["diff", "--no-index", "--", "/dev/null", &f]) {
-            if !d.trim().is_empty() {
-                if !out.is_empty() && !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                out.push_str(&d);
+    // append untracked files as new-file diffs
+    let untracked = untracked_files(path);
+    for f in untracked.iter().take(UNTRACKED_MAX) {
+        if let Some(t) = untracked_text(path, f) {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
             }
+            out.push_str(&new_file_diff(f, &t));
         }
+    }
+    if untracked.len() > UNTRACKED_MAX {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "# … and {} more untracked files not shown (add them to .gitignore?)\n",
+            untracked.len() - UNTRACKED_MAX
+        ));
     }
     out
 }
@@ -2145,9 +2246,85 @@ fn poll_checks(app: &mut App) {
 /// Build the rows for ONE repo (merging managed worktrees + state agents), keyed
 /// by the globally-unique session so the global dash's caches never collide across
 /// repos that reuse a task name.
-fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out: &mut Vec<Row>) {
+/// One agent's raw facts — every git/tmux/fs read the list needs. Kept apart from
+/// `Row` so the reads run on the probe thread and the UI thread only does the logic
+/// (status, caches, alerts). Diffstat and merge checks are slower still and run on
+/// their own worker (see `GitJob`).
+struct Probe {
+    repo: String,
+    root: PathBuf,
+    repo_name: String,
+    task: String,
+    session: String,
+    path: Option<PathBuf>,
+    branch: String,
+    base: String,
+    state: Option<status::AgentState>,
+    alive: bool,
+    pane: String,           // capture-pane text ("" when not alive)
+    mtime: Option<u64>,     // newest transcript mtime (None without a worktree)
+    ac: Option<(u32, u32)>, // .wta/task.md acceptance criteria (checked, total)
+    has_verify: bool,       // the repo has a verify suite
+}
+
+/// A full read of the fleet. `taken` orders snapshots, so a stale one from the probe
+/// thread never overwrites a newer synchronous `refresh`.
+struct Snapshot {
+    taken: Instant,
+    probes: Vec<Probe>,
+}
+
+/// Read the whole fleet (or the launch repo with `--here`). Pure I/O, no App state —
+/// safe on any thread.
+fn probe_fleet(global: bool, repo: &str, root: &Path) -> Snapshot {
+    let taken = Instant::now();
+    let targets: Vec<(String, PathBuf)> = if global {
+        worktree::discover_repos()
+    } else if !repo.is_empty() {
+        vec![(repo.to_string(), root.to_path_buf())]
+    } else {
+        Vec::new()
+    };
+    // One `tmux list-sessions` for the whole fleet instead of a `has-session` spawn
+    // per agent — liveness is then a set lookup.
+    let live: HashSet<String> = tmux::list_sessions().into_iter().collect();
+    // one thread per repo: the reads are process spawns (git, tmux) that mostly wait,
+    // so the fleet takes as long as its slowest repo, not the sum of all of them
+    let per_repo: Vec<Vec<Probe>> = std::thread::scope(|sc| {
+        let live = &live;
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|(repo, root)| {
+                sc.spawn(move || {
+                    let mut v = Vec::new();
+                    probe_repo(repo, root, live, &mut v);
+                    v
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+    });
+    Snapshot { taken, probes: per_repo.into_iter().flatten().collect() }
+}
+
+/// Probe the fleet in the background, so a slow repo never freezes the keys. Sends
+/// at most one snapshot ahead: while the UI is away (attached, editor open) the
+/// thread waits instead of capturing panes nobody looks at. Ends with the dashboard.
+fn spawn_prober(global: bool, repo: String, root: PathBuf) -> Receiver<Snapshot> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Snapshot>(1);
+    std::thread::spawn(move || loop {
+        let snap = probe_fleet(global, &repo, &root);
+        if tx.send(snap).is_err() {
+            break; // dashboard gone
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    });
+    rx
+}
+
+fn probe_repo(repo: &str, root: &Path, live: &HashSet<String>, out: &mut Vec<Probe>) {
     let repo_name = worktree::repo_name(root);
-    let states: HashMap<String, status::AgentState> = status::read_states(repo)
+    let mut states: HashMap<String, status::AgentState> = status::read_states(repo)
         .unwrap_or_default()
         .into_iter()
         .map(|s| (s.task.clone(), s))
@@ -2185,79 +2362,122 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
         let pb = rank.get(b).copied().unwrap_or(u32::MAX);
         pa.cmp(&pb).then_with(|| a.cmp(b))
     });
+    let has_verify = worktree::has_verify_suite(root);
 
+    // each agent on its own thread too (a capture + a branch lookup, both spawns);
+    // results keep the list order
+    let tasks: Vec<(String, Option<status::AgentState>)> =
+        order.into_iter().map(|t| { let st = states.remove(&t); (t, st) }).collect();
+    let (paths, branches, repo_name) = (&paths, &branches, &repo_name);
+    std::thread::scope(|sc| {
+        let handles: Vec<_> = tasks
+            .into_iter()
+            .map(|(task, state)| {
+                sc.spawn(move || {
+                    let path = paths.get(&task).cloned();
+                    let branch = branches
+                        .get(&task)
+                        .cloned()
+                        .or_else(|| path.as_deref().and_then(|p| git_in(p, &["rev-parse", "--abbrev-ref", "HEAD"])))
+                        .unwrap_or_default();
+                    let session = tmux::session_name(repo, &task);
+                    // The branch this agent is based on / targets: the persisted base (from
+                    // `--base` or the branch it was forked off), else a best-effort
+                    // main/master lookup. Used for the sidebar label AND every diff.
+                    let base = state
+                        .as_ref()
+                        .and_then(|s| s.base.clone())
+                        .filter(|b| !b.is_empty())
+                        .or_else(|| path.as_deref().map(crate::worktree::base_branch))
+                        .unwrap_or_else(|| "HEAD".to_string());
+                    let alive = live.contains(&session);
+                    let pane = if alive { tmux::capture(&session).unwrap_or_default() } else { String::new() };
+                    // a cheap stat: the newest transcript's mtime gates a fresh (heavy) cost parse
+                    let mtime = path.as_deref().map(|p| crate::cost::sessions_for(p).1);
+                    let ac = path
+                        .as_deref()
+                        .and_then(crate::worktree::read_task_spec)
+                        .map(|s| (s.checked_ac, s.total_ac));
+                    Probe {
+                        repo: repo.to_string(),
+                        root: root.to_path_buf(),
+                        repo_name: repo_name.clone(),
+                        state,
+                        task,
+                        session,
+                        path,
+                        branch,
+                        base,
+                        alive,
+                        pane,
+                        mtime,
+                        ac,
+                        has_verify,
+                    }
+                })
+            })
+            .collect();
+        out.extend(handles.into_iter().filter_map(|h| h.join().ok()));
+    });
+}
+
+/// Diffstat + merge check for one agent, run on the git worker. A big worktree (say,
+/// thousands of untracked files) takes seconds — never on the UI thread.
+struct GitJob {
+    session: String,
+    path: PathBuf,
+    base: String,
+    branch: String,
+    prio: bool, // the selected agent: jumps the queue
+}
+
+/// Turn a snapshot into rows: the status logic, caches and job hand-offs. No git and
+/// no transcript reads here; the only tmux call is Enter on a trust prompt.
+fn rows_from(app: &mut App, probes: Vec<Probe>) -> Vec<Row> {
+    // the diffstat cadence: every agent on each 5th snapshot, the selected one always
     let full_sweep = app.tick % 5 == 0;
     let sel_session = app.selected().map(|r| r.session.clone());
     let auto_trust = std::env::var("WTA_AUTO_TRUST").map(|v| v != "0").unwrap_or(true);
+    let mut out = Vec::with_capacity(probes.len());
 
-    for task in order {
-        let path = paths.get(&task).cloned();
-        let branch = branches
-            .get(&task)
-            .cloned()
-            .or_else(|| path.as_deref().and_then(|p| git_in(p, &["rev-parse", "--abbrev-ref", "HEAD"])))
-            .unwrap_or_default();
-        let session = tmux::session_name(repo, &task);
+    for p in probes {
+        let Probe { repo, root, repo_name, task, session, path, branch, base, state, alive, pane, mtime, ac, .. } = p;
         let is_sel = sel_session.as_deref() == Some(session.as_str());
 
-        // The branch this agent is based on / targets: the persisted base (from `--base`
-        // or the branch it was forked off), else a best-effort main/master lookup. Used
-        // for the sidebar label AND every diff below, so they stay consistent.
-        let base = crate::status::base_of(repo, &task)
-            .or_else(|| path.as_deref().map(crate::worktree::base_branch))
-            .unwrap_or_else(|| "HEAD".to_string());
-
-        // Token usage + model, cadence-refreshed like the diffstat (parsing transcripts
-        // is heavy, so only on the periodic full sweep or for the selected agent).
-        // Cost is parsed on the worker thread (transcripts can be hundreds of MB).
-        // A cheap stat (newest transcript mtime) gates it: only when the agent has
-        // written new output since we last parsed do we enqueue a fresh parse, so an
-        // idle fleet costs nothing and a paint never blocks on transcript reads.
-        let (cost, model) = match path.as_deref() {
-            Some(p) => {
-                let (_, mtime) = crate::cost::sessions_for(p);
+        // Token usage + model. Cost is parsed on the worker thread (transcripts can be
+        // hundreds of MB); a fresh parse is enqueued only when the agent wrote new
+        // output since we last parsed, so an idle fleet costs nothing.
+        let (cost, model) = match (path.as_deref(), mtime) {
+            (Some(pth), Some(mtime)) => {
                 let stale = app.costmtime.get(&session).copied() != Some(mtime);
                 if stale && app.cost_inflight.insert(session.clone()) {
                     app.costmtime.insert(session.clone(), mtime);
-                    let _ = app.cost_tx.send((session.clone(), p.to_path_buf()));
+                    let _ = app.cost_tx.send((session.clone(), pth.to_path_buf()));
                 }
                 app.costcache.get(&session).cloned().unwrap_or_default()
             }
-            None => (crate::cost::Usage::default(), None),
+            _ => (crate::cost::Usage::default(), None),
         };
 
-        // Diffstat / merge check are cheap git calls; keep them synchronous but only
-        // on the periodic sweep or for the selected agent, so launch isn't a burst of
-        // git across the whole fleet (the first paint shows cached-or-zero instead).
-        let (added, removed) = match path.as_deref() {
-            Some(p) => {
-                if full_sweep || is_sel {
-                    let v = numstat(p, &base);
-                    app.diffcache.insert(session.clone(), v);
-                    v
-                } else {
-                    app.diffcache.get(&session).copied().unwrap_or((0, 0))
-                }
+        // Diffstat / merge check: cached numbers now, a fresh count from the git worker
+        // on the sweep (or for the selected agent) — first paint shows cached-or-zero.
+        if let Some(pth) = path.as_deref() {
+            if (full_sweep || is_sel) && app.git_inflight.insert(session.clone()) {
+                let _ = app.git_tx.send(GitJob {
+                    session: session.clone(),
+                    path: pth.to_path_buf(),
+                    base: base.clone(),
+                    branch: branch.clone(),
+                    prio: is_sel,
+                });
             }
-            None => (0, 0),
-        };
-        let merged = match path.as_deref() {
-            Some(p) => {
-                if full_sweep || is_sel {
-                    let v = is_merged(p, &base, &branch);
-                    app.mergedcache.insert(session.clone(), v);
-                    v
-                } else {
-                    app.mergedcache.get(&session).copied().unwrap_or(false)
-                }
-            }
-            None => false,
-        };
+        }
+        let (added, removed) = app.diffcache.get(&session).copied().unwrap_or((0, 0));
+        let merged = path.is_some() && app.mergedcache.get(&session).copied().unwrap_or(false);
 
-        let alive = live.contains(&session);
         let mut limit = false;
         let status = if alive {
-            let text = tmux::capture(&session).unwrap_or_default();
+            let text = pane;
             limit = crate::account::is_limit_hit(&text);
             if auto_trust && !app.trust_done.contains(&session) {
                 if is_trust_prompt(&text) {
@@ -2276,15 +2496,14 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
             // refresh and Ready on the next — a phantom "finished" edge that chimed
             // for the whole fleet every time you opened the dashboard.
             let changed = app.hashes.insert(session.clone(), h).map(|old| old != h).unwrap_or(false);
-            let st = states.get(&task);
-            match st.map(|s| s.status.as_str()) {
+            match state.as_ref().map(|s| s.status.as_str()) {
                 // Claude's Notification hook is the authoritative "needs you" signal.
                 Some("needs_input") => Status::NeedsInput,
                 // No authoritative hook signal → classify the pane by screen manifest so
                 // NON-Claude agents (codex/gemini/…) still report needs-input / working
                 // without hooks. `None` = no opinion → fall back to the pane-hash heuristic.
                 _ => {
-                    let engine = st.and_then(|s| s.engine.as_deref());
+                    let engine = state.as_ref().and_then(|s| s.engine.as_deref());
                     match crate::detect::classify(engine, &text) {
                         // a terminal error (auth/quota) needs you as much as a prompt does
                         Some(crate::detect::PaneState::Error) => Status::NeedsInput,
@@ -2306,11 +2525,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
             status
         };
 
-        let ac = path
-            .as_deref()
-            .and_then(crate::worktree::read_task_spec)
-            .map(|s| (s.checked_ac, s.total_ac));
-        let st = states.get(&task);
+        let st = state.as_ref();
         let updated_unix = st.map(|s| s.updated_unix).unwrap_or(0);
         let pinned = st.map(|s| s.pinned).unwrap_or(false);
         let tags = st.map(|s| s.tags.clone()).unwrap_or_default();
@@ -2319,9 +2534,9 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
         let account = st.and_then(|s| s.account.clone());
         out.push(Row {
             task,
-            repo: repo.to_string(),
-            root: root.to_path_buf(),
-            repo_name: repo_name.clone(),
+            repo,
+            root,
+            repo_name,
             base,
             status,
             added,
@@ -2344,6 +2559,7 @@ fn repo_rows(app: &mut App, repo: &str, root: &Path, live: &HashSet<String>, out
             limit,
         });
     }
+    out
 }
 
 /// Order one repo's rows into a tree: pinned units first, each child right under its
@@ -2525,6 +2741,26 @@ fn apply_view(app: &mut App) {
         .min(app.rows.len().saturating_sub(1));
 }
 
+/// Fold in finished diffstat / merge checks. The numbers update in place; a change in
+/// "merged" shows with the next snapshot.
+fn drain_git(app: &mut App) {
+    let mut updated = false;
+    while let Ok((session, stat, merged)) = app.git_rx.try_recv() {
+        app.git_inflight.remove(&session);
+        app.diffcache.insert(session.clone(), stat);
+        app.mergedcache.insert(session, merged);
+        updated = true;
+    }
+    if updated {
+        for r in app.rows.iter_mut().chain(app.all_rows.iter_mut()) {
+            if let Some(&(a, d)) = app.diffcache.get(&r.session) {
+                r.added = a;
+                r.removed = d;
+            }
+        }
+    }
+}
+
 /// Fold in any cost results the worker finished since the last frame, updating both
 /// the cache and the already-built rows so the numbers appear without a full refresh.
 fn drain_costs(app: &mut App) {
@@ -2544,28 +2780,27 @@ fn drain_costs(app: &mut App) {
     }
 }
 
+/// Read the fleet now and rebuild the rows — after an action, so the list shows its
+/// effect at once. The periodic update comes from the probe thread instead
+/// (`spawn_prober`), so it never blocks the keys.
 fn refresh(app: &mut App) {
+    let snap = probe_fleet(app.global, &app.repo, &app.root);
+    apply_snapshot(app, snap);
+}
+
+fn apply_snapshot(app: &mut App, snap: Snapshot) {
+    // a snapshot started before the newest one we applied is stale: applying it would
+    // flip pane hashes back and fake a Running → Ready edge
+    if app.probed_at.map(|t| snap.taken < t).unwrap_or(false) {
+        return;
+    }
+    app.probed_at = Some(snap.taken);
     let prev_sel = app.selected().map(|r| r.session.clone());
     app.tick = app.tick.wrapping_add(1);
 
-    // targets: every repo with agents (global), or just the launch repo (--here)
-    let targets: Vec<(String, PathBuf)> = if app.global {
-        worktree::discover_repos()
-    } else if !app.repo.is_empty() {
-        vec![(app.repo.clone(), app.root.clone())]
-    } else {
-        Vec::new()
-    };
-
-    // One `tmux list-sessions` for the whole fleet instead of a `has-session` spawn
-    // per agent every refresh — liveness is then a set lookup.
-    let live: HashSet<String> = tmux::list_sessions().into_iter().collect();
-
-    let mut rows = Vec::new();
-    for (repo, root) in &targets {
-        repo_rows(app, repo, root, &live, &mut rows);
-    }
-    app.all_rows = rows;
+    let verify_roots: HashSet<PathBuf> =
+        snap.probes.iter().filter(|p| p.has_verify).map(|p| p.root.clone()).collect();
+    app.all_rows = rows_from(app, snap.probes);
     apply_view(app);
     app.sel = prev_sel
         .and_then(|s| app.rows.iter().position(|r| r.session == s))
@@ -2581,6 +2816,7 @@ fn refresh(app: &mut App) {
     app.mergedcache.retain(|k, _| live.contains(k));
     app.cost_inflight.retain(|k| live.contains(k));
     app.costmtime.retain(|k, _| live.contains(k));
+    app.git_inflight.retain(|k| live.contains(k));
     app.trust_seen.retain(|k, _| live.contains(k));
     app.trust_done.retain(|k| live.contains(k));
 
@@ -2600,7 +2836,7 @@ fn refresh(app: &mut App) {
         if (became_needs || finished) && sel_now.as_deref() != Some(r.session.as_str()) {
             app.attention.insert(r.session.clone());
         }
-        let has_verify = worktree::has_verify_suite(&r.root);
+        let has_verify = verify_roots.contains(&r.root);
         if finished && has_verify && !matches!(app.checks.get(&r.session), Some(Check::Running { .. })) {
             if let Some(p) = &r.path {
                 to_check.push((r.session.clone(), r.root.clone(), p.clone()));
@@ -2676,7 +2912,8 @@ fn select_to(app: &mut App, idx: usize) {
     app.scroll = 0;
     app.diff_cursor = 0;
     app.scrollback = None;
-    load_detail(app);
+    // loaded once before the next frame — a burst of j/k costs one capture, not one each
+    app.detail_dirty = true;
 }
 
 fn load_detail(app: &mut App) {
@@ -4541,6 +4778,24 @@ mod tests {
         assert!(a >= 2, "untracked lines counted in stats, got {a}");
         assert!(full_diff(&dir, "main").contains("new.rs"), "untracked file shown in diff");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_file_diff_matches_git_shape() {
+        let d = new_file_diff("src/x.rs", "a\nb\n");
+        assert!(d.starts_with("diff --git a/src/x.rs b/src/x.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/x.rs\n"));
+        assert!(d.contains("@@ -0,0 +1,2 @@\n+a\n+b\n"));
+        assert!(!d.contains("No newline"));
+        assert!(new_file_diff("y", "only").ends_with("@@ -0,0 +1 @@\n+only\n\\ No newline at end of file\n"));
+    }
+
+    #[test]
+    fn only_plain_moves_batch() {
+        let k = |c, m| KeyEvent::new(c, m);
+        assert!(is_move_key(&k(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert!(is_move_key(&k(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(!is_move_key(&k(KeyCode::Down, KeyModifiers::SHIFT)), "Shift-↓ is the diff cursor");
+        assert!(!is_move_key(&k(KeyCode::Char('C'), KeyModifiers::SHIFT)));
     }
 
     #[test]
