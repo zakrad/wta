@@ -6,7 +6,7 @@ to drive them: define a goal and a machine-checkable “done,” and wta re-prom
 agent until it passes. Switch between agents and hand off context from one dashboard,
 and see what each run costs. A single ~1 MB Rust binary that runs in any terminal.
 
-![wta dashboard — an Instances sidebar of parallel AI agents beside a live, full-color agent Preview](assets/wta.png)
+![wta dashboard — the fleet table of 27 agents across every repo (state, model, base, tokens, burn, changes, age) with the selected agent's tokens-over-time chart below](assets/wta.png)
 
 ![license](https://img.shields.io/badge/license-MIT-blue) ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey) ![binary](https://img.shields.io/badge/single%20binary-~1%20MB-green)
 
