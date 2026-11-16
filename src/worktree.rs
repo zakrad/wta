@@ -651,7 +651,44 @@ pub fn fanout(name: &str, count: u32, base: Option<&str>, agent_args: &[String])
 /// agents can't self-grade). Names it `review-<builder>`, based on the builder's
 /// branch so it can see + test the changes. Optionally uses a different/cheaper
 /// agent CLI (`--by` / `WTA_REVIEW_AGENT_CMD`).
-pub fn review(builder: &str, by: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Result<()> {
+/// The prompt for `wta review --decisions`: audit the builder's choices (what it
+/// decided, dropped, added unasked, or misread) from its transcripts + the diff.
+/// `transcripts` is newest first; empty → the reviewer works from the diff alone.
+fn decisions_prompt(base: &str, transcripts: &[PathBuf]) -> String {
+    let sources = if transcripts.is_empty() {
+        "No transcript of the builder's conversation was found (a non-Claude agent, \
+         or the history was cleaned up). Work from the diff, the commit messages and \
+         `.wta/task.md` (if present) to infer what was asked."
+            .to_string()
+    } else {
+        let list: Vec<String> = transcripts.iter().take(5).map(|p| format!("  - {}", p.display())).collect();
+        format!(
+            "The builder's conversation transcripts (JSONL, newest first):\n{}\n\
+             They can be large — extract the user's requests instead of reading them \
+             whole, e.g. `jq -r 'select(.type==\"user\") | .message.content | if type==\"string\" \
+             then . else (.[]? | select(.type==\"text\") | .text) end' FILE`, and grep \
+             the assistant turns for the reasoning behind specific edits.",
+            list.join("\n")
+        )
+    };
+    format!(
+        "You are an INDEPENDENT reviewer auditing the DECISIONS another agent made on \
+         this branch versus `{base}`. Do NOT trust the author's claims or summaries.\n\n\
+         {sources}\n\n\
+         Compare what the user asked for with the diff (`git diff {base}...HEAD`) and \
+         `.wta/task.md` (if present). Report, citing file:line and the request it relates to:\n\
+         1. DECISIONS — non-obvious choices the agent made, the reasonable alternative, \
+         and why it matters.\n\
+         2. DROPPED — anything asked for that was skipped, descoped or only partly done.\n\
+         3. UNASKED — changes nobody requested (refactors, new deps, behavior changes).\n\
+         4. MISREAD — places where the agent seems to have misunderstood the request.\n\
+         Write \"none\" for an empty section. Then run the tests/build. End with a single \
+         line exactly: `REVIEW: PASS` or `REVIEW: FAIL` (FAIL if anything in 2–4 needs \
+         the user's attention)."
+    )
+}
+
+pub fn review(builder: &str, by: Option<&str>, model: Option<&str>, effort: Option<&str>, decisions: bool) -> Result<()> {
     let root = repo_root()?;
     let builder_branch = agent_branch(&root, builder);
     let exists = run_git(
@@ -666,13 +703,23 @@ pub fn review(builder: &str, by: Option<&str>, model: Option<&str>, effort: Opti
     let reviewer = format!("review-{builder}");
     let _ = rm(&reviewer, true); // clear any prior review so re-review is clean
 
-    let prompt = format!(
-        "You are an INDEPENDENT code reviewer. Another agent wrote the changes on \
-         this branch versus `{base}`. Do NOT trust the author's claims. Inspect the \
-         diff (`git diff {base}...HEAD`), run the tests/build, and confirm it does \
-         what was intended. Report concrete issues, then end with a single line \
-         exactly: `REVIEW: PASS` or `REVIEW: FAIL`."
-    );
+    let prompt = if decisions {
+        // The builder's own dir: an adopted agent lives where it was adopted from.
+        let repo = repo_id_of(&root);
+        let wt = match status::read_state(&repo, builder) {
+            Some(st) if st.adopted && !st.cwd.is_empty() => PathBuf::from(st.cwd),
+            _ => worktrees_dir(&root).join(builder),
+        };
+        decisions_prompt(&base, &crate::cost::transcripts_for(&wt))
+    } else {
+        format!(
+            "You are an INDEPENDENT code reviewer. Another agent wrote the changes on \
+             this branch versus `{base}`. Do NOT trust the author's claims. Inspect the \
+             diff (`git diff {base}...HEAD`), run the tests/build, and confirm it does \
+             what was intended. Report concrete issues, then end with a single line \
+             exactly: `REVIEW: PASS` or `REVIEW: FAIL`."
+        )
+    };
     // reviewer runs an (optionally cheaper / different) agent CLI. This is a
     // one-shot CLI process, so overriding its own WTA_AGENT_CMD env is safe.
     // `--by` is an explicit command override (top precedence); otherwise the reviewer
@@ -2818,6 +2865,21 @@ fn hooks_installed(path: &Path) -> bool {
 /// `wta doctor` — one-shot health check: confirm the fleet will run the agent /
 /// version / tmux / git you think it will. Read-only; no changelog feed, no self-
 /// update (mutating global binaries mid-fleet is a reproducibility hazard).
+/// `cleanupPeriodDays` from a Claude Code settings.json body, if set.
+fn cleanup_days(settings: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(settings).ok()?.get("cleanupPeriodDays")?.as_u64()
+}
+
+/// Doctor info line on transcript retention. Informational only — any value is a
+/// valid choice; agents idle longer than it just resume as a fresh session.
+fn history_line(days: Option<u64>) -> String {
+    let (d, src) = match days {
+        Some(d) => (d, "cleanupPeriodDays"),
+        None => (30, "cleanupPeriodDays not set → default"),
+    };
+    format!("{src} = {d} days — agents idle longer than that can't --continue; use `wta resume <task> --fresh`")
+}
+
 pub fn doctor() -> Result<()> {
     let ok = |b: bool| if b { "\u{2713}" } else { "\u{2717}" }; // ✓ / ✗
     println!("wta {}", env!("CARGO_PKG_VERSION"));
@@ -2874,6 +2936,14 @@ pub fn doctor() -> Result<()> {
     if !global_hooks {
         println!("  \u{2192} run `wta install-hooks --global` to enable (other engines use screen manifests anyway)");
     }
+
+    // Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30), and
+    // then `wta resume` can no longer continue that agent's conversation.
+    println!("\nclaude history (info)");
+    let days = dirs::home_dir()
+        .and_then(|h| std::fs::read_to_string(h.join(".claude/settings.json")).ok())
+        .and_then(|s| cleanup_days(&s));
+    println!("  \u{2013} {}", history_line(days));
 
     // Repo context.
     println!("\nrepo");
@@ -3168,6 +3238,28 @@ mod tests {
         ]);
         assert_eq!(a, vec![("aaa".into(), r.clone())]);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn doctor_reports_transcript_retention() {
+        assert_eq!(cleanup_days(r#"{"cleanupPeriodDays": 60, "x": 1}"#), Some(60));
+        assert_eq!(cleanup_days(r#"{"model": "opus"}"#), None);
+        assert_eq!(cleanup_days("not json"), None);
+        assert!(history_line(Some(60)).contains("= 60 days"));
+        assert!(history_line(None).contains("default = 30 days"));
+    }
+
+    #[test]
+    fn decisions_prompt_lists_transcripts_or_falls_back_to_diff() {
+        let ts: Vec<PathBuf> = (0..7).map(|i| PathBuf::from(format!("/t/{i}.jsonl"))).collect();
+        let p = decisions_prompt("main", &ts);
+        assert!(p.contains("/t/0.jsonl") && p.contains("/t/4.jsonl"));
+        assert!(!p.contains("/t/5.jsonl"), "caps the list at the 5 newest");
+        for s in ["DECISIONS", "DROPPED", "UNASKED", "MISREAD", "git diff main...HEAD", "REVIEW: PASS"] {
+            assert!(p.contains(s), "missing {s}");
+        }
+        let none = decisions_prompt("main", &[]);
+        assert!(none.contains("No transcript") && none.contains("REVIEW: FAIL"));
     }
 
     #[test]

@@ -337,6 +337,24 @@ pub fn for_worktree(wt: &Path) -> (Usage, Option<String>) {
     (total, last_model)
 }
 
+/// A directory's Claude Code transcript files, newest first. Empty when there are
+/// none (non-Claude agent, or Claude Code already cleaned them up).
+pub fn transcripts_for(wt: &Path) -> Vec<std::path::PathBuf> {
+    let Some(dir) = transcript_dir(wt) else { return Vec::new() };
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        .map(|p| (std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p))
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.into_iter().map(|(_, p)| p).collect()
+}
+
 /// `(transcript count, newest transcript mtime as unix secs)` for a directory's
 /// Claude Code history — lets the dashboard surface adoptable sessions per repo.
 pub fn sessions_for(wt: &Path) -> (usize, u64) {

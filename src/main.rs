@@ -115,8 +115,8 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Attach { task } => worktree::attach(&task)?,
         Command::Open { task } => worktree::open(&task)?,
-        Command::Review { builder, by, model, effort } => {
-            worktree::review(&builder, by.as_deref(), model.as_deref(), effort.as_deref())?
+        Command::Review { builder, by, model, effort, decisions } => {
+            worktree::review(&builder, by.as_deref(), model.as_deref(), effort.as_deref(), decisions)?
         }
         Command::Task { task, new, json } => worktree::task_cmd(task.as_deref(), new, json)?,
         Command::Init => worktree::init()?,

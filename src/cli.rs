@@ -154,8 +154,12 @@ pub enum Command {
         /// reasoning effort (claude --effort): low | medium | high | xhigh | max
         #[arg(long)]
         effort: Option<String>,
+        /// audit the builder's DECISIONS from its transcript + diff: choices made,
+        /// work dropped, changes nobody asked for, and misread requests
+        #[arg(long)]
+        decisions: bool,
     },
-    /// Show (or scaffold) an agent's checkable spec `.wta/task.md` (acceptance criteria + Final Summary)
+    ///Show (or scaffold) an agent's checkable spec `.wta/task.md` (acceptance criteria + Final Summary)
     Task {
         /// the agent (omit to use the current worktree — an agent can run it on itself)
         task: Option<String>,
