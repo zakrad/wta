@@ -337,6 +337,14 @@ wta review fix-auth --by "claude --model haiku"   # use a cheaper/different mode
 
 The reviewer gets a prompt to inspect the diff vs base, run the tests, and end
 with `REVIEW: PASS` or `REVIEW: FAIL`. Watch it in `wta dash` like any agent.
+
+**Decision audit** — `wta review fix-auth --decisions` points the reviewer at the
+builder's Claude Code transcripts as well as the diff, and asks it to report four
+things: **DECISIONS** (non-obvious choices and the alternative), **DROPPED** (work
+asked for but skipped or descoped), **UNASKED** (changes nobody requested) and
+**MISREAD** (requests it misunderstood). It ends `REVIEW: FAIL` if any of the last
+three need you. With no transcript (another agent CLI, or history Claude Code
+already deleted) it works from the diff, commits and `.wta/task.md`.
 Default reviewer CLI: `WTA_REVIEW_AGENT_CMD`, else `WTA_AGENT_CMD`.
 
 ---
@@ -709,6 +717,11 @@ wta rm fix-auth --force # also discard uncommitted work / an unmerged branch
 - **Persistence** — sessions survive closing the terminal and laptop sleep. A
   reboot ends them, but the worktrees remain; `Enter` (or `resume`) re-spawns and
   `--continue`s the previous conversation.
+- **Lost history** — Claude Code deletes transcripts older than `cleanupPeriodDays`
+  (default **30 days**). After that, `claude --continue` has nothing to continue; use
+  `wta resume <task> --fresh` (or `f` in the dashboard) for a new conversation in the
+  same worktree. Files, branch and commits are never affected — only the conversation
+  is gone. `wta doctor` shows the value.
 - **Kill safety** — `D` in the dash confirms, and if there's committed-but-unpushed
   work it warns before discarding. On a dirty worktree it asks a second time.
 - **Merged** — once an agent's branch has landed in the base branch it shows `✓
@@ -978,6 +991,9 @@ It prints, with ✓ / ✗ marks:
 - **claude hooks** — whether `wta status` hooks are wired globally / in this repo
   (optional: they make Claude's `▲ needs-input` instant; other engines use screen
   manifests regardless).
+- **claude history** (info) — `cleanupPeriodDays` from `~/.claude/settings.json`
+  (unset = Claude Code's 30-day default). Agents idle longer than that can't
+  `--continue`; resume them with `--fresh`.
 - **repo** — the worktree dir, which context files are present to inject, and
   whether a `.wta` verify suite exists.
 - **config** — the env that steers all of the above (`WTA_AGENT_CMD`, tmux server,
