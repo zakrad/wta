@@ -4,6 +4,17 @@ All notable changes to **wta** are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.4] — 2026-11-16
+
+### Added
+- **`wta review <builder> --decisions`** — a decision audit. The reviewer reads the
+  builder's transcripts and the diff, and reports the choices it made, work it
+  dropped, changes nobody asked for, and requests it misread. It falls back to the
+  diff when there is no transcript.
+- **`wta doctor` shows transcript retention** — Claude Code's `cleanupPeriodDays`
+  (default 30 days). Agents idle longer than that cannot `--continue`; use
+  `wta resume <task> --fresh`.
+
 ## [0.4.3] — 2026-11-09
 
 ### Fixed
